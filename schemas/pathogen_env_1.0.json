@@ -1,0 +1,69 @@
+{
+  "schema_name": "Pathogen.env.1.0",
+  "description": "Pathogen: environmental, food or other; version 1.0",
+  "version": "1.0",
+  "fields": [
+    {
+      "standard_key": "collection_date",
+      "mandatory": true,
+      "parser": "date_engine",
+      "synonyms": [
+        "date", "sampling_date", "collection date", "year",
+        "collected_on", "sampling_time", "time_of_collection"
+      ]
+    },
+    {
+      "standard_key": "geo_loc_name",
+      "mandatory": true,
+      "parser": "geo_engine",
+      "synonyms": [
+        "country", "location", "geographic location",
+        "geo_loc", "region", "origin", "sampling_location"
+      ]
+    },
+    {
+      "standard_key": "isolation_source",
+      "mandatory": true,
+      "parser": "one_health_engine",
+      "synonyms": [
+        "source", "source_material", "sample_type",
+        "environmental_source", "substrate", "matrix"
+      ]
+    },
+    {
+      "standard_key": "env_broad_scale",
+      "mandatory": true,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "biome", "environment_type", "broad_environment",
+        "ecosystem", "habitat"
+      ]
+    },
+    {
+      "standard_key": "env_local_scale",
+      "mandatory": true,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "local_environment", "microhabitat", "env_feature",
+        "local_scale", "environmental_feature"
+      ]
+    },
+    {
+      "standard_key": "env_medium",
+      "mandatory": true,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "medium", "growth_medium", "substrate_type",
+        "environmental_material", "material"
+      ]
+    },
+    {
+      "standard_key": "isolate",
+      "mandatory": true,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "strain", "isolate_name", "sample_name", "id"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema_name": "Pathogen.cl.1.0",
+  "description": "Pathogen: clinical or host-associated template",
+  "version": "1.0",
+  "fields": [
+    {
+      "standard_key": "collection_date",
+      "mandatory": true,
+      "parser": "date_engine",
+      "synonyms": [
+        "date", "sampling_date", "collection date", "year",
+        "collected_on", "sampling_time", "time_of_collection"
+      ]
+    },
+    {
+      "standard_key": "geo_loc_name",
+      "mandatory": true,
+      "parser": "geo_engine",
+      "synonyms": [
+        "country", "location", "geographic location",
+        "geo_loc", "region", "origin", "place_of_isolation"
+      ]
+    },
+    {
+      "standard_key": "host",
+      "mandatory": true,
+      "parser": "one_health_engine",
+      "synonyms": [
+        "host_species", "host animal", "isolated from",
+        "source_host", "patient"
+      ]
+    },
+    {
+      "standard_key": "isolation_source",
+      "mandatory": true,
+      "parser": "one_health_engine",
+      "synonyms": [
+        "source", "source_material", "sample_type",
+        "specimen_source", "tissue", "clinical_sample"
+      ]
+    },
+    {
+      "standard_key": "host_disease",
+      "mandatory": true,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "disease", "clinical_condition", "diagnosis",
+        "illness", "symptom"
+      ]
+    },
+    {
+      "standard_key": "isolate",
+      "mandatory": true,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "strain", "isolate_name", "sample_name", "id"
+      ]
+    }
+  ]
+}
