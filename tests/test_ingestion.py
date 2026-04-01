@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from src.biometaharmonizer.ingestion import (
+from biometaharmonizer.ingestion import (
     _load_ids,
     _classify_ids,
     _parse_biosample_xml,
@@ -157,7 +157,7 @@ class TestParseBiosampleXml:
 
 class TestIngest:
 
-    @patch("src.biometaharmonizer.ingestion._fetch_biosample_metadata")
+    @patch("biometaharmonizer.ingestion._fetch_biosample_metadata")
     def test_samn_list_bypasses_resolution(self, mock_fetch, tmp_samn_file):
         mock_fetch.return_value = pd.DataFrame({"biosample_accession": ["SAMN12345678"]})
         result = ingest(tmp_samn_file)
@@ -165,16 +165,16 @@ class TestIngest:
         called_ids = mock_fetch.call_args[0][0]
         assert "SAMN12345678" in called_ids
 
-    @patch("src.biometaharmonizer.ingestion._fetch_biosample_metadata")
-    @patch("src.biometaharmonizer.ingestion._resolve_assembly_to_biosample")
+    @patch("biometaharmonizer.ingestion._fetch_biosample_metadata")
+    @patch("biometaharmonizer.ingestion._resolve_assembly_to_biosample")
     def test_gcx_list_triggers_resolution(self, mock_resolve, mock_fetch, tmp_gcx_file):
         mock_resolve.return_value = ["SAMN12345678", "SAMN87654321", "SAMN11111111"]
         mock_fetch.return_value = pd.DataFrame({"biosample_accession": ["SAMN12345678"]})
         ingest(tmp_gcx_file)
         mock_resolve.assert_called_once()
 
-    @patch("src.biometaharmonizer.ingestion._fetch_biosample_metadata")
-    @patch("src.biometaharmonizer.ingestion._resolve_assembly_to_biosample")
+    @patch("biometaharmonizer.ingestion._fetch_biosample_metadata")
+    @patch("biometaharmonizer.ingestion._resolve_assembly_to_biosample")
     def test_mixed_file_routes_both(self, mock_resolve, mock_fetch, tmp_mixed_file):
         mock_resolve.return_value = ["SAMN99999999"]
         mock_fetch.return_value = pd.DataFrame({"biosample_accession": ["SAMN12345678"]})
@@ -182,8 +182,8 @@ class TestIngest:
         mock_resolve.assert_called_once()
         mock_fetch.assert_called_once()
 
-    @patch("src.biometaharmonizer.ingestion._fetch_biosample_metadata")
-    @patch("src.biometaharmonizer.ingestion._resolve_assembly_to_biosample")
+    @patch("biometaharmonizer.ingestion._fetch_biosample_metadata")
+    @patch("biometaharmonizer.ingestion._resolve_assembly_to_biosample")
     def test_unrecognized_ids_trigger_warning(self, mock_resolve, mock_fetch, tmp_mixed_file, capsys):
         mock_resolve.return_value = ["SAMN99999999"]
         mock_fetch.return_value = pd.DataFrame()
@@ -195,6 +195,6 @@ class TestIngest:
     def test_all_unrecognized_raises(self, tmp_path):
         f = tmp_path / "junk.txt"
         f.write_text("JUNK1\nJUNK2\n")
-        with patch("src.biometaharmonizer.ingestion._resolve_assembly_to_biosample", return_value=[]):
+        with patch("biometaharmonizer.ingestion._resolve_assembly_to_biosample", return_value=[]):
             with pytest.raises(ValueError, match="No valid BioSample IDs"):
                 ingest(f)

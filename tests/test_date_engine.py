@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from src.biometaharmonizer.date_engine import DateEngine
+from biometaharmonizer.date_engine import DateEngine
 
 
 @pytest.fixture
