@@ -94,6 +94,32 @@ class TestCountryRegionLocality:
         assert result["ISO3166"][0] == "CN"
 
 
+# ─── Null string guard (real NCBI values) ───────────────────────────────────────
+
+class TestNullStrings:
+
+    def test_not_collected(self, engine):
+        s = pd.Series(["not collected"])
+        result = engine.parse(s)
+        assert pd.isna(result["Country"][0])
+        assert pd.isna(result["ISO3166"][0])
+
+    def test_not_applicable(self, engine):
+        s = pd.Series(["not applicable"])
+        result = engine.parse(s)
+        assert pd.isna(result["Country"][0])
+
+    def test_missing_string(self, engine):
+        s = pd.Series(["missing"])
+        result = engine.parse(s)
+        assert pd.isna(result["Country"][0])
+
+    def test_unknown_string(self, engine):
+        s = pd.Series(["unknown"])
+        result = engine.parse(s)
+        assert pd.isna(result["Country"][0])
+
+
 # ─── Null and edge cases ─────────────────────────────────────────────────────────
 
 class TestNullAndEdgeCases:
@@ -145,3 +171,11 @@ class TestMixedRealSeries:
         assert result["Region"][4] == "California"
         assert result["Region"][5] == "Calnali"
         assert result["Locality"][5] == "Hidalgo"
+
+    def test_null_strings_in_real_data(self, engine):
+        s = pd.Series(["not collected", "not applicable", "missing", "USA: California"])
+        result = engine.parse(s)
+        assert pd.isna(result["Country"][0])
+        assert pd.isna(result["Country"][1])
+        assert pd.isna(result["Country"][2])
+        assert result["Country"][3] == "USA"

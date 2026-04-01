@@ -12,6 +12,11 @@ class GeoEngine:
     Expected input format: 'Country: Region, Locality'
     """
 
+    NULL_PATTERNS = re.compile(
+        r"^(missing|unknown|n/?a|not provided|not collected|not applicable|na|none|--)$",
+        re.IGNORECASE
+    )
+
     def parse(self, series):
         results = series.apply(self._parse_single)
         return pd.DataFrame(results.tolist(), index=series.index)
@@ -21,6 +26,8 @@ class GeoEngine:
         if pd.isna(value):
             return empty
         value = str(value).strip()
+        if self.NULL_PATTERNS.match(value):
+            return empty
         country_str, region_str, locality_str = self._split_geo_string(value)
         iso_code = self._resolve_iso(country_str)
         return {

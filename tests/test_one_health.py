@@ -60,8 +60,10 @@ class TestAnimal:
         assert clf._classify_single("chicken gut") == "Animal"
 
     def test_wild_caught_resolves_before_lab(self, clf):
-        result = clf._classify_single("wild caught insect")
-        assert result == "Animal"
+        assert clf._classify_single("wild caught insect") == "Animal"
+
+    def test_carcass(self, clf):
+        assert clf._classify_single("carcass") == "Animal"
 
 
 # ─── Food category ───────────────────────────────────────────────────────────────
@@ -76,6 +78,30 @@ class TestFood:
 
     def test_meat(self, clf):
         assert clf._classify_single("raw meat") == "Food"
+
+    def test_real_bcereus_ice_cream(self, clf):
+        assert clf._classify_single("ice cream") == "Food"
+
+    def test_real_bcereus_pasta(self, clf):
+        assert clf._classify_single("Pasta") == "Food"
+
+    def test_real_bcereus_chinese_sausage(self, clf):
+        assert clf._classify_single("Chinese sausage") == "Food"
+
+    def test_real_bcereus_grain_products(self, clf):
+        assert clf._classify_single("grain products") == "Food"
+
+    def test_real_bcereus_core(self, clf):
+        assert clf._classify_single("core") == "Food"
+
+    def test_real_bcereus_leaf(self, clf):
+        assert clf._classify_single("leaf") == "Food"
+
+    def test_real_bcereus_root(self, clf):
+        assert clf._classify_single("root") == "Food"
+
+    def test_vitamin_b2_feed_additive(self, clf):
+        assert clf._classify_single("Vitamin B2 feed additive") == "Food"
 
 
 # ─── Environmental category ───────────────────────────────────────────────────
@@ -94,6 +120,9 @@ class TestEnvironmental:
     def test_biofilm(self, clf):
         assert clf._classify_single("surface biofilm") == "Environmental"
 
+    def test_real_bcereus_farm(self, clf):
+        assert clf._classify_single("farm") == "Environmental"
+
 
 # ─── Lab category ────────────────────────────────────────────────────────────────
 
@@ -108,16 +137,37 @@ class TestLab:
     def test_laboratory_culture(self, clf):
         assert clf._classify_single("laboratory culture") == "Lab"
 
+    def test_real_bcereus_dna(self, clf):
+        assert clf._classify_single("DNA") == "Lab"
 
-# ─── Null and Unclassified ──────────────────────────────────────────────────────
+    def test_real_bcereus_whole_organism(self, clf):
+        assert clf._classify_single("whole organism") == "Lab"
+
+    def test_in_vitro(self, clf):
+        assert clf._classify_single("in vitro") == "Lab"
+
+
+# ─── Null strings now return NaN, not Unclassified ───────────────────────────
 
 class TestNullAndUnclassified:
 
     def test_nan_returns_nan(self, clf):
         assert pd.isna(clf._classify_single(np.nan))
 
+    def test_not_collected_returns_nan(self, clf):
+        assert pd.isna(clf._classify_single("not collected"))
+
+    def test_not_applicable_returns_nan(self, clf):
+        assert pd.isna(clf._classify_single("not applicable"))
+
+    def test_missing_returns_nan(self, clf):
+        assert pd.isna(clf._classify_single("missing"))
+
+    def test_unknown_returns_nan(self, clf):
+        assert pd.isna(clf._classify_single("unknown"))
+
     def test_truly_ambiguous_returns_unclassified(self, clf):
-        assert clf._classify_single("unknown source") == "Unclassified"
+        assert clf._classify_single("completely_novel_source_xyz") == "Unclassified"
 
     def test_empty_string_returns_unclassified(self, clf):
         assert clf._classify_single("") == "Unclassified"
@@ -139,6 +189,16 @@ class TestClassifySeries:
         assert result[1] == "Human"
         assert result[2] == "Human"
         assert result[3] == "Animal"
+
+    def test_real_bcereus_new_food_terms(self, clf):
+        s = pd.Series(["core", "leaf", "grain products", "ice cream", "Chinese sausage", "Pasta"])
+        result = clf.classify(s)
+        assert all(result == "Food")
+
+    def test_null_strings_return_nan_not_unclassified(self, clf):
+        s = pd.Series(["not collected", "not applicable", "missing", "unknown"])
+        result = clf.classify(s)
+        assert all(pd.isna(result))
 
     def test_output_is_series(self, clf):
         s = pd.Series(["blood", "soil", np.nan])
