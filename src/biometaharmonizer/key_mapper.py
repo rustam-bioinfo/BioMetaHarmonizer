@@ -58,33 +58,32 @@ class KeyMapper:
         """
         When multiple raw columns rename to the same standard key,
         collapse them into one column using first-non-null coalescing.
-        Unrecognized columns are passed through unchanged.
+        Handles duplicate column names safely without positional indexing.
         """
-        seen = {}
+        if not df.columns.duplicated().any():
+            return df
+
+        seen = set()
+        output_cols = {}
+        duped = []
+
         for col in df.columns:
             if col not in seen:
-                seen[col] = [col]
-            else:
-                seen[col].append(col)
+                seen.add(col)
+                block = df[col]
+                if isinstance(block, pd.DataFrame):
+                    duped.append(col)
+                    coalesced = block.iloc[:, 0]
+                    for i in range(1, block.shape[1]):
+                        coalesced = coalesced.combine_first(block.iloc[:, i])
+                    output_cols[col] = coalesced
+                else:
+                    output_cols[col] = block
 
-        dedup_cols = {}
-        for standard_key, occurrences in seen.items():
-            if len(occurrences) == 1:
-                dedup_cols[standard_key] = df[standard_key]
-            else:
-                coalesced = df.iloc[:, [df.columns.get_loc(c) for c in
-                    [standard_key] * len(occurrences)]].bfill(axis=1).iloc[:, 0]
-                dedup_cols[standard_key] = coalesced
-
-        cols_in_order = list(dict.fromkeys(df.columns))
-        result = pd.DataFrame(
-            {col: dedup_cols[col] for col in cols_in_order},
-            index=df.index
-        )
-        duped = [k for k, v in seen.items() if len(v) > 1]
         if duped:
             print(f"[INFO] Coalesced duplicate columns: {duped}")
-        return result
+
+        return pd.DataFrame(output_cols, index=df.index)
 
     def _warn_missing_mandatory(self, df):
         mandatory = [f["standard_key"] for f in self.fields if f["mandatory"]]
