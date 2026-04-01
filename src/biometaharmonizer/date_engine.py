@@ -19,12 +19,16 @@ class DateEngine:
     YEAR_MONTH = re.compile(r"^(\d{4})[-/](\d{1,2})$|^([A-Za-z]{3,9})[-/\s](\d{4})$")
 
     def parse(self, series):
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
         return series.apply(self._parse_single)
 
     def _parse_single(self, value):
-        if pd.isna(value):
+        if not isinstance(value, str) and pd.isna(value):
             return np.nan
         value = str(value).strip()
+        if not value:
+            return np.nan
         if self.NULL_PATTERNS.match(value):
             return np.nan
         if self.YEAR_ONLY.match(value):

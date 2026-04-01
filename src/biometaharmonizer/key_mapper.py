@@ -9,6 +9,9 @@ class KeyMapper:
     Module 2: Key Harmonization.
     Loads a JSON schema and maps raw DataFrame column names
     to standard NCBI keys using exact matching and fuzzy fallback.
+
+    When multiple raw columns map to the same standard key,
+    they are coalesced in order (first non-null value wins).
     """
 
     FUZZY_THRESHOLD = 85
@@ -37,16 +40,51 @@ class KeyMapper:
             if col_lower in self.lookup:
                 rename_map[col] = self.lookup[col_lower]
             else:
-                match, score, _ = process.extractOne(
+                result = process.extractOne(
                     col_lower,
                     self.lookup.keys(),
                     scorer=fuzz.token_sort_ratio
                 )
-                if score >= self.FUZZY_THRESHOLD:
-                    rename_map[col] = self.lookup[match]
+                if result is not None:
+                    match, score, _ = result
+                    if score >= self.FUZZY_THRESHOLD:
+                        rename_map[col] = self.lookup[match]
         df = df.rename(columns=rename_map)
+        df = self._coalesce_duplicates(df)
         self._warn_missing_mandatory(df)
         return df
+
+    def _coalesce_duplicates(self, df):
+        """
+        When multiple raw columns rename to the same standard key,
+        collapse them into one column using first-non-null coalescing.
+        Unrecognized columns are passed through unchanged.
+        """
+        seen = {}
+        for col in df.columns:
+            if col not in seen:
+                seen[col] = [col]
+            else:
+                seen[col].append(col)
+
+        dedup_cols = {}
+        for standard_key, occurrences in seen.items():
+            if len(occurrences) == 1:
+                dedup_cols[standard_key] = df[standard_key]
+            else:
+                coalesced = df.iloc[:, [df.columns.get_loc(c) for c in
+                    [standard_key] * len(occurrences)]].bfill(axis=1).iloc[:, 0]
+                dedup_cols[standard_key] = coalesced
+
+        cols_in_order = list(dict.fromkeys(df.columns))
+        result = pd.DataFrame(
+            {col: dedup_cols[col] for col in cols_in_order},
+            index=df.index
+        )
+        duped = [k for k, v in seen.items() if len(v) > 1]
+        if duped:
+            print(f"[INFO] Coalesced duplicate columns: {duped}")
+        return result
 
     def _warn_missing_mandatory(self, df):
         mandatory = [f["standard_key"] for f in self.fields if f["mandatory"]]
