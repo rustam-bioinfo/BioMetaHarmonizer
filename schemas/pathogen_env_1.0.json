@@ -9,7 +9,8 @@
       "parser": "date_engine",
       "synonyms": [
         "date", "sampling_date", "collection date", "year",
-        "collected_on", "sampling_time", "time_of_collection"
+        "collected_on", "sampling_time", "time_of_collection",
+        "collected_by"
       ]
     },
     {
@@ -18,7 +19,8 @@
       "parser": "geo_engine",
       "synonyms": [
         "country", "location", "geographic location",
-        "geo_loc", "region", "origin", "sampling_location"
+        "geo_loc", "region", "origin", "sampling_location",
+        "lat_lon"
       ]
     },
     {
@@ -27,7 +29,9 @@
       "parser": "one_health_engine",
       "synonyms": [
         "source", "source_material", "sample_type",
-        "environmental_source", "substrate", "matrix"
+        "environmental_source", "substrate", "matrix",
+        "source_name", "analyte_type", "tissue",
+        "molecular_data_type"
       ]
     },
     {
@@ -62,7 +66,9 @@
       "mandatory": true,
       "parser": "string_cleaner",
       "synonyms": [
-        "strain", "isolate_name", "sample_name", "id"
+        "strain", "isolate_name", "sample_name", "id",
+        "submitted_sample_id", "biospecimen_repository_sample_id",
+        "gap_sample_id"
       ]
     }
   ]

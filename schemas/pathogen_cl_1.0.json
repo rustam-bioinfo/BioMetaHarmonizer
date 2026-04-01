@@ -9,7 +9,8 @@
       "parser": "date_engine",
       "synonyms": [
         "date", "sampling_date", "collection date", "year",
-        "collected_on", "sampling_time", "time_of_collection"
+        "collected_on", "sampling_time", "time_of_collection",
+        "collected_by"
       ]
     },
     {
@@ -18,7 +19,8 @@
       "parser": "geo_engine",
       "synonyms": [
         "country", "location", "geographic location",
-        "geo_loc", "region", "origin", "place_of_isolation"
+        "geo_loc", "region", "origin", "place_of_isolation",
+        "lat_lon"
       ]
     },
     {
@@ -27,7 +29,7 @@
       "parser": "one_health_engine",
       "synonyms": [
         "host_species", "host animal", "isolated from",
-        "source_host", "patient"
+        "source_host", "patient", "patient id"
       ]
     },
     {
@@ -36,7 +38,9 @@
       "parser": "one_health_engine",
       "synonyms": [
         "source", "source_material", "sample_type",
-        "specimen_source", "tissue", "clinical_sample"
+        "specimen_source", "tissue", "clinical_sample",
+        "source_name", "analyte_type", "cell_type",
+        "histological_type", "molecular_data_type"
       ]
     },
     {
@@ -45,7 +49,7 @@
       "parser": "string_cleaner",
       "synonyms": [
         "disease", "clinical_condition", "diagnosis",
-        "illness", "symptom"
+        "illness", "symptom", "neoplastic", "is_tumor"
       ]
     },
     {
@@ -53,7 +57,27 @@
       "mandatory": true,
       "parser": "string_cleaner",
       "synonyms": [
-        "strain", "isolate_name", "sample_name", "id"
+        "strain", "isolate_name", "sample_name", "id",
+        "submitted_sample_id", "biospecimen_repository_sample_id",
+        "gap_sample_id", "submitted_subject_id", "gap_subject_id",
+        "plate id", "well"
+      ]
+    },
+    {
+      "standard_key": "sex",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "gender", "host_sex", "biological_sex"
+      ]
+    },
+    {
+      "standard_key": "genotype",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "genotype_name", "genetic_background", "cultivar",
+        "selection", "study_design"
       ]
     }
   ]
