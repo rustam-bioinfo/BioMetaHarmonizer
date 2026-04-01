@@ -16,31 +16,35 @@ class OneHealthClassifier:
     Priority order matters: Animal is checked before Lab so that
     'laboratory reared workers from wild caught queens' resolves
     to Animal rather than Lab.
+
+    Word boundaries are applied to all short Animal tokens to prevent
+    substring false positives, e.g. 'rat' inside 'laboratory',
+    'ant' inside 'plant', 'cat' inside 'cattle'.
     """
 
     TIER1_PATTERNS = {
         "Human": re.compile(
             r"human|patient|clinical|homo sapiens|person|"
             r"blood|urine|sputum|wound|stool|feces|fecal|"
-            r"dental|plaque|biopsy|serum|plasma|csf|cerebrospinal|"
+            r"dental|plaque|biopsy|serum|plasma|\bcsf\b|cerebrospinal|"
             r"nasopharyngeal|throat|swab|abscess|hospital",
             re.IGNORECASE
         ),
         "Animal": re.compile(
-            r"bovine|cattle|pig|swine|poultry|chicken|sheep|horse|"
-            r"dog|cat|rodent|mouse|rat|bird|fish|animal|"
-            r"insect|bee|ant|wasp|queen|worker|colony|larva|larvae|"
+            r"bovine|cattle|\bpig\b|swine|poultry|chicken|sheep|horse|"
+            r"\bdog\b|\bcat\b|rodent|\bmouse\b|\brat\b|\bbird\b|\bfish\b|animal|"
+            r"insect|\bbee\b|\bant\b|wasp|queen|\bworker\b|colony|\blarva\b|larvae|"
             r"wild.caught|reared|invertebrate|arthropod",
             re.IGNORECASE
         ),
         "Food": re.compile(
-            r"food|meat|milk|cheese|vegetable|fruit|poultry product|"
-            r"dairy|egg|seafood|water supply|spice|grain|cereal|"
+            r"food|\bmeat\b|\bmilk\b|cheese|vegetable|fruit|poultry product|"
+            r"dairy|\begg\b|seafood|water supply|spice|grain|cereal|"
             r"flour|bread|fermented|beverage",
             re.IGNORECASE
         ),
         "Environmental": re.compile(
-            r"soil|water|river|lake|sewage|wastewater|air|plant|"
+            r"soil|\bwater\b|river|lake|sewage|wastewater|\bair\b|\bplant\b|"
             r"rhizosphere|sediment|environment|dust|biofilm|"
             r"compost|manure|surface|outdoor|indoor|cave|sand",
             re.IGNORECASE
