@@ -20,11 +20,11 @@ Copy and paste the block below at the start of any new AI-assisted session to re
 - **Dependencies:** `pandas`, `numpy`, `rapidFuzz`, `pycountry`, `python-dateutil`, `biopython`, `requests`.
 
 ### 3. Module Tracking
-- [x] **Module 1 (Ingestion):** `src/biometaharmonizer/ingestion.py` — COMPLETE. 22/22 unit tests passing. Supports GCF_/GCA_ and SAMN_ inputs, assembly_summary flat-file resolution, Entrez batch fetcher, BioSample XML parser.
-- [x] **Module 2 (Key Mapper):** `src/biometaharmonizer/key_mapper.py` — COMPLETE. 24/24 unit tests passing. Exact matching, fuzzy matching (RapidFuzz), parser routing, mandatory field warnings. Synonyms grounded in real B. cereus NCBI BioSample columns.
-- [x] **Module 3 (Date Engine):** `src/biometaharmonizer/date_engine.py` — COMPLETE. 22/22 unit tests passing. Handles year-only, year-month, full ISO, slash separators, month-name formats, all NCBI null strings. Validated against real B. cereus NCBI dates.
-- [x] **Module 4 (Geo Engine):** `src/biometaharmonizer/geo_engine.py` — COMPLETE. 18/18 unit tests passing. Handles country-only, country+region, country+region+locality. ISO 3166 alpha-2 resolution via pycountry. Validated against real B. cereus NCBI geo strings.
-- [ ] **Module 5 (One Health):** `src/biometaharmonizer/one_health.py` — Skeleton complete. Tier 1 Regex done. Tests pending. NLP Tier 2 pending.
+- [x] **Module 1 (Ingestion):** `src/biometaharmonizer/ingestion.py` — COMPLETE. 22/22 unit tests passing.
+- [x] **Module 2 (Key Mapper):** `src/biometaharmonizer/key_mapper.py` — COMPLETE. 24/24 unit tests passing.
+- [x] **Module 3 (Date Engine):** `src/biometaharmonizer/date_engine.py` — COMPLETE. 22/22 unit tests passing.
+- [x] **Module 4 (Geo Engine):** `src/biometaharmonizer/geo_engine.py` — COMPLETE. 18/18 unit tests passing.
+- [x] **Module 5 (One Health):** `src/biometaharmonizer/one_health.py` — COMPLETE. 26/26 unit tests passing. Tier 1 Regex with word-boundary fixes. Validated on real B. cereus NCBI data.
 
 ### 4. Schemas
 - `schemas/pathogen_cl_1.0.json` — Complete. Synonyms expanded from real NCBI data.
@@ -32,11 +32,16 @@ Copy and paste the block below at the start of any new AI-assisted session to re
 
 ### 5. Test Infrastructure
 - `conftest.py` at repo root injects `src/` into `sys.path` for pytest.
-- Run tests in Colab: `!pytest tests/ -v --tb=short`
-- Current total: **84/84 tests passing**.
+- Run all tests: `!pytest tests/ -v --tb=short`
+- Run with coverage: `!pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing`
+- **Current total: 114/114 tests passing.**
 
-### 6. Next Step
-Module 5 (One Health Classifier): write `tests/test_one_health.py` grounded in real B. cereus isolation_source values (`dental plaque`, `Human blood`, `hospital`, `Laboratory reared workers from wild caught queens`).
+### 6. Next Steps (in priority order)
+1. **End-to-end integration test** — `tests/test_pipeline.py`: run the full Ingestion -> KeyMapper -> DateEngine + GeoEngine + OneHealth pipeline on a real batch of ~50 B. cereus BioSamples and assert output shape and column completeness.
+2. **Output module** — `src/biometaharmonizer/output.py`: write harmonized DataFrame to CSV and optionally to an Excel file with per-column parse reports.
+3. **CLI entrypoint** — `pyproject.toml` script: `biometaharmonizer run --input ids.txt --schema pathogen_cl --email user@email.com --output harmonized.csv`.
+4. **PyPI packaging** — finalize `pyproject.toml`, `MANIFEST.in`, `README.md` with usage examples for the manuscript.
+5. **Manuscript benchmarking** — run on full 6,618 B. cereus dataset, measure parse rates per field for the Application Note results section.
 
 ### 7. Initialization Command
 Please acknowledge receipt of this protocol. Then summarize the current architectural approach in one sentence. Finally, ask me which module or file we are working on today.
