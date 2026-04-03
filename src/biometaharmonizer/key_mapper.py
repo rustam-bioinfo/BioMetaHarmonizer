@@ -5,7 +5,6 @@ from pathlib import Path
 from rapidfuzz import process, fuzz
 
 
-# Structural columns always retained regardless of fill rate or name pattern.
 _PROTECTED_COLUMNS = frozenset([
     "biosample_accession", "biosample_id", "sra_accession",
     "bioproject_accession", "sample_name_id", "submission_date",
@@ -14,35 +13,45 @@ _PROTECTED_COLUMNS = frozenset([
     "taxonomy_id", "taxonomy_name", "organism_name",
 ])
 
-# Regex: two or more Title-Case words separated by spaces (person names).
-# Matches 'Chao Pan', 'Rajeev K. Varshney', 'XianKai Liu', etc.
 _PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
+
+_DEFAULT_SCHEMA = Path(__file__).parent.parent.parent / "schemas" / "unified.json"
+_DEFAULT_MANDATORY = Path(__file__).parent.parent.parent / "schemas" / "mandatory_fields.json"
 
 
 class KeyMapper:
     """
     Module 2: Key Harmonization.
-    Loads a JSON schema and maps raw DataFrame column names
+
+    Loads a unified JSON schema and maps raw DataFrame column names
     to standard NCBI keys using exact matching and fuzzy fallback.
 
-    When multiple raw columns map to the same standard key,
-    they are coalesced in order (first non-null value wins).
+    Mandatory field validation is per-package: each record's ncbi_package
+    value is looked up in mandatory_fields.json and fill rates are reported
+    per package rather than as a single global check.
 
-    map_columns() also optionally drops:
-      - Sparse columns (non-null count below drop_sparse threshold)
-      - Junk columns (person names accidentally used as attribute keys)
+    When multiple raw columns map to the same standard key,
+    they are coalesced (first non-null value wins).
     """
 
     FUZZY_THRESHOLD = 85
 
-    def __init__(self, schema_path):
-        schema_path = Path(schema_path)
+    def __init__(self, schema_path=None, mandatory_path=None):
+        schema_path = Path(schema_path) if schema_path else _DEFAULT_SCHEMA
         if not schema_path.exists():
             raise FileNotFoundError(f"Schema not found: {schema_path}")
         with open(schema_path, "r") as f:
             self.schema = json.load(f)
         self.fields = self.schema["fields"]
         self._build_lookup()
+
+        mandatory_path = Path(mandatory_path) if mandatory_path else _DEFAULT_MANDATORY
+        if mandatory_path.exists():
+            with open(mandatory_path, "r") as f:
+                raw = json.load(f)
+            self.mandatory = {k: v for k, v in raw.items() if not k.startswith("_")}
+        else:
+            self.mandatory = {"default": ["collection_date", "geo_loc_name", "isolate"]}
 
     def _build_lookup(self):
         self.lookup = {}
@@ -54,21 +63,19 @@ class KeyMapper:
 
     def map_columns(self, df, drop_sparse=5, drop_junk=True):
         """
-        Harmonize column names, coalesce duplicates, warn on missing
-        mandatory fields, and optionally clean junk/sparse columns.
+        Harmonize column names, coalesce duplicates, clean junk/sparse
+        columns, and report per-package mandatory field fill rates.
 
         Parameters
         ----------
         df : pd.DataFrame
             Raw ingested DataFrame.
         drop_sparse : int, default 5
-            Drop columns where non-null count < drop_sparse.
-            Set to 0 to disable. Protected structural columns are
-            never dropped regardless of fill rate.
+            Drop columns with fewer than drop_sparse non-null values.
+            Set to 0 to disable. Protected structural columns are never dropped.
         drop_junk : bool, default True
-            Drop columns whose names look like person names or other
-            submitter artifacts (e.g. 'Chao Pan', 'Urmi Halder').
-            Protected structural columns are never dropped.
+            Drop columns whose names look like person names or submitter
+            artifacts. Protected structural columns are never dropped.
         """
         rename_map = {}
         for col in df.columns:
@@ -99,10 +106,6 @@ class KeyMapper:
         return df
 
     def _drop_junk_columns(self, df):
-        """
-        Drop columns whose names match person-name patterns or other
-        known submitter artifact patterns. Protected columns are kept.
-        """
         junk = [
             col for col in df.columns
             if col not in _PROTECTED_COLUMNS
@@ -114,10 +117,6 @@ class KeyMapper:
         return df
 
     def _drop_sparse_columns(self, df, threshold):
-        """
-        Drop columns with fewer than `threshold` non-null values.
-        Protected structural columns are always retained.
-        """
         non_null = df.notna().sum()
         sparse = [
             col for col in df.columns
@@ -125,8 +124,7 @@ class KeyMapper:
             and non_null[col] < threshold
         ]
         if sparse:
-            print(f"[INFO] Dropping {len(sparse)} sparse columns "
-                  f"(< {threshold} non-null values).")
+            print(f"[INFO] Dropping {len(sparse)} sparse columns (< {threshold} non-null values).")
             df = df.drop(columns=sparse)
         return df
 
@@ -134,7 +132,6 @@ class KeyMapper:
         """
         When multiple raw columns rename to the same standard key,
         collapse them into one column using first-non-null coalescing.
-        Handles duplicate column names safely without positional indexing.
         """
         if not df.columns.duplicated().any():
             return df
@@ -162,10 +159,27 @@ class KeyMapper:
         return pd.DataFrame(output_cols, index=df.index)
 
     def _warn_missing_mandatory(self, df):
-        mandatory = [f["standard_key"] for f in self.fields if f["mandatory"]]
-        for key in mandatory:
-            if key not in df.columns:
-                print(f"[WARNING] Mandatory field '{key}' not found in dataset.")
+        """
+        For each ncbi_package group present in df, check fill rate of
+        mandatory fields defined in mandatory_fields.json and print a
+        warning for any field with 0% fill in that package's records.
+        Falls back to 'default' mandatory list for unknown packages.
+        """
+        if "ncbi_package" not in df.columns:
+            return
+
+        for pkg, group in df.groupby("ncbi_package", dropna=False):
+            pkg_key = pkg if pkg in self.mandatory else "default"
+            required = self.mandatory.get(pkg_key, [])
+            n = len(group)
+            for field in required:
+                if field not in df.columns:
+                    print(f"[WARNING] [{pkg}] mandatory field '{field}' absent from dataset entirely.")
+                else:
+                    fill = group[field].notna().sum()
+                    pct = fill / n * 100
+                    if pct < 50:
+                        print(f"[WARNING] [{pkg}] mandatory field '{field}' fill rate: {fill}/{n} ({pct:.0f}%).")
 
     def get_parser_routing(self):
         return {f["standard_key"]: f["parser"] for f in self.fields}
