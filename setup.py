@@ -8,7 +8,7 @@ with open("requirements.txt", "r") as f:
 
 setup(
     name="biometaharmonizer",
-    version="0.1.0",
+    version="0.2.0",
     author="Rustam",
     description="Universal NCBI BioSample metadata harmonization tool for genomic epidemiology.",
     long_description=long_description,
