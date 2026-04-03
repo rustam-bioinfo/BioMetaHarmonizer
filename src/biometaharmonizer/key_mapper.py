@@ -15,8 +15,11 @@ _PROTECTED_COLUMNS = frozenset([
 
 _PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
 
-_DEFAULT_SCHEMA = Path(__file__).parent.parent.parent / "schemas" / "unified.json"
+_DEFAULT_SCHEMA    = Path(__file__).parent.parent.parent / "schemas" / "unified.json"
 _DEFAULT_MANDATORY = Path(__file__).parent.parent.parent / "schemas" / "mandatory_fields.json"
+
+# packages with fewer records than this are skipped in mandatory field warnings
+MIN_WARN_GROUP_SIZE = 10
 
 
 class KeyMapper:
@@ -28,7 +31,9 @@ class KeyMapper:
 
     Mandatory field validation is per-package: each record's ncbi_package
     value is looked up in mandatory_fields.json and fill rates are reported
-    per package rather than as a single global check.
+    per package rather than as a single global check. Packages with fewer
+    than MIN_WARN_GROUP_SIZE records are silently skipped to avoid noise
+    from singleton or near-singleton submissions.
 
     When multiple raw columns map to the same standard key,
     they are coalesced (first non-null value wins).
@@ -160,24 +165,26 @@ class KeyMapper:
 
     def _warn_missing_mandatory(self, df):
         """
-        For each ncbi_package group present in df, check fill rate of
-        mandatory fields defined in mandatory_fields.json and print a
-        warning for any field with 0% fill in that package's records.
-        Falls back to 'default' mandatory list for unknown packages.
+        For each ncbi_package group in df with >= MIN_WARN_GROUP_SIZE records,
+        check fill rate of mandatory fields from mandatory_fields.json and
+        warn when fill < 50%. Falls back to 'default' for unknown packages.
+        Packages below MIN_WARN_GROUP_SIZE are silently skipped.
         """
         if "ncbi_package" not in df.columns:
             return
 
         for pkg, group in df.groupby("ncbi_package", dropna=False):
-            pkg_key = pkg if pkg in self.mandatory else "default"
-            required = self.mandatory.get(pkg_key, [])
             n = len(group)
+            if n < MIN_WARN_GROUP_SIZE:
+                continue
+            pkg_key  = pkg if pkg in self.mandatory else "default"
+            required = self.mandatory.get(pkg_key, [])
             for field in required:
                 if field not in df.columns:
                     print(f"[WARNING] [{pkg}] mandatory field '{field}' absent from dataset entirely.")
                 else:
                     fill = group[field].notna().sum()
-                    pct = fill / n * 100
+                    pct  = fill / n * 100
                     if pct < 50:
                         print(f"[WARNING] [{pkg}] mandatory field '{field}' fill rate: {fill}/{n} ({pct:.0f}%).")
 

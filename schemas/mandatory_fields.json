@@ -1,9 +1,11 @@
 {
-  "_note": "Per-package mandatory field lists. KeyMapper._warn_missing_mandatory() groups records by ncbi_package and checks fill rate for each required field. 'default' is used for unknown or absent package names.",
+  "_note": "Per-package mandatory field lists. KeyMapper._warn_missing_mandatory() groups records by ncbi_package and checks fill rate for each required field. 'default' is used for unknown or absent package names. Packages with fewer than MIN_WARN_GROUP_SIZE records are silently skipped.",
   "Pathogen.cl.1.0":               ["collection_date", "geo_loc_name", "isolation_source", "host", "host_disease", "isolate"],
   "Pathogen.env.1.0":              ["collection_date", "geo_loc_name", "isolation_source", "env_broad_scale", "env_local_scale", "env_medium", "isolate"],
   "Microbe.1.0":                   ["collection_date", "geo_loc_name", "isolation_source", "isolate"],
   "Generic.1.0":                   ["collection_date", "geo_loc_name", "isolate"],
+  "Human.1.0":                     ["collection_date", "geo_loc_name", "isolation_source", "host", "isolate"],
+  "Plant.1.0":                     ["collection_date", "geo_loc_name", "isolation_source", "isolate"],
   "OneHealthEnteric.1.0":          ["collection_date", "geo_loc_name", "isolation_source", "host", "isolate"],
   "MIGS.ba.6.0":                   ["collection_date", "geo_loc_name", "isolation_source", "isolate", "env_broad_scale", "env_local_scale", "env_medium"],
   "MIGS.ba.soil.6.0":              ["collection_date", "geo_loc_name", "isolation_source", "isolate", "env_broad_scale", "env_local_scale", "env_medium", "depth", "elev"],
