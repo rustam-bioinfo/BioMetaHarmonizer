@@ -139,7 +139,10 @@ def _parse_biosample_xml(xml_bytes):
       - Structural fields: accession, id, submission/update/publication dates,
         access level, status
       - Cross-reference IDs: SRA accession, BioProject accession, sample name
-      - Organism block: taxonomy_id, taxonomy_name, organism_name
+        BioProject is resolved from <Links> block first (covers ~99% of records),
+        with <Ids> block as fallback (covers a minority of older records).
+      - Organism block: taxonomy_id, taxonomy_name, organism_name.
+        organism_name falls back to taxonomy_name when <OrganismName> is absent.
       - Description block: title, free-text comment
       - Package: NCBI submission template name
       - All <Attribute> key-value pairs
@@ -163,6 +166,7 @@ def _parse_biosample_xml(xml_bytes):
         record["access"]              = sample.get("access")
 
         # cross-reference accessions from <Ids> block
+        ids_bioproject = None
         for db_id in sample.findall(".//Id"):
             db    = db_id.get("db", "")
             label = db_id.get("db_label", "")
@@ -170,9 +174,18 @@ def _parse_biosample_xml(xml_bytes):
             if db == "SRA":
                 record["sra_accession"] = val
             elif db == "BioProject":
-                record["bioproject_accession"] = val
+                ids_bioproject = val
             elif label == "Sample name":
                 record["sample_name_id"] = val
+
+        # <Links> block: primary source for BioProject accession (~99% of records)
+        # Falls back to <Ids> value when <Links> block is absent (older records).
+        links_bioproject = None
+        for link in sample.findall(".//Links/Link"):
+            if link.get("type") == "entrez" and link.get("target") == "bioproject":
+                links_bioproject = (link.get("label") or "").strip() or None
+                break
+        record["bioproject_accession"] = links_bioproject or ids_bioproject
 
         # <Description> block
         title_el = sample.find(".//Description/Title")
@@ -190,16 +203,16 @@ def _parse_biosample_xml(xml_bytes):
         )
 
         # <Organism> block
+        # organism_name falls back to taxonomy_name when <OrganismName> is absent
         organism = sample.find(".//Organism")
         if organism is not None:
             record["taxonomy_id"]   = organism.get("taxonomy_id")
             record["taxonomy_name"] = organism.get("taxonomy_name")
             org_name_el = organism.find("OrganismName")
-            record["organism_name"] = (
-                org_name_el.text.strip()
-                if org_name_el is not None and org_name_el.text
-                else None
-            )
+            if org_name_el is not None and org_name_el.text:
+                record["organism_name"] = org_name_el.text.strip()
+            else:
+                record["organism_name"] = organism.get("taxonomy_name")
         else:
             record["taxonomy_id"]   = None
             record["taxonomy_name"] = None
