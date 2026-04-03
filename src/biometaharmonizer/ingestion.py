@@ -33,14 +33,19 @@ def ingest(source):
     Note on bioproject_accession:
       BioProject is not stored in BioSample XML. It is resolved from
       the NCBI assembly summary flat files (RefSeq + GenBank) which
-      contain a biosample -> bioproject mapping. Records not present
-      in either flat file will have bioproject_accession = None.
+      contain a biosample -> bioproject mapping. Files are downloaded
+      once (~100 MB each) and cached on disk for subsequent runs.
+      Records with no assembly submission will have bioproject_accession
+      = None after resolution.
     """
     ids = _load_ids(source)
     gcx, samn, unrecognized = _classify_ids(ids)
 
     if unrecognized:
         print(f"[WARNING] {len(unrecognized)} unrecognized IDs skipped: {unrecognized[:5]}")
+
+    # ensure flat files are on disk before any resolution step
+    _ensure_assembly_summaries()
 
     if gcx:
         print(f"[INFO] Resolving {len(gcx)} assembly accessions to BioSample IDs...")
@@ -60,7 +65,7 @@ def ingest(source):
         filled = df["bioproject_accession"].notna().sum()
         print(f"[INFO] BioProject accession resolved for {filled} / {len(df)} records.")
     else:
-        print("[WARNING] Could not resolve BioProject accessions (assembly summary files unavailable).")
+        print("[WARNING] No BioProject accessions found in assembly summary files for this dataset.")
 
     return df
 
@@ -89,25 +94,39 @@ def _classify_ids(ids):
     return gcx, samn, unrecognized
 
 
+def _ensure_assembly_summaries():
+    """
+    Download and cache NCBI assembly summary flat files if not already
+    present on disk. Called unconditionally by ingest() so that both
+    _resolve_assembly_to_biosample() and _resolve_biosample_to_bioproject()
+    always have the files available regardless of input ID type.
+    """
+    for url, label in [
+        (ASSEMBLY_SUMMARY_REFSEQ, "refseq"),
+        (ASSEMBLY_SUMMARY_GENBANK, "genbank"),
+    ]:
+        cache_path = Path(f"assembly_summary_{label}.txt")
+        if not cache_path.exists():
+            print(f"[INFO] Downloading {label} assembly summary (~100 MB)...")
+            _download_file(url, cache_path)
+            print(f"[INFO] Saved to {cache_path}")
+
+
 def _resolve_assembly_to_biosample(gcx_ids):
     """
-    Resolve GCF_/GCA_ accessions to BioSample IDs using NCBI
-    assembly_summary flat files (RefSeq first, GenBank fallback).
-    Downloads flat files on first call; subsequent calls use cached files.
+    Resolve GCF_/GCA_ accessions to BioSample IDs using cached
+    NCBI assembly summary flat files (RefSeq first, GenBank fallback).
+    Assumes _ensure_assembly_summaries() has already been called.
     """
     resolved = []
     gcx_set = set(gcx_ids)
 
-    for url, label in [
-        (ASSEMBLY_SUMMARY_REFSEQ, "RefSeq"),
-        (ASSEMBLY_SUMMARY_GENBANK, "GenBank")
-    ]:
+    for label in ["refseq", "genbank"]:
         if not gcx_set:
             break
-        cache_path = Path(f"assembly_summary_{label.lower()}.txt")
+        cache_path = Path(f"assembly_summary_{label}.txt")
         if not cache_path.exists():
-            print(f"[INFO] Downloading {label} assembly summary (~100MB)...")
-            _download_file(url, cache_path)
+            continue
 
         df = pd.read_csv(
             cache_path, sep="\t", skiprows=1,
@@ -133,11 +152,11 @@ def _resolve_biosample_to_bioproject(biosample_ids):
     from cached NCBI assembly summary flat files.
 
     BioProject accession is not stored in BioSample XML. This function
-    uses the assembly summary files (already downloaded and cached by
-    _resolve_assembly_to_biosample) which contain both biosample and
-    bioproject columns for every genome assembly in NCBI.
+    uses the assembly summary files which contain both biosample and
+    bioproject columns for every genome assembly deposited in NCBI.
+    Assumes _ensure_assembly_summaries() has already been called.
 
-    Returns an empty dict if neither flat file is available on disk.
+    Returns an empty dict if neither flat file is readable.
     """
     lookup = {}
 
@@ -151,8 +170,8 @@ def _resolve_biosample_to_bioproject(biosample_ids):
                 usecols=["biosample", "bioproject"],
                 low_memory=False
             )
-            df = df[df["biosample"].isin(biosample_ids) & df["bioproject"].notna()]
-            for _, row in df.iterrows():
+            hits = df[df["biosample"].isin(biosample_ids) & df["bioproject"].notna()]
+            for _, row in hits.iterrows():
                 if row["biosample"] not in lookup:
                     lookup[row["biosample"]] = row["bioproject"]
         except Exception as e:
@@ -166,7 +185,7 @@ def _fetch_biosample_metadata(samn_ids):
     Fetch raw BioSample attribute metadata for a list of BioSample accessions
     using the NCBI Entrez efetch API in batches of 500.
     Returns a flattened pandas DataFrame with bioproject_accession = None
-    (patched by the caller after flat file resolution).
+    (patched by ingest() after flat file resolution).
     """
     Entrez.email = ENTREZ_EMAIL
     records = []
@@ -191,11 +210,11 @@ def _parse_biosample_xml(xml_bytes):
       - BioSample element: accession, id, submission_date, last_update,
         publication_date, access
       - <Ids> block: sra_accession (db=SRA), sample_name_id (db_label=Sample name)
-        bioproject_accession from <Ids> is kept as a rare fallback only;
-        the primary resolution happens via assembly summary flat files in ingest().
+        bioproject_accession from <Ids> is kept as a rare XML fallback only;
+        primary resolution is via assembly summary flat files in ingest().
       - <Description>: title, description_comment (Comment/Paragraph),
-        taxonomy_id and taxonomy_name from <Organism> element attributes,
-        organism_name = taxonomy_name (no OrganismName child exists in NCBI XML)
+        taxonomy_id and taxonomy_name from <Organism> element attributes.
+        organism_name = taxonomy_name (no OrganismName child in NCBI XML).
       - <Package>: ncbi_package
       - <Status>: status, status_date
       - All <Attribute> key-value pairs
@@ -215,7 +234,7 @@ def _parse_biosample_xml(xml_bytes):
         record["publication_date"]    = sample.get("publication_date")
         record["access"]              = sample.get("access")
 
-        # <Ids> block: SRA, sample name, and rare BioProject in XML
+        # <Ids> block: SRA, sample name, rare BioProject in XML
         record["bioproject_accession"] = None
         for db_id in sample.findall(".//Id"):
             db    = db_id.get("db", "")
