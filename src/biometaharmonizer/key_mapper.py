@@ -1,7 +1,22 @@
+import re
 import json
 import pandas as pd
 from pathlib import Path
 from rapidfuzz import process, fuzz
+
+
+# Structural columns always retained regardless of fill rate or name pattern.
+_PROTECTED_COLUMNS = frozenset([
+    "biosample_accession", "biosample_id", "sra_accession",
+    "bioproject_accession", "sample_name_id", "submission_date",
+    "last_update", "publication_date", "access", "status",
+    "status_date", "title", "description_comment", "ncbi_package",
+    "taxonomy_id", "taxonomy_name", "organism_name",
+])
+
+# Regex: two or more Title-Case words separated by spaces (person names).
+# Matches 'Chao Pan', 'Rajeev K. Varshney', 'XianKai Liu', etc.
+_PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
 
 
 class KeyMapper:
@@ -12,6 +27,10 @@ class KeyMapper:
 
     When multiple raw columns map to the same standard key,
     they are coalesced in order (first non-null value wins).
+
+    map_columns() also optionally drops:
+      - Sparse columns (non-null count below drop_sparse threshold)
+      - Junk columns (person names accidentally used as attribute keys)
     """
 
     FUZZY_THRESHOLD = 85
@@ -33,7 +52,24 @@ class KeyMapper:
             for syn in field["synonyms"]:
                 self.lookup[syn.lower()] = standard_key
 
-    def map_columns(self, df):
+    def map_columns(self, df, drop_sparse=5, drop_junk=True):
+        """
+        Harmonize column names, coalesce duplicates, warn on missing
+        mandatory fields, and optionally clean junk/sparse columns.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Raw ingested DataFrame.
+        drop_sparse : int, default 5
+            Drop columns where non-null count < drop_sparse.
+            Set to 0 to disable. Protected structural columns are
+            never dropped regardless of fill rate.
+        drop_junk : bool, default True
+            Drop columns whose names look like person names or other
+            submitter artifacts (e.g. 'Chao Pan', 'Urmi Halder').
+            Protected structural columns are never dropped.
+        """
         rename_map = {}
         for col in df.columns:
             col_lower = col.lower().strip()
@@ -49,9 +85,49 @@ class KeyMapper:
                     match, score, _ = result
                     if score >= self.FUZZY_THRESHOLD:
                         rename_map[col] = self.lookup[match]
+
         df = df.rename(columns=rename_map)
         df = self._coalesce_duplicates(df)
+
+        if drop_junk:
+            df = self._drop_junk_columns(df)
+
+        if drop_sparse and drop_sparse > 0:
+            df = self._drop_sparse_columns(df, threshold=drop_sparse)
+
         self._warn_missing_mandatory(df)
+        return df
+
+    def _drop_junk_columns(self, df):
+        """
+        Drop columns whose names match person-name patterns or other
+        known submitter artifact patterns. Protected columns are kept.
+        """
+        junk = [
+            col for col in df.columns
+            if col not in _PROTECTED_COLUMNS
+            and _PERSON_NAME_RE.match(col)
+        ]
+        if junk:
+            print(f"[INFO] Dropping {len(junk)} junk columns (person names / artifacts): {junk}")
+            df = df.drop(columns=junk)
+        return df
+
+    def _drop_sparse_columns(self, df, threshold):
+        """
+        Drop columns with fewer than `threshold` non-null values.
+        Protected structural columns are always retained.
+        """
+        non_null = df.notna().sum()
+        sparse = [
+            col for col in df.columns
+            if col not in _PROTECTED_COLUMNS
+            and non_null[col] < threshold
+        ]
+        if sparse:
+            print(f"[INFO] Dropping {len(sparse)} sparse columns "
+                  f"(< {threshold} non-null values).")
+            df = df.drop(columns=sparse)
         return df
 
     def _coalesce_duplicates(self, df):
