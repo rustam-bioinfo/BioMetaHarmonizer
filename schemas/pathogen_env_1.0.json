@@ -2,6 +2,7 @@
   "schema_name": "Pathogen.env.1.0",
   "description": "Pathogen: environmental, food or other; version 1.0",
   "version": "1.0",
+  "_note": "Structural fields (biosample_accession, biosample_id, sra_accession, bioproject_accession, taxonomy_id, taxonomy_name, organism_name, submission_date, last_update, publication_date, access, status, status_date, title, description_comment, ncbi_package) are extracted directly from XML and bypass this schema.",
   "fields": [
     {
       "standard_key": "collection_date",
@@ -19,8 +20,16 @@
       "parser": "geo_engine",
       "synonyms": [
         "country", "location", "geographic location",
-        "geo_loc", "region", "origin", "sampling_location",
-        "lat_lon"
+        "geo_loc", "region", "origin", "sampling_location"
+      ]
+    },
+    {
+      "standard_key": "lat_lon",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "latitude_longitude", "coordinates", "gps",
+        "latitude", "longitude", "lat", "lon"
       ]
     },
     {
@@ -31,7 +40,7 @@
         "source", "source_material", "sample_type",
         "environmental_source", "substrate", "matrix",
         "source_name", "analyte_type", "tissue",
-        "molecular_data_type"
+        "molecular_data_type", "body_site"
       ]
     },
     {
@@ -40,7 +49,7 @@
       "parser": "string_cleaner",
       "synonyms": [
         "biome", "environment_type", "broad_environment",
-        "ecosystem", "habitat"
+        "ecosystem", "habitat", "env_biome"
       ]
     },
     {
@@ -49,7 +58,7 @@
       "parser": "string_cleaner",
       "synonyms": [
         "local_environment", "microhabitat", "env_feature",
-        "local_scale", "environmental_feature"
+        "local_scale", "environmental_feature", "env_feature"
       ]
     },
     {
@@ -58,7 +67,7 @@
       "parser": "string_cleaner",
       "synonyms": [
         "medium", "growth_medium", "substrate_type",
-        "environmental_material", "material"
+        "environmental_material", "material", "env_material"
       ]
     },
     {
@@ -68,7 +77,80 @@
       "synonyms": [
         "strain", "isolate_name", "sample_name", "id",
         "submitted_sample_id", "biospecimen_repository_sample_id",
-        "gap_sample_id"
+        "gap_sample_id", "isolate_id"
+      ]
+    },
+    {
+      "standard_key": "samp_size",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample_size", "sample_volume", "sample_weight",
+        "amount", "volume", "weight"
+      ]
+    },
+    {
+      "standard_key": "samp_mat_process",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample_processing", "processing_method", "treatment",
+        "filtration", "enrichment", "pre_treatment", "extraction_method"
+      ]
+    },
+    {
+      "standard_key": "water_env_biome",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "water_environment", "aquatic_environment",
+        "water_body", "water_type", "water_source"
+      ]
+    },
+    {
+      "standard_key": "temp",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "temperature", "incubation_temperature",
+        "growth_temperature", "storage_temperature",
+        "collection_temperature"
+      ]
+    },
+    {
+      "standard_key": "ph",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "pH_value", "acidity", "soil_ph", "water_ph"
+      ]
+    },
+    {
+      "standard_key": "collected_by",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "collecting_institution", "collector", "submitter",
+        "submitted_by", "laboratory", "lab_name"
+      ]
+    },
+    {
+      "standard_key": "sequencing_method",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sequencing_technology", "platform", "seq_method",
+        "instrument", "sequencer", "library_strategy",
+        "library_source", "library_selection"
+      ]
+    },
+    {
+      "standard_key": "assembly_method",
+      "mandatory": false,
+      "parser": "string_cleaner",
+      "synonyms": [
+        "assembler", "assembly_software", "assembly_version",
+        "genome_assembly_method"
       ]
     }
   ]

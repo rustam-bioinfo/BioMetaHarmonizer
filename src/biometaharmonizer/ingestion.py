@@ -27,6 +27,8 @@ def ingest(source):
       - A Python list of accession strings.
 
     Returns a normalized pandas DataFrame of raw BioSample metadata.
+    Structural fields (taxonomy, SRA, BioProject, dates, status) are
+    always present as fixed columns regardless of schema used.
     """
     ids = _load_ids(source)
     gcx, samn, unrecognized = _classify_ids(ids)
@@ -130,19 +132,104 @@ def _fetch_biosample_metadata(samn_ids):
 
 
 def _parse_biosample_xml(xml_bytes):
-    """Parse raw BioSample XML into a list of flat attribute dicts."""
+    """
+    Parse raw BioSample XML into a list of flat attribute dicts.
+
+    Extracts all structured information available in a BioSample record:
+      - Structural fields: accession, id, submission/update/publication dates,
+        access level, status
+      - Cross-reference IDs: SRA accession, BioProject accession, sample name
+      - Organism block: taxonomy_id, taxonomy_name, organism_name
+      - Description block: title, free-text comment
+      - Package: NCBI submission template name
+      - All <Attribute> key-value pairs
+
+    Structural fields are always present as fixed columns and are NOT
+    passed through the KeyMapper. They bypass synonym resolution.
+    """
     import xml.etree.ElementTree as ET
     records = []
     root = ET.fromstring(xml_bytes)
+
     for sample in root.findall(".//BioSample"):
-        record = {
-            "biosample_accession": sample.get("accession"),
-            "biosample_id": sample.get("id"),
-        }
+        record = {}
+
+        # structural BioSample element attributes
+        record["biosample_accession"] = sample.get("accession")
+        record["biosample_id"]        = sample.get("id")
+        record["submission_date"]     = sample.get("submission_date")
+        record["last_update"]         = sample.get("last_update")
+        record["publication_date"]    = sample.get("publication_date")
+        record["access"]              = sample.get("access")
+
+        # cross-reference accessions from <Ids> block
+        for db_id in sample.findall(".//Id"):
+            db    = db_id.get("db", "")
+            label = db_id.get("db_label", "")
+            val   = (db_id.text or "").strip()
+            if db == "SRA":
+                record["sra_accession"] = val
+            elif db == "BioProject":
+                record["bioproject_accession"] = val
+            elif label == "Sample name":
+                record["sample_name_id"] = val
+
+        # <Description> block
+        title_el = sample.find(".//Description/Title")
+        record["title"] = (
+            title_el.text.strip()
+            if title_el is not None and title_el.text
+            else None
+        )
+
+        comment_el = sample.find(".//Description/Comment/Paragraph")
+        record["description_comment"] = (
+            comment_el.text.strip()
+            if comment_el is not None and comment_el.text
+            else None
+        )
+
+        # <Organism> block
+        organism = sample.find(".//Organism")
+        if organism is not None:
+            record["taxonomy_id"]   = organism.get("taxonomy_id")
+            record["taxonomy_name"] = organism.get("taxonomy_name")
+            org_name_el = organism.find("OrganismName")
+            record["organism_name"] = (
+                org_name_el.text.strip()
+                if org_name_el is not None and org_name_el.text
+                else None
+            )
+        else:
+            record["taxonomy_id"]   = None
+            record["taxonomy_name"] = None
+            record["organism_name"] = None
+
+        # <Package> block
+        package_el = sample.find(".//Package")
+        record["ncbi_package"] = (
+            package_el.text.strip()
+            if package_el is not None and package_el.text
+            else None
+        )
+
+        # <Status> block
+        status_el = sample.find(".//Status")
+        if status_el is not None:
+            record["status"]      = status_el.get("status")
+            record["status_date"] = status_el.get("when")
+        else:
+            record["status"]      = None
+            record["status_date"] = None
+
+        # all <Attribute> key-value pairs
         for attr in sample.findall(".//Attribute"):
             key = attr.get("harmonized_name") or attr.get("attribute_name", "unknown")
-            record[key] = attr.text
+            val = (attr.text or "").strip()
+            record[key] = val if val else None
+
         records.append(record)
+
     return records
 
 
