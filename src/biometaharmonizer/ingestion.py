@@ -29,6 +29,12 @@ def ingest(source):
     Returns a normalized pandas DataFrame of raw BioSample metadata.
     Structural fields (taxonomy, SRA, BioProject, dates, status) are
     always present as fixed columns regardless of schema used.
+
+    Note on bioproject_accession:
+      BioProject is not stored in BioSample XML. It is resolved from
+      the NCBI assembly summary flat files (RefSeq + GenBank) which
+      contain a biosample -> bioproject mapping. Records not present
+      in either flat file will have bioproject_accession = None.
     """
     ids = _load_ids(source)
     gcx, samn, unrecognized = _classify_ids(ids)
@@ -45,7 +51,18 @@ def ingest(source):
         raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
 
     print(f"[INFO] Fetching metadata for {len(samn)} BioSample accessions...")
-    return _fetch_biosample_metadata(samn)
+    df = _fetch_biosample_metadata(samn)
+
+    print("[INFO] Resolving BioProject accessions from assembly summary flat files...")
+    bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
+    if bioproject_map:
+        df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map)
+        filled = df["bioproject_accession"].notna().sum()
+        print(f"[INFO] BioProject accession resolved for {filled} / {len(df)} records.")
+    else:
+        print("[WARNING] Could not resolve BioProject accessions (assembly summary files unavailable).")
+
+    return df
 
 
 def _load_ids(source):
@@ -110,11 +127,46 @@ def _resolve_assembly_to_biosample(gcx_ids):
     return resolved
 
 
+def _resolve_biosample_to_bioproject(biosample_ids):
+    """
+    Build a {biosample_accession: bioproject_accession} lookup dict
+    from cached NCBI assembly summary flat files.
+
+    BioProject accession is not stored in BioSample XML. This function
+    uses the assembly summary files (already downloaded and cached by
+    _resolve_assembly_to_biosample) which contain both biosample and
+    bioproject columns for every genome assembly in NCBI.
+
+    Returns an empty dict if neither flat file is available on disk.
+    """
+    lookup = {}
+
+    for label in ["refseq", "genbank"]:
+        cache_path = Path(f"assembly_summary_{label}.txt")
+        if not cache_path.exists():
+            continue
+        try:
+            df = pd.read_csv(
+                cache_path, sep="\t", skiprows=1,
+                usecols=["biosample", "bioproject"],
+                low_memory=False
+            )
+            df = df[df["biosample"].isin(biosample_ids) & df["bioproject"].notna()]
+            for _, row in df.iterrows():
+                if row["biosample"] not in lookup:
+                    lookup[row["biosample"]] = row["bioproject"]
+        except Exception as e:
+            print(f"[WARNING] Could not read {cache_path} for BioProject resolution: {e}")
+
+    return lookup
+
+
 def _fetch_biosample_metadata(samn_ids):
     """
     Fetch raw BioSample attribute metadata for a list of BioSample accessions
     using the NCBI Entrez efetch API in batches of 500.
-    Returns a flattened pandas DataFrame.
+    Returns a flattened pandas DataFrame with bioproject_accession = None
+    (patched by the caller after flat file resolution).
     """
     Entrez.email = ENTREZ_EMAIL
     records = []
@@ -135,20 +187,18 @@ def _parse_biosample_xml(xml_bytes):
     """
     Parse raw BioSample XML into a list of flat attribute dicts.
 
-    Extracts all structured information available in a BioSample record:
-      - Structural fields: accession, id, submission/update/publication dates,
-        access level, status
-      - Cross-reference IDs: SRA accession, BioProject accession, sample name
-        BioProject is resolved from <Links> block first (covers ~99% of records),
-        with <Ids> block as fallback (covers a minority of older records).
-      - Organism block: taxonomy_id, taxonomy_name, organism_name.
-        organism_name falls back to taxonomy_name when <OrganismName> is absent.
-      - Description block: title, free-text comment
-      - Package: NCBI submission template name
+    Structural fields extracted:
+      - BioSample element: accession, id, submission_date, last_update,
+        publication_date, access
+      - <Ids> block: sra_accession (db=SRA), sample_name_id (db_label=Sample name)
+        bioproject_accession from <Ids> is kept as a rare fallback only;
+        the primary resolution happens via assembly summary flat files in ingest().
+      - <Description>: title, description_comment (Comment/Paragraph),
+        taxonomy_id and taxonomy_name from <Organism> element attributes,
+        organism_name = taxonomy_name (no OrganismName child exists in NCBI XML)
+      - <Package>: ncbi_package
+      - <Status>: status, status_date
       - All <Attribute> key-value pairs
-
-    Structural fields are always present as fixed columns and are NOT
-    passed through the KeyMapper. They bypass synonym resolution.
     """
     import xml.etree.ElementTree as ET
     records = []
@@ -165,27 +215,18 @@ def _parse_biosample_xml(xml_bytes):
         record["publication_date"]    = sample.get("publication_date")
         record["access"]              = sample.get("access")
 
-        # cross-reference accessions from <Ids> block
-        ids_bioproject = None
+        # <Ids> block: SRA, sample name, and rare BioProject in XML
+        record["bioproject_accession"] = None
         for db_id in sample.findall(".//Id"):
             db    = db_id.get("db", "")
             label = db_id.get("db_label", "")
             val   = (db_id.text or "").strip()
             if db == "SRA":
                 record["sra_accession"] = val
-            elif db == "BioProject":
-                ids_bioproject = val
-            elif label == "Sample name":
+            elif db == "BioProject" and val:
+                record["bioproject_accession"] = val
+            elif label == "Sample name" and val:
                 record["sample_name_id"] = val
-
-        # <Links> block: primary source for BioProject accession (~99% of records)
-        # Falls back to <Ids> value when <Links> block is absent (older records).
-        links_bioproject = None
-        for link in sample.findall(".//Links/Link"):
-            if link.get("type") == "entrez" and link.get("target") == "bioproject":
-                links_bioproject = (link.get("label") or "").strip() or None
-                break
-        record["bioproject_accession"] = links_bioproject or ids_bioproject
 
         # <Description> block
         title_el = sample.find(".//Description/Title")
@@ -202,17 +243,13 @@ def _parse_biosample_xml(xml_bytes):
             else None
         )
 
-        # <Organism> block
-        # organism_name falls back to taxonomy_name when <OrganismName> is absent
+        # <Organism> inside <Description>: name is in taxonomy_name attribute only.
+        # No <OrganismName> child element exists in real NCBI BioSample XML.
         organism = sample.find(".//Organism")
         if organism is not None:
             record["taxonomy_id"]   = organism.get("taxonomy_id")
             record["taxonomy_name"] = organism.get("taxonomy_name")
-            org_name_el = organism.find("OrganismName")
-            if org_name_el is not None and org_name_el.text:
-                record["organism_name"] = org_name_el.text.strip()
-            else:
-                record["organism_name"] = organism.get("taxonomy_name")
+            record["organism_name"] = organism.get("taxonomy_name")
         else:
             record["taxonomy_id"]   = None
             record["taxonomy_name"] = None
