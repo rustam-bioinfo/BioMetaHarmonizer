@@ -29,17 +29,26 @@ pip install -e .
 ### Build the NCBI attribute cache (required once before first use)
 
 ```bash
+# Default model (all-MiniLM-L6-v2, 384-dim, fast)
 python scripts/build_ncbi_attribute_cache.py
+
+# Or choose a different sentence-transformers model
+python scripts/build_ncbi_attribute_cache.py --model BAAI/bge-small-en-v1.5
+python scripts/build_ncbi_attribute_cache.py --model all-mpnet-base-v2
 ```
 
-This fetches the NCBI BioSample harmonization table, indexes all synonyms, precomputes
-`all-MiniLM-L6-v2` embeddings for semantic fallback, and saves three files under `schemas/`:
+This fetches the NCBI BioSample harmonization table, indexes all synonyms, computes
+embeddings for semantic fallback, and saves four files under `src/biometaharmonizer/schemas/`:
 
 ```
-schemas/ncbi_attributes.xml            # raw NCBI XML (Layer 1 source)
-schemas/ncbi_embeddings.npy            # float32 embeddings, shape [N, 384]
-schemas/ncbi_harmonized_names.json     # sorted list of N harmonized names
+ncbi_attributes.xml          # raw NCBI XML (Layer 1 source)
+ncbi_embeddings.npy          # float32 embeddings, shape [N, embedding_dim]
+ncbi_harmonized_names.json   # sorted list of N harmonized names
+ncbi_cache_meta.json         # build metadata: model name, dim, count, timestamp
 ```
+
+The model name is recorded in `ncbi_cache_meta.json` so `KeyMapper` picks it up
+automatically — no code changes needed when switching models.
 
 Re-run this script at any time to refresh the cache against the latest NCBI attribute release.
 
@@ -121,14 +130,15 @@ BioMetaHarmonizer/
 │   └── output.py               # Module 6: Write CSV / TSV / Excel / Parquet
 ├── schemas/
 │   ├── ncbi_attributes.xml             # NCBI official harmonization table (built by script)
-│   ├── ncbi_embeddings.npy             # all-MiniLM-L6-v2 embeddings, shape [N, 384], float32
+│   ├── ncbi_embeddings.npy             # sentence-transformers embeddings, shape [N, dim], float32
 │   ├── ncbi_harmonized_names.json      # sorted list of N harmonized names
+│   ├── ncbi_cache_meta.json            # build metadata: model, dim, count, timestamp
 │   ├── mandatory_fields.json           # per-package required field lists (22 packages)
 │   ├── unified.json                    # legacy synonym lookup (v0.2.0, superseded)
 │   ├── pathogen_cl_1.0.json            # legacy
 │   └── pathogen_env_1.0.json           # legacy
 ├── scripts/
-│   └── build_ncbi_attribute_cache.py   # one-time cache builder
+│   └── build_ncbi_attribute_cache.py   # one-time cache builder; --model flag to choose model
 ├── tests/
 │   ├── conftest.py
 │   ├── test_ingestion.py
@@ -140,7 +150,6 @@ BioMetaHarmonizer/
 │   └── test_pipeline.py
 ├── docs/SESSION_PROTOCOL.md
 ├── pyproject.toml
-├── setup.py
 └── requirements.txt
 ```
 
@@ -164,13 +173,32 @@ The [NCBI BioSample harmonization table](https://www.ncbi.nlm.nih.gov/biosample/
 maps every known submitter synonym to its canonical `HarmonizedName`. This covers the vast
 majority of real-world column names without any manual curation.
 
-**Layer 2 — Semantic fallback (sentence-transformers)**
+**Layer 2 — Semantic fallback (sentence-transformers, configurable)**
 Column names absent from the NCBI table are matched by cosine similarity against
-`all-MiniLM-L6-v2` embeddings of all harmonized names (threshold: 0.75). This handles
-typos, novel lab-specific keys, and language variants. The model is loaded lazily on first use.
+precomputed embeddings of all harmonized names (default threshold: 0.75). The model
+is configurable — any [sentence-transformers](https://sbert.net) model works:
 
-Both layers are entirely config-driven — no Python code changes are needed when NCBI
-adds new attributes or when new synonym patterns appear in submissions.
+```python
+# Default: reads model from ncbi_cache_meta.json (all-MiniLM-L6-v2 unless rebuilt)
+mapper = KeyMapper()
+
+# Custom model (rebuild the cache with the same model first)
+mapper = KeyMapper(model="BAAI/bge-small-en-v1.5", threshold=0.70)
+```
+
+| Model | Dim | Characteristics |
+|-------|-----|-----------------|
+| `all-MiniLM-L6-v2` | 384 | Default — fast, small |
+| `all-MiniLM-L12-v2` | 384 | Slightly better quality |
+| `all-mpnet-base-v2` | 768 | Higher quality, slower |
+| `BAAI/bge-small-en-v1.5` | 384 | Strong retrieval |
+| `BAAI/bge-base-en-v1.5` | 768 | Strong retrieval, larger |
+| `intfloat/e5-small-v2` | 384 | E5 family |
+| `intfloat/e5-base-v2` | 768 | E5 family, larger |
+
+The model is loaded lazily on first use. Both layers are entirely config-driven — no
+Python code changes are needed when NCBI adds new attributes or when new synonym
+patterns appear in submissions.
 
 ## Validated Performance
 
