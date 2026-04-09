@@ -368,7 +368,7 @@ class TestIngest:
     @patch("biometaharmonizer.ingestion._resolve_assembly_to_biosample")
     def test_unrecognized_ids_trigger_warning(self, mock_resolve, mock_fetch, tmp_mixed_file, capsys):
         mock_resolve.return_value = ["SAMN99999999"]
-        mock_fetch.return_value = pd.DataFrame()
+        mock_fetch.return_value = pd.DataFrame({"biosample_accession": ["SAMN99999999"]})
         ingest(tmp_mixed_file)
         captured = capsys.readouterr()
         assert "WARNING" in captured.out

@@ -198,42 +198,42 @@ class TestKeyMapperInit:
 class TestExactMatching:
 
     def test_standard_keys_pass_through(self, mapper_cl, raw_ncbi_df):
-        result = mapper_cl.map_columns(raw_ncbi_df)
+        result = mapper_cl.map_columns(raw_ncbi_df, drop_sparse=0)
         assert "collection_date" in result.columns
         assert "geo_loc_name" in result.columns
         assert "isolation_source" in result.columns
 
     def test_synonym_sampling_date_maps_to_collection_date(self, mapper_cl, messy_synonym_df):
-        result = mapper_cl.map_columns(messy_synonym_df)
+        result = mapper_cl.map_columns(messy_synonym_df, drop_sparse=0)
         assert "collection_date" in result.columns
         assert "sampling_date" not in result.columns
 
     def test_synonym_country_maps_to_geo_loc_name(self, mapper_cl, messy_synonym_df):
-        result = mapper_cl.map_columns(messy_synonym_df)
+        result = mapper_cl.map_columns(messy_synonym_df, drop_sparse=0)
         assert "geo_loc_name" in result.columns
         assert "country" not in result.columns
 
     def test_synonym_source_maps_to_isolation_source(self, mapper_cl, messy_synonym_df):
-        result = mapper_cl.map_columns(messy_synonym_df)
+        result = mapper_cl.map_columns(messy_synonym_df, drop_sparse=0)
         assert "isolation_source" in result.columns
 
     def test_synonym_strain_maps_to_isolate(self, mapper_cl, messy_synonym_df):
-        result = mapper_cl.map_columns(messy_synonym_df)
+        result = mapper_cl.map_columns(messy_synonym_df, drop_sparse=0)
         assert "isolate" in result.columns
         assert "strain" not in result.columns
 
     def test_synonym_disease_maps_to_host_disease(self, mapper_cl, messy_synonym_df):
-        result = mapper_cl.map_columns(messy_synonym_df)
+        result = mapper_cl.map_columns(messy_synonym_df, drop_sparse=0)
         assert "host_disease" in result.columns
 
     def test_data_values_preserved_after_rename(self, mapper_cl, messy_synonym_df):
-        result = mapper_cl.map_columns(messy_synonym_df)
+        result = mapper_cl.map_columns(messy_synonym_df, drop_sparse=0)
         assert result["collection_date"].iloc[0] == "2019-07-01"
         assert result["geo_loc_name"].iloc[0] == "Germany: Berlin"
 
     def test_unrecognized_columns_preserved(self, mapper_cl):
         df = pd.DataFrame([{"totally_unknown_col": "value", "collection_date": "2020"}])
-        result = mapper_cl.map_columns(df)
+        result = mapper_cl.map_columns(df, drop_sparse=0)
         assert "totally_unknown_col" in result.columns
 
 
@@ -242,16 +242,16 @@ class TestExactMatching:
 class TestFuzzyMatching:
 
     def test_collectiondate_fuzzy_maps_to_collection_date(self, mapper_cl, fuzzy_df):
-        result = mapper_cl.map_columns(fuzzy_df)
+        result = mapper_cl.map_columns(fuzzy_df, drop_sparse=0)
         assert "host_organism" not in result.columns or "host" in result.columns
 
     def test_isolationsource_fuzzy_maps_to_isolation_source(self, mapper_cl, fuzzy_df):
-        result = mapper_cl.map_columns(fuzzy_df)
+        result = mapper_cl.map_columns(fuzzy_df, drop_sparse=0)
         assert "isolationsource" in result.columns or "isolation_source" in result.columns
 
     def test_fuzzy_does_not_merge_unrelated_columns(self, mapper_cl):
         df = pd.DataFrame([{"study_name": "cohort_A", "collection_date": "2020"}])
-        result = mapper_cl.map_columns(df)
+        result = mapper_cl.map_columns(df, drop_sparse=0)
         assert "study_name" in result.columns
         assert "collection_date" in result.columns
 
@@ -333,14 +333,14 @@ def km(tmp_path, monkeypatch):
 
 def test_exact_synonym_match(km):
     df = pd.DataFrame([{"collection date": "2021-01-01", "biosample_accession": "SAMN001"}])
-    result = km.map_columns(df)
+    result = km.map_columns(df, drop_sparse=0)
     assert "collection_date" in result.columns
     assert "collection date" not in result.columns
 
 
 def test_exact_harmonized_name_passthrough(km):
     df = pd.DataFrame([{"collection_date": "2021-01-01", "biosample_accession": "SAMN001"}])
-    result = km.map_columns(df)
+    result = km.map_columns(df, drop_sparse=0)
     assert "collection_date" in result.columns
 
 
