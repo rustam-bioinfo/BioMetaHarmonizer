@@ -9,7 +9,7 @@ Copy and paste the block below at the start of any new AI-assisted session to re
 ### 1. Project Identity & Goal
 - **Project Name:** BioMetaHarmonizer
 - **Repository:** https://github.com/rustam-bioinfo/BioMetaHarmonizer
-- **Version:** 0.2.0 (next: 0.3.0 after KeyMapper rewrite)
+- **Version:** 0.3.0
 - **Objective:** Develop a Python 3.9+ pip-installable package to dynamically harmonize, parse, and categorize messy NCBI BioSample metadata (parsing dates, resolving ISO-3166 geographies, standardizing categorical variables).
 - **End Goal:** Publication as an Application Note in *Bioinformatics*, *GigaScience*, or *Microbial Genomics*.
 - **Primary Test Data:** A dataset of 6,618 *B. cereus* group genomes. Ingestion yields 6,508 records (6,618 - 110 fetch failures). After KeyMapper: 6,508 × 195 columns.
@@ -18,8 +18,7 @@ Copy and paste the block below at the start of any new AI-assisted session to re
 - **Config-Driven Design:** One set of core parsing modules driven by external JSON/XML data. We DO NOT write separate Python functions per biological schema.
 - **Workflow:** Ingestion → Key Harmonization → Value Parsing → Categorization → Output.
 - **Input:** Two accepted formats — a plain `.txt` list of BioSample IDs (SAMN/SAME/SAMD) or assembly accessions (GCF_/GCA_). Mixed files handled automatically.
-- **Dependencies (current):** `pandas`, `numpy`, `rapidFuzz`, `pycountry`, `python-dateutil`, `biopython`, `requests`.
-- **Dependencies (after Option C):** replace `rapidFuzz` with `sentence-transformers` (model: `all-MiniLM-L6-v2`).
+- **Dependencies:** `pandas`, `numpy`, `sentence-transformers`, `pycountry`, `python-dateutil`, `biopython`, `requests`, `openpyxl`, `pyarrow`.
 - **Structural Fields (bypass KeyMapper):** Always extracted directly from BioSample XML — never passed through synonym resolution:
   `biosample_accession`, `biosample_id`, `sra_accession`, `bioproject_accession`,
   `taxonomy_id`, `taxonomy_name`, `organism_name`,
@@ -34,35 +33,25 @@ Copy and paste the block below at the start of any new AI-assisted session to re
   - Resolves BioProject accession from assembly summary flat files (96.4% fill on B. cereus dataset).
   - Full XML extraction: Ids, Organism, Description, Package, Status, all Attributes.
   - `organism_name` = `taxonomy_name` attribute of `<Organism>` element (no `<OrganismName>` child exists in real NCBI XML).
-- [ ] **Module 2 (Key Mapper):** `src/biometaharmonizer/key_mapper.py` — NEEDS REWRITE (Option C).
-  - Current state: functional and validated on B. cereus dataset (6,508 × 195 output).
-  - Current approach: static `unified.json` synonym dict + RapidFuzz fuzzy matching. NOT publication-worthy.
-  - **Planned rewrite (Option C — Hybrid):**
-    - **Layer 1 (authoritative):** Fetch NCBI BioSample harmonization table from
-      `https://www.ncbi.nlm.nih.gov/biosample/docs/attributes/?format=xml` once at install/first run.
-      Cache as `schemas/ncbi_attributes.xml`. This table maps every known submitter synonym to
-      its NCBI `HarmonizedName`. Replaces `unified.json` entirely for known synonyms.
-    - **Layer 2 (semantic fallback):** For column names absent from the NCBI table, use
-      `sentence-transformers` (`all-MiniLM-L6-v2`) cosine similarity against embeddings of all
-      harmonized names. Threshold ~0.75. Handles typos, novel lab-specific keys, language variants.
-    - **Embeddings:** Precomputed at install time for all ~500 NCBI harmonized names.
-      Stored as `schemas/ncbi_embeddings.npy` and shipped in the repo for fully offline use.
-    - **Publication argument:** "BioMetaHarmonizer resolves attribute synonyms using the NCBI
-      BioSample harmonization table as primary authority, supplemented by a semantic embedding
-      model for attributes absent from the official table. This approach requires no manual
-      curation and is automatically updated with each NCBI attribute release."
-  - Current features to preserve: `drop_sparse`, `drop_junk`, `_PROTECTED_COLUMNS`,
-    `_coalesce_duplicates`, per-package `_warn_missing_mandatory()` via `mandatory_fields.json`.
+- [x] **Module 2 (Key Mapper):** `src/biometaharmonizer/key_mapper.py` — COMPLETE.
+  - Option C: NCBI attribute XML (Layer 1) + sentence-transformers all-MiniLM-L6-v2 (Layer 2). rapidfuzz removed.
+  - Layer 1: exact/synonym lookup from `schemas/ncbi_attributes.xml` (built by `scripts/build_ncbi_attribute_cache.py`).
+  - Layer 2: cosine similarity fallback via precomputed embeddings (`schemas/ncbi_embeddings.npy`). `SEMANTIC_THRESHOLD = 0.75`. Model loaded lazily on first use.
+  - Features preserved: `drop_sparse`, `drop_junk`, `_PROTECTED_COLUMNS`, `_coalesce_duplicates`, per-package `_warn_missing_mandatory()` via `mandatory_fields.json`.
+  - Publication argument: "BioMetaHarmonizer resolves attribute synonyms using the NCBI BioSample harmonization table as primary authority, supplemented by a semantic embedding model for attributes absent from the official table. This approach requires no manual curation and is automatically updated with each NCBI attribute release."
 - [x] **Module 3 (Date Engine):** `src/biometaharmonizer/date_engine.py` — COMPLETE. 79.3% fill on B. cereus dataset.
 - [x] **Module 4 (Geo Engine):** `src/biometaharmonizer/geo_engine.py` — COMPLETE. 94.9% country, 58.8% region.
 - [x] **Module 5 (One Health):** `src/biometaharmonizer/one_health.py` — COMPLETE. 76.6% classified. Tier 1 Regex with word-boundary fixes.
+- [x] **Module 6 (Output):** `src/biometaharmonizer/output.py` — COMPLETE. `write()` (csv/tsv/excel/parquet) and `write_summary()` implemented.
 
 ### 4. Schema Architecture (current)
-- **`schemas/unified.json`** — 29-field manually curated synonym lookup. Will be REPLACED by NCBI attribute XML in Option C rewrite. Kept until rewrite is complete.
-- **`schemas/mandatory_fields.json`** — Maps all 22 `ncbi_package` values (including `Human.1.0`, `Plant.1.0`) to required fields. Includes `default` fallback. RETAINED in Option C — mandatory validation is independent of synonym resolution.
-- **`schemas/pathogen_cl_1.0.json`** — Legacy. No longer loaded by KeyMapper.
-- **`schemas/pathogen_env_1.0.json`** — Legacy. No longer loaded by KeyMapper.
-- **After Option C:** `unified.json` replaced by `ncbi_attributes.xml` + `ncbi_embeddings.npy`.
+- **`schemas/unified.json`** — LEGACY (superseded by `ncbi_attributes.xml` in v0.3.0). Not loaded by KeyMapper.
+- **`schemas/mandatory_fields.json`** — Maps all 22 `ncbi_package` values (including `Human.1.0`, `Plant.1.0`) to required fields. Includes `default` fallback. RETAINED — mandatory validation is independent of synonym resolution.
+- **`schemas/pathogen_cl_1.0.json`** — Legacy. Not loaded by KeyMapper.
+- **`schemas/pathogen_env_1.0.json`** — Legacy. Not loaded by KeyMapper.
+- **`schemas/ncbi_attributes.xml`** — NCBI official attribute harmonization table, fetched by `scripts/build_ncbi_attribute_cache.py`.
+- **`schemas/ncbi_embeddings.npy`** — Precomputed all-MiniLM-L6-v2 embeddings, shape [N, 384], float32.
+- **`schemas/ncbi_harmonized_names.json`** — Sorted list of N harmonized names; row index matches `ncbi_embeddings.npy`.
 
 ### 5. Validated Performance (B. cereus, n=6,618)
 
@@ -89,8 +78,10 @@ Raw shape: 6,508 × 346. Post-KeyMapper: 6,508 × 195.
 - `conftest.py` at repo root injects `src/` into `sys.path` for pytest.
 - Run all tests: `!pytest tests/ -v --tb=short`
 - Run with coverage: `!pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing`
-- **Current total: 161/161 tests passing.**
-- NOTE: `test_key_mapper.py` does not yet cover `drop_sparse`, `drop_junk`, or per-package mandatory validation. These tests must be written before the Option C rewrite.
+- **Current total: 172/172 tests passing.**
+- `test_key_mapper.py`: covers `drop_sparse`, `drop_junk`, `_PROTECTED_COLUMNS` protection, per-package mandatory validation, Option C exact-synonym and semantic resolution, and RuntimeError on missing cache.
+- `test_output.py`: covers write() (csv/tsv/parquet/excel/invalid), parent dir creation, return type, write_summary() fill rates.
+- `test_pipeline.py`: end-to-end integration — KeyMapper rename, DateEngine, GeoEngine, OneHealthClassifier, output write.
 
 ### 8. Colab Setup (every session)
 ```python
@@ -111,27 +102,16 @@ if SRC_DIR not in sys.path:
 os.chdir("/content")  # required for assembly summary flat file paths
 
 import biometaharmonizer
-print(biometaharmonizer.__version__)  # should print 0.2.0
+print(biometaharmonizer.__version__)  # should print 0.3.0
 ```
 
 ### 9. Next Steps (in priority order)
-1. **Option C rewrite of `key_mapper.py`** — the most important task.
-   - Step 1: Write `scripts/build_ncbi_attribute_cache.py` — fetches NCBI attribute XML,
-     parses all harmonized names + synonyms, precomputes `all-MiniLM-L6-v2` embeddings,
-     saves `schemas/ncbi_attributes.xml` and `schemas/ncbi_embeddings.npy`.
-   - Step 2: Rewrite `KeyMapper.__init__()` to load from `ncbi_attributes.xml` + `ncbi_embeddings.npy`.
-   - Step 3: Replace `_build_lookup()` + RapidFuzz with two-layer resolution:
-     Layer 1 = exact/synonym match against NCBI table; Layer 2 = embedding cosine similarity fallback.
-   - Step 4: Remove `rapidFuzz` dependency; add `sentence-transformers` and `numpy` to `requirements.txt`.
-   - Step 5: Update `unified.json` status to legacy in schemas directory.
-   - Step 6: Bump version to 0.3.0.
-2. **Update `tests/test_key_mapper.py`** — add tests for `drop_sparse`, `drop_junk`,
-   `_PROTECTED_COLUMNS` protection, and per-package `_warn_missing_mandatory()`.
-3. **`tests/test_pipeline.py`** — end-to-end integration test.
-4. **Output module** — `src/biometaharmonizer/output.py`.
-5. **CLI entrypoint** — `biometaharmonizer run --input ids.txt --email user@email.com --output harmonized.csv`.
-6. **PyPI packaging** — finalize `pyproject.toml`, `MANIFEST.in`.
-7. **Manuscript benchmarking** — measure parse rates per field before/after Option C for Application Note results section. Before = current static dict, After = NCBI table + embeddings. The delta demonstrates the value of the approach.
+1. **CLI entrypoint** — `src/biometaharmonizer/cli.py`
+   `biometaharmonizer run --input ids.txt --email user@email.com --output out.csv`
+2. **Run `build_ncbi_attribute_cache.py` on real NCBI data** and validate fill rate improvement vs. `unified.json` baseline.
+3. **Manuscript benchmarking** — parse rates per field before/after Option C (baseline = unified.json, test = ncbi_attributes.xml + embeddings). The delta demonstrates the value of the approach.
+4. **PyPI release** — finalize `MANIFEST.in`, test twine upload to TestPyPI.
+5. **Application Note draft** — target *Bioinformatics* / *GigaScience* / *Microbial Genomics*.
 
 ### 10. Initialization Command
 Please acknowledge receipt of this protocol. Then summarize the current architectural approach in one sentence and state what the next immediate task is. Do not ask what to work on — begin Option C Step 1 immediately.
