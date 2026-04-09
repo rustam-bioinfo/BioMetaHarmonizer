@@ -45,37 +45,61 @@ Re-run this script at any time to refresh the cache against the latest NCBI attr
 
 ## Quick Start
 
-```python
-import sys, os
-sys.path.insert(0, "/content/BioMetaHarmonizer/src")
-os.chdir("/content")  # assembly summary files download here
+### Command line
 
-import biometaharmonizer as bmh
+```bash
+biometaharmonizer run \
+    --input  accessions.txt \
+    --email  your@email.com \
+    --output harmonized.csv
+```
+
+Optional flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--api-key KEY` | — | NCBI API key (raises rate limit to 10 req/s) |
+| `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Assembly summary cache directory |
+| `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` |
+| `--summary FILE` | — | Write per-column fill-rate CSV |
+| `--drop-sparse N` | 5 | Drop columns with fewer than N non-null values |
+| `--no-drop-junk` | off | Keep submitter-artifact columns (person names, emails) |
+| `--skip-dates` | off | Skip ISO 8601 date parsing |
+| `--skip-geo` | off | Skip geospatial resolution |
+| `--skip-one-health` | off | Skip One Health classification |
+| `--verbose` | off | Enable DEBUG logging |
+
+### Python API
+
+```python
+from biometaharmonizer.ingestion import set_email, ingest
+from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier, write, write_summary
 
 # 1. Ingest — accepts BioSample IDs, assembly accessions, or a mixed file
-bmh.ingest.set_email("your@email.com")
-df = bmh.ingest("accessions.txt")
+set_email("your@email.com")
+df = ingest("accessions.txt")
 
 # 2. Harmonize column names (Layer 1: NCBI XML synonyms; Layer 2: semantic fallback)
-mapper = bmh.KeyMapper()
+mapper = KeyMapper()
 df = mapper.map_columns(df)          # drop_sparse=5, drop_junk=True by default
 
-# 3. Parse dates → ISO 8601
-de = bmh.DateEngine()
-df["collection_date"] = de.parse(df["collection_date"])
+# 3. Parse dates → ISO 8601 truncated (YYYY / YYYY-MM / YYYY-MM-DD)
+de = DateEngine()
+date_df = de.parse_with_range(df["collection_date"])
+df["collection_date"] = date_df["collection_date"]
 
-# 4. Resolve geography → Country, Region, Locality, ISO3166
-ge = bmh.GeoEngine()
-geo = ge.parse(df["geo_loc_name"])   # returns a DataFrame
+# 4. Resolve geography → snake_case columns
+ge = GeoEngine()
+geo = ge.parse(df["geo_loc_name"])   # returns DataFrame with geo_country, geo_region, ...
 df = df.join(geo)
 
-# 5. Classify isolation source → One Health category
-oh = bmh.OneHealthClassifier()
-df["one_health_category"] = oh.classify(df["isolation_source"])
+# 5. Classify isolation source + host → One Health category
+oh = OneHealthClassifier()
+df["one_health_category"] = oh.classify_joint(df["isolation_source"], df["host"])
 
 # 6. Write output
-bmh.write(df, "harmonized.csv")
-bmh.write_summary(df, "harmonized_summary.csv")
+write(df, "harmonized.csv")
+write_summary(df, "fill_rates.csv")
 
 print(df.shape)
 ```
@@ -86,6 +110,7 @@ print(df.shape)
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
 │   ├── __init__.py             # version 0.3.0, full public API
+│   ├── cli.py                  # CLI entrypoint: biometaharmonizer run
 │   ├── ingestion.py            # Module 1: Ingestion + BioProject resolution
 │   ├── key_mapper.py           # Module 2: NCBI XML (Layer 1) + sentence-transformers (Layer 2)
 │   ├── date_engine.py          # Module 3: Temporal parsing (40+ formats → ISO 8601)
@@ -191,7 +216,7 @@ pytest tests/ -v --tb=short
 pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing
 ```
 
-All tests are self-contained (no live NCBI calls). Current: **172/172 passing**.
+All tests are self-contained (no live NCBI calls). Current: **163/163 passing**.
 
 ## Target Publication
 
