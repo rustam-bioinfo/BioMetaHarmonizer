@@ -26,12 +26,16 @@ When multiple raw columns map to the same standard key, they are coalesced
 
 import importlib.resources
 import json
+import logging
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 
 _PROTECTED_COLUMNS = frozenset([
@@ -200,7 +204,7 @@ class KeyMapper:
         if drop_sparse and drop_sparse > 0:
             df = self._drop_sparse_columns(df, threshold=drop_sparse)
 
-        self._warn_missing_mandatory(df)
+        self.compliance_report = self._warn_missing_mandatory(df)
         return df
 
     def _drop_junk_columns(self, df):
@@ -260,63 +264,62 @@ class KeyMapper:
         """
         For each ncbi_package group in df with >= MIN_WARN_GROUP_SIZE records,
         check fill rate of mandatory fields from mandatory_fields.json and
-        warn when fill < 50%. Falls back to 'default' for unknown packages.
-        Packages below MIN_WARN_GROUP_SIZE are silently skipped.
+        return a compliance DataFrame with columns:
+            package, field, total_records, filled_records, fill_pct, status
+
+        Status thresholds:
+            PASS: fill_pct >= 95
+            WARN: 80 <= fill_pct < 95
+            FAIL: fill_pct < 80
+
+        Logs warnings for WARN/FAIL rows. Falls back to 'default' for
+        unknown packages. Packages below MIN_WARN_GROUP_SIZE are silently skipped.
         """
+        rows = []
         if "ncbi_package" not in df.columns:
-            return
+            return pd.DataFrame(
+                columns=["package", "field", "total_records", "filled_records", "fill_pct", "status"]
+            )
 
         for pkg, group in df.groupby("ncbi_package", dropna=False):
             n = len(group)
             if n < MIN_WARN_GROUP_SIZE:
                 continue
-            pkg_key  = pkg if pkg in self.mandatory else "default"
+            pkg_key = pkg if pkg in self.mandatory else "default"
             required = self.mandatory.get(pkg_key, [])
             for field in required:
                 if field not in df.columns:
-                    print(f"[WARNING] [{pkg}] mandatory field '{field}' absent from dataset entirely.")
+                    filled = 0
+                    pct = 0.0
                 else:
-                    fill = group[field].notna().sum()
-                    pct  = fill / n * 100
-                    if pct < 50:
-                        print(f"[WARNING] [{pkg}] mandatory field '{field}' fill rate: {fill}/{n} ({pct:.0f}%).")
+                    filled = int(group[field].notna().sum())
+                    pct = filled / n * 100
 
-    def get_parser_routing(self):
-        """
-        Return a dict of standard_key -> parser name for downstream dispatch.
+                if pct >= 95:
+                    status = "PASS"
+                elif pct >= 80:
+                    status = "WARN"
+                else:
+                    status = "FAIL"
 
-        Parser names are derived from the unified.json convention and kept
-        for backward compatibility with downstream pipeline code.
-        """
-        routing = {
-            "collection_date":        "date_engine",
-            "geo_loc_name":           "geo_engine",
-            "lat_lon":                "string_cleaner",
-            "host":                   "one_health_engine",
-            "isolation_source":       "one_health_engine",
-            "env_broad_scale":        "string_cleaner",
-            "env_local_scale":        "string_cleaner",
-            "env_medium":             "string_cleaner",
-            "host_disease":           "string_cleaner",
-            "isolate":                "string_cleaner",
-            "sub_strain":             "string_cleaner",
-            "serotype":               "string_cleaner",
-            "serovar":                "string_cleaner",
-            "host_age":               "string_cleaner",
-            "host_sex":               "string_cleaner",
-            "host_tissue_sampled":    "string_cleaner",
-            "genotype":               "string_cleaner",
-            "antimicrobial_resistance": "string_cleaner",
-            "outbreak":               "string_cleaner",
-            "collected_by":           "string_cleaner",
-            "sequencing_method":      "string_cleaner",
-            "assembly_method":        "string_cleaner",
-            "culture_collection":     "string_cleaner",
-            "samp_size":              "string_cleaner",
-            "samp_mat_process":       "string_cleaner",
-            "temp":                   "string_cleaner",
-            "ph":                     "string_cleaner",
-            "depth":                  "string_cleaner",
-            "elev":                   "string_cleaner",
-        }
-        return routing
+                rows.append({
+                    "package": pkg,
+                    "field": field,
+                    "total_records": n,
+                    "filled_records": filled,
+                    "fill_pct": round(pct, 1),
+                    "status": status,
+                })
+
+                if status == "FAIL":
+                    logger.warning(
+                        "[%s] mandatory field '%s' fill rate: %d/%d (%.0f%%).",
+                        pkg, field, filled, n, pct,
+                    )
+                elif status == "WARN":
+                    logger.warning(
+                        "[%s] mandatory field '%s' fill rate: %d/%d (%.0f%%) — below 95%%.",
+                        pkg, field, filled, n, pct,
+                    )
+
+        return pd.DataFrame(rows, columns=["package", "field", "total_records", "filled_records", "fill_pct", "status"])
