@@ -103,6 +103,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Optional — key mapper
     run_p.add_argument(
+        "--model",
+        metavar="MODEL",
+        default=None,
+        help=(
+            "sentence-transformers model for Layer 2 semantic column matching. "
+            "Defaults to the model recorded in ncbi_cache_meta.json "
+            "(written by build_ncbi_attribute_cache.py), which is "
+            "'all-MiniLM-L6-v2' unless the cache was rebuilt with a different model. "
+            "The model you pass MUST match the one used to build ncbi_embeddings.npy. "
+            "Examples: 'all-mpnet-base-v2', 'BAAI/bge-small-en-v1.5', "
+            "'intfloat/e5-small-v2'."
+        ),
+    )
+    run_p.add_argument(
+        "--threshold",
+        type=float,
+        metavar="FLOAT",
+        default=None,
+        help="Cosine similarity threshold for Layer 2 acceptance (default: 0.75). "
+             "Lower values increase recall at the cost of precision.",
+    )
+    run_p.add_argument(
         "--drop-sparse",
         type=int,
         metavar="N",
@@ -261,8 +283,13 @@ def _run(args: argparse.Namespace) -> int:
 
     # ---- 2. Key harmonization ------------------------------------------------
     logger.info("Step 2/5  Key harmonization")
+    km_kwargs = {}
+    if args.model:
+        km_kwargs["model"] = args.model
+    if args.threshold is not None:
+        km_kwargs["threshold"] = args.threshold
     try:
-        mapper = KeyMapper()
+        mapper = KeyMapper(**km_kwargs)
         df = mapper.map_columns(
             df,
             drop_sparse=args.drop_sparse,

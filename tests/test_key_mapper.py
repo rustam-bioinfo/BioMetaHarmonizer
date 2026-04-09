@@ -409,3 +409,64 @@ def test_runtime_error_if_no_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(key_mapper, "_XML_CACHE", tmp_path / "nonexistent.xml")
     with pytest.raises(RuntimeError):
         KeyMapper()
+
+
+# ── Model and threshold configuration tests ──────────────────────────────────
+
+def test_default_model_name_is_set(km):
+    """KeyMapper should have a non-empty _model_name after construction."""
+    assert isinstance(km._model_name, str)
+    assert len(km._model_name) > 0
+
+
+def test_explicit_model_name_stored(monkeypatch, tmp_path):
+    """Passing model= stores the custom name without loading the model."""
+    import biometaharmonizer.key_mapper as key_mapper
+    monkeypatch.setattr(key_mapper, "_XML_CACHE", key_mapper._XML_CACHE)
+    mapper = KeyMapper(model="all-MiniLM-L12-v2")
+    assert mapper._model_name == "all-MiniLM-L12-v2"
+    # Model must NOT be loaded yet (lazy init)
+    assert mapper._model is None
+
+
+def test_explicit_threshold_overrides_default(km):
+    """Passing threshold= should override SEMANTIC_THRESHOLD on the instance."""
+    mapper = KeyMapper(threshold=0.50)
+    assert mapper.SEMANTIC_THRESHOLD == 0.50
+
+
+def test_threshold_does_not_affect_class_default(km):
+    """Instance threshold override must not mutate the class-level default."""
+    _ = KeyMapper(threshold=0.50)
+    assert KeyMapper.SEMANTIC_THRESHOLD == 0.75
+
+
+def test_cached_model_name_reads_meta(tmp_path, monkeypatch):
+    """_cached_model_name() should return the model recorded in ncbi_cache_meta.json."""
+    import json
+    import biometaharmonizer.key_mapper as key_mapper
+
+    meta = {"model": "BAAI/bge-small-en-v1.5", "embedding_dim": 384}
+    meta_file = tmp_path / "ncbi_cache_meta.json"
+    meta_file.write_text(json.dumps(meta), encoding="utf-8")
+
+    monkeypatch.setattr(key_mapper, "_META_FILE", meta_file)
+    assert key_mapper._cached_model_name() == "BAAI/bge-small-en-v1.5"
+
+
+def test_cached_model_name_fallback_when_no_meta(tmp_path, monkeypatch):
+    """_cached_model_name() should return _DEFAULT_MODEL when meta file is absent."""
+    import biometaharmonizer.key_mapper as key_mapper
+
+    monkeypatch.setattr(key_mapper, "_META_FILE", tmp_path / "nonexistent.json")
+    assert key_mapper._cached_model_name() == key_mapper._DEFAULT_MODEL
+
+
+def test_cached_model_name_fallback_on_corrupt_meta(tmp_path, monkeypatch):
+    """_cached_model_name() should return _DEFAULT_MODEL when meta JSON is corrupt."""
+    import biometaharmonizer.key_mapper as key_mapper
+
+    bad_file = tmp_path / "ncbi_cache_meta.json"
+    bad_file.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(key_mapper, "_META_FILE", bad_file)
+    assert key_mapper._cached_model_name() == key_mapper._DEFAULT_MODEL

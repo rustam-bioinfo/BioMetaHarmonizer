@@ -9,11 +9,33 @@ Resolves raw DataFrame column names to NCBI standard keys using a two-layer appr
 
   Layer 2 (semantic fallback): cosine similarity between a sentence-transformers
       embedding of the column name and precomputed embeddings of all NCBI
-      harmonized names (schemas/ncbi_embeddings.npy). Model: all-MiniLM-L6-v2.
+      harmonized names (schemas/ncbi_embeddings.npy).
+
+      The model used for Layer 2 is configurable.  The default is the model
+      that was used when building the cache (stored in ncbi_cache_meta.json).
+      You can override it at KeyMapper construction time:
+
+          mapper = KeyMapper(model="BAAI/bge-small-en-v1.5")
+
+      IMPORTANT: if you override the model, the precomputed embeddings in
+      ncbi_embeddings.npy will no longer match because they were produced by
+      a different model.  Rebuild the cache first:
+
+          python scripts/build_ncbi_attribute_cache.py --model BAAI/bge-small-en-v1.5
+
+      Supported models (any sentence-transformers model works; these are tested):
+          all-MiniLM-L6-v2         (default, 384-dim, fast, small)
+          all-MiniLM-L12-v2        (384-dim, slightly better quality)
+          all-mpnet-base-v2        (768-dim, higher quality, slower)
+          BAAI/bge-small-en-v1.5   (384-dim, strong retrieval)
+          BAAI/bge-base-en-v1.5    (768-dim, strong retrieval)
+          intfloat/e5-small-v2     (384-dim, E5 family)
+          intfloat/e5-base-v2      (768-dim, E5 family)
+
       Threshold: SEMANTIC_THRESHOLD = 0.75. Model is loaded lazily on first use.
 
 The NCBI attribute cache must be built before using KeyMapper:
-    python scripts/build_ncbi_attribute_cache.py
+    python scripts/build_ncbi_attribute_cache.py [--model MODEL_NAME]
 
 Mandatory field validation is per-package: each record's ncbi_package value is
 looked up in mandatory_fields.json and fill rates are reported per package rather
@@ -69,12 +91,34 @@ def _schemas_dir() -> Path:
         return Path(__file__).parent / "schemas"
 
 
-_SCHEMAS_DIR = _schemas_dir()
-_XML_CACHE   = _SCHEMAS_DIR / "ncbi_attributes.xml"
-_EMB_FILE    = _SCHEMAS_DIR / "ncbi_embeddings.npy"
-_NAMES_FILE  = _SCHEMAS_DIR / "ncbi_harmonized_names.json"
+_SCHEMAS_DIR  = _schemas_dir()
+_XML_CACHE    = _SCHEMAS_DIR / "ncbi_attributes.xml"
+_EMB_FILE     = _SCHEMAS_DIR / "ncbi_embeddings.npy"
+_NAMES_FILE   = _SCHEMAS_DIR / "ncbi_harmonized_names.json"
+_META_FILE    = _SCHEMAS_DIR / "ncbi_cache_meta.json"
 
 _DEFAULT_MANDATORY = _SCHEMAS_DIR / "mandatory_fields.json"
+
+# Default model — used when ncbi_cache_meta.json is absent or has no model key.
+_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+
+
+def _cached_model_name() -> str:
+    """
+    Return the sentence-transformers model name that was used to build the
+    current embedding cache, as recorded in ncbi_cache_meta.json.
+    Falls back to _DEFAULT_MODEL if the metadata file does not exist.
+    """
+    if _META_FILE.exists():
+        try:
+            with open(_META_FILE, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+            model = meta.get("model", _DEFAULT_MODEL)
+            if model:
+                return model
+        except (json.JSONDecodeError, OSError):
+            pass
+    return _DEFAULT_MODEL
 
 MIN_WARN_GROUP_SIZE = 10
 
@@ -91,11 +135,34 @@ class KeyMapper:
     ----------
     mandatory_path : str or Path, optional
         Override path to mandatory_fields.json. Defaults to schemas/mandatory_fields.json.
+    model : str, optional
+        sentence-transformers model name to use for Layer 2 semantic matching.
+        Defaults to the model recorded in ncbi_cache_meta.json (written by
+        build_ncbi_attribute_cache.py), which is 'all-MiniLM-L6-v2' unless
+        you rebuilt the cache with a different model.
+
+        IMPORTANT: the model you pass here must match the model used to build
+        ncbi_embeddings.npy, otherwise similarity scores will be meaningless.
+        Rebuild the cache with the same model first:
+
+            python scripts/build_ncbi_attribute_cache.py --model <model_name>
+
+        Supported examples:
+            "all-MiniLM-L6-v2"       (default)
+            "all-MiniLM-L12-v2"
+            "all-mpnet-base-v2"
+            "BAAI/bge-small-en-v1.5"
+            "BAAI/bge-base-en-v1.5"
+            "intfloat/e5-small-v2"
+            "intfloat/e5-base-v2"
+    threshold : float, optional
+        Cosine similarity threshold for Layer 2 acceptance (default 0.75).
+        Lower values increase recall at the cost of precision.
     """
 
     SEMANTIC_THRESHOLD = 0.75
 
-    def __init__(self, mandatory_path=None):
+    def __init__(self, mandatory_path=None, model: str = None, threshold: float = None):
         import biometaharmonizer.key_mapper as _this_module
 
         xml_cache  = _this_module._XML_CACHE
@@ -118,7 +185,12 @@ class KeyMapper:
         self._embeddings = raw_emb / np.where(norms == 0, 1, norms)
         self._embeddings = self._embeddings.astype(np.float32)
 
-        self._model = None
+        # Model name: explicit argument > cache metadata > hardcoded default
+        self._model_name: str = model if model is not None else _cached_model_name()
+        self._model = None  # loaded lazily on first semantic lookup
+
+        if threshold is not None:
+            self.SEMANTIC_THRESHOLD = float(threshold)
 
         mandatory_path = Path(mandatory_path) if mandatory_path else _DEFAULT_MANDATORY
         if mandatory_path.exists():
@@ -161,7 +233,8 @@ class KeyMapper:
 
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.debug("Loading sentence-transformers model: %s", self._model_name)
+            self._model = SentenceTransformer(self._model_name)
 
         vec = self._model.encode([col_lower], normalize_embeddings=True)[0].astype(np.float32)
         sims = self._embeddings @ vec
