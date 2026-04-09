@@ -26,7 +26,9 @@ MAX_ATTEMPTS = 3
 TIMEOUT = 30
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-_SCHEMAS_DIR = Path(__file__).parent.parent / "schemas"
+# Write cache files into the package schemas/ directory so they are found
+# by importlib.resources regardless of install mode.
+_SCHEMAS_DIR = Path(__file__).parent.parent / "src" / "biometaharmonizer" / "schemas"
 
 
 def fetch_xml(url: str) -> bytes:

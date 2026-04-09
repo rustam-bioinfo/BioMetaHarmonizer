@@ -24,6 +24,7 @@ When multiple raw columns map to the same standard key, they are coalesced
 (first non-null value wins).
 """
 
+import importlib.resources
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -42,8 +43,29 @@ _PROTECTED_COLUMNS = frozenset([
 ])
 
 _PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
+_EMAIL_RE       = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
-_SCHEMAS_DIR = Path(__file__).parent.parent.parent / "schemas"
+
+def _schemas_dir() -> Path:
+    """
+    Locate the schemas/ directory in a way that works for both editable and
+    non-editable installs.
+
+    Strategy:
+      1. Try importlib.resources (correct for wheel / non-editable installs).
+      2. Fall back to __file__-relative path (works for editable installs and
+         development checkouts where schemas/ is inside src/biometaharmonizer/).
+    """
+    try:
+        # Python 3.9+: importlib.resources.files() returns a Traversable
+        ref = importlib.resources.files("biometaharmonizer") / "schemas"
+        # Materialise to a real Path so callers can use / operator freely
+        return Path(str(ref))
+    except (TypeError, ModuleNotFoundError):
+        return Path(__file__).parent / "schemas"
+
+
+_SCHEMAS_DIR = _schemas_dir()
 _XML_CACHE   = _SCHEMAS_DIR / "ncbi_attributes.xml"
 _EMB_FILE    = _SCHEMAS_DIR / "ncbi_embeddings.npy"
 _NAMES_FILE  = _SCHEMAS_DIR / "ncbi_harmonized_names.json"
@@ -185,10 +207,10 @@ class KeyMapper:
         junk = [
             col for col in df.columns
             if col not in _PROTECTED_COLUMNS
-            and _PERSON_NAME_RE.match(col)
+            and (_PERSON_NAME_RE.match(col) or _EMAIL_RE.match(col))
         ]
         if junk:
-            print(f"[INFO] Dropping {len(junk)} junk columns (person names / artifacts): {junk}")
+            print(f"[INFO] Dropping {len(junk)} junk columns (person names / email artifacts): {junk}")
             df = df.drop(columns=junk)
         return df
 

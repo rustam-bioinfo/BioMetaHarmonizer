@@ -27,5 +27,8 @@ biometaharmonizer = "biometaharmonizer.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+biometaharmonizer = ["schemas/*.json", "schemas/*.xml", "schemas/*.npy"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
