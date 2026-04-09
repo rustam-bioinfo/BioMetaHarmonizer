@@ -62,6 +62,8 @@ Optional flags:
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Assembly summary cache directory |
 | `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` |
 | `--summary FILE` | — | Write per-column fill-rate CSV |
+| `--model MODEL` | from cache metadata | sentence-transformers model for Layer 2 semantic matching; must match the model used to build `ncbi_embeddings.npy` |
+| `--threshold FLOAT` | 0.75 | Cosine similarity threshold for Layer 2 acceptance (lower = more recall, less precision) |
 | `--drop-sparse N` | 5 | Drop columns with fewer than N non-null values |
 | `--no-drop-junk` | off | Keep submitter-artifact columns (person names, emails) |
 | `--skip-dates` | off | Skip ISO 8601 date parsing |
@@ -216,7 +218,7 @@ pytest tests/ -v --tb=short
 pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing
 ```
 
-All tests are self-contained (no live NCBI calls). Current: **163/163 passing**.
+All tests are self-contained (no live NCBI calls). Current: **170/170 passing**.
 
 ## Target Publication
 
