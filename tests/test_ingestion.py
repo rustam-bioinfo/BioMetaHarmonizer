@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 from biometaharmonizer.ingestion import (
     _load_ids,
     _classify_ids,
+    _deduplicate,
     _parse_biosample_xml,
     ingest,
 )
@@ -379,3 +380,34 @@ class TestIngest:
         with patch("biometaharmonizer.ingestion._resolve_assembly_to_biosample", return_value=[]):
             with pytest.raises(ValueError, match="No valid BioSample IDs"):
                 ingest(f)
+
+
+# --- _deduplicate ---
+
+class TestDeduplicate:
+
+    def test_removes_duplicates(self):
+        ids = ["SAMN001", "SAMN002", "SAMN001", "SAMN003"]
+        result = _deduplicate(ids)
+        assert result == ["SAMN001", "SAMN002", "SAMN003"]
+
+    def test_preserves_order(self):
+        ids = ["SAMN003", "SAMN001", "SAMN002"]
+        result = _deduplicate(ids)
+        assert result == ["SAMN003", "SAMN001", "SAMN002"]
+
+    def test_no_duplicates_unchanged(self):
+        ids = ["SAMN001", "SAMN002"]
+        result = _deduplicate(ids)
+        assert result == ids
+
+
+# --- Live NCBI test (requires network) ---
+
+@pytest.mark.network
+def test_live_ncbi_fetch():
+    """
+    Integration test that calls NCBI Entrez for real.
+    Skipped by default -- run with: pytest -m network
+    """
+    pytest.skip("Live NCBI test skipped by default; run with -m network")

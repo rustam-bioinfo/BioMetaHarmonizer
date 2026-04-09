@@ -1,6 +1,6 @@
 """
 End-to-end integration tests for the BioMetaHarmonizer pipeline.
-No real NCBI network calls — all inputs are synthetic DataFrames.
+No real NCBI network calls -- all inputs are synthetic DataFrames.
 """
 
 import json
@@ -15,7 +15,7 @@ from biometaharmonizer.one_health import OneHealthClassifier
 from biometaharmonizer.output import write
 
 
-# ─── Fake XML reused from test_key_mapper ────────────────────────────────────
+# --- Fake XML reused from test_key_mapper ---
 
 _FAKE_XML = """\
 <?xml version="1.0"?>
@@ -104,7 +104,7 @@ def mock_df():
     })
 
 
-# ─── Tests ────────────────────────────────────────────────────────────────────
+# --- Tests ---
 
 def test_pipeline_keymapper_renames(km, mock_df):
     result = km.map_columns(mock_df, drop_sparse=0)
@@ -115,31 +115,26 @@ def test_pipeline_keymapper_renames(km, mock_df):
 
 
 def test_pipeline_date_engine(mock_df):
-    # DateEngine.parse() operates on a Series and returns a parsed Series
     mock_df = mock_df.rename(columns={"collection date": "collection_date"})
     engine = DateEngine()
     parsed = engine.parse(mock_df["collection_date"])
     assert parsed is not None
     assert len(parsed) == len(mock_df)
-    # At least some values should be valid ISO dates
     non_null = parsed.dropna()
     assert len(non_null) > 0
 
 
 def test_pipeline_geo_engine(mock_df):
-    # GeoEngine.parse() operates on a Series and returns a DataFrame
-    # with columns: Country, Region, Locality, ISO3166
     mock_df = mock_df.rename(columns={"geographic location": "geo_loc_name"})
     engine = GeoEngine()
     geo_df = engine.parse(mock_df["geo_loc_name"])
     assert isinstance(geo_df, pd.DataFrame)
-    assert "Country" in geo_df.columns
-    non_null_countries = geo_df["Country"].dropna()
+    assert "geo_country" in geo_df.columns
+    non_null_countries = geo_df["geo_country"].dropna()
     assert len(non_null_countries) > 0
 
 
 def test_pipeline_one_health(mock_df):
-    # OneHealthClassifier.classify() operates on a Series and returns a Series
     engine = OneHealthClassifier()
     result = engine.classify(mock_df["isolation_source"])
     assert result is not None

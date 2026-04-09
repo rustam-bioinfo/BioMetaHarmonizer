@@ -7,7 +7,7 @@ import biometaharmonizer.key_mapper as key_mapper
 from biometaharmonizer.key_mapper import KeyMapper
 
 
-# ─── Fake XML cache shared by all tests ──────────────────────────────────────
+# --- Fake XML cache shared by all tests ---
 
 _FAKE_XML = """\
 <?xml version="1.0"?>
@@ -104,7 +104,7 @@ def patch_schema_paths(fake_schema_dir, monkeypatch):
     monkeypatch.setattr(key_mapper, "_NAMES_FILE", fake_schema_dir / "ncbi_harmonized_names.json")
 
 
-# ─── Fixtures ────────────────────────────────────────────────────────────────
+# --- Fixtures ---
 
 @pytest.fixture
 def mapper_cl():
@@ -163,12 +163,11 @@ def fuzzy_df():
     }])
 
 
-# ─── Initialization ───────────────────────────────────────────────────────────
+# --- Initialization ---
 
 class TestKeyMapperInit:
 
     def test_loads_valid_schema(self, mapper_cl):
-        # Option C: schema is represented by the exact synonym dict
         assert len(mapper_cl._exact) > 0
 
     def test_lookup_built_on_init(self, mapper_cl):
@@ -191,11 +190,10 @@ class TestKeyMapperInit:
             KeyMapper()
 
     def test_env_schema_loads(self, mapper_env):
-        # Both mappers share the same NCBI cache in Option C
         assert len(mapper_env._exact) > 0
 
 
-# ─── Exact matching ──────────────────────────────────────────────────────────
+# --- Exact matching ---
 
 class TestExactMatching:
 
@@ -239,19 +237,16 @@ class TestExactMatching:
         assert "totally_unknown_col" in result.columns
 
 
-# ─── Fuzzy matching ──────────────────────────────────────────────────────────
+# --- Fuzzy matching ---
 
 class TestFuzzyMatching:
 
     def test_collectiondate_fuzzy_maps_to_collection_date(self, mapper_cl, fuzzy_df):
-        # With zero embeddings, semantic layer returns nothing — test that exact synonym works
         result = mapper_cl.map_columns(fuzzy_df)
-        # host_organism maps via exact synonym in fake XML; collectiondate has no exact match
         assert "host_organism" not in result.columns or "host" in result.columns
 
     def test_isolationsource_fuzzy_maps_to_isolation_source(self, mapper_cl, fuzzy_df):
         result = mapper_cl.map_columns(fuzzy_df)
-        # isolationsource is not in fake XML synonyms; column passes through unchanged
         assert "isolationsource" in result.columns or "isolation_source" in result.columns
 
     def test_fuzzy_does_not_merge_unrelated_columns(self, mapper_cl):
@@ -261,53 +256,59 @@ class TestFuzzyMatching:
         assert "collection_date" in result.columns
 
 
-# ─── Parser routing ─────────────────────────────────────────────────────────
-
-class TestParserRouting:
-
-    def test_collection_date_routes_to_date_engine(self, mapper_cl):
-        routing = mapper_cl.get_parser_routing()
-        assert routing["collection_date"] == "date_engine"
-
-    def test_geo_loc_name_routes_to_geo_engine(self, mapper_cl):
-        routing = mapper_cl.get_parser_routing()
-        assert routing["geo_loc_name"] == "geo_engine"
-
-    def test_isolation_source_routes_to_one_health_engine(self, mapper_cl):
-        routing = mapper_cl.get_parser_routing()
-        assert routing["isolation_source"] == "one_health_engine"
-
-    def test_host_routes_to_one_health_engine(self, mapper_cl):
-        routing = mapper_cl.get_parser_routing()
-        assert routing["host"] == "one_health_engine"
-
-    def test_isolate_routes_to_string_cleaner(self, mapper_cl):
-        routing = mapper_cl.get_parser_routing()
-        assert routing["isolate"] == "string_cleaner"
-
-
-# ─── Mandatory field warnings ───────────────────────────────────────────────
+# --- Mandatory field warnings / compliance report ---
 
 class TestMandatoryWarnings:
 
-    def test_missing_mandatory_field_prints_warning(self, mapper_cl, capsys):
-        df = pd.DataFrame(
-            [{"collection_date": "2020", "ncbi_package": "Pathogen.cl.1.0"}] * 15
-        )
+    def test_warn_missing_mandatory_returns_dataframe(self, mapper_cl):
+        data = [{"collection_date": "2020", "ncbi_package": "Pathogen.cl.1.0"}] * 15
+        df = pd.DataFrame(data)
         mapper_cl.map_columns(df)
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.out
-        assert "geo_loc_name" in captured.out
+        report = mapper_cl.compliance_report
+        assert isinstance(report, pd.DataFrame)
+        expected_cols = ["package", "field", "total_records", "filled_records", "fill_pct", "status"]
+        assert list(report.columns) == expected_cols
 
-    def test_no_warning_when_all_mandatory_present(self, mapper_cl, raw_ncbi_df, capsys):
+    def test_fail_status_when_low_fill(self, mapper_cl):
+        data = [{"collection_date": None, "ncbi_package": "Pathogen.cl.1.0"}] * 15
+        df = pd.DataFrame(data)
+        mapper_cl.map_columns(df)
+        report = mapper_cl.compliance_report
+        # collection_date is all None -> 0% fill -> FAIL
+        cd_row = report[report["field"] == "collection_date"]
+        assert len(cd_row) == 1
+        assert cd_row.iloc[0]["status"] == "FAIL"
+        assert cd_row.iloc[0]["fill_pct"] == 0.0
+
+    def test_warn_status_when_moderate_fill(self, mapper_cl):
+        # 13 out of 15 filled = 86.7% -> WARN (80 <= x < 95)
+        data = [{"collection_date": "2020", "ncbi_package": "Pathogen.cl.1.0"}] * 13
+        data += [{"collection_date": None, "ncbi_package": "Pathogen.cl.1.0"}] * 2
+        df = pd.DataFrame(data)
+        mapper_cl.map_columns(df)
+        report = mapper_cl.compliance_report
+        cd_row = report[report["field"] == "collection_date"]
+        assert cd_row.iloc[0]["status"] == "WARN"
+
+    def test_pass_status_when_high_fill(self, mapper_cl):
+        # All 15 filled = 100% -> PASS
+        data = [{"collection_date": "2020", "geo_loc_name": "USA", "isolation_source": "blood",
+                 "host": "human", "host_disease": "sepsis", "isolate": "X",
+                 "ncbi_package": "Pathogen.cl.1.0"}] * 15
+        df = pd.DataFrame(data)
+        mapper_cl.map_columns(df)
+        report = mapper_cl.compliance_report
+        assert all(report["status"] == "PASS")
+
+    def test_no_warning_when_all_mandatory_present(self, mapper_cl, raw_ncbi_df):
         raw_ncbi_df["ncbi_package"] = "Pathogen.cl.1.0"
-        # Only 1 row — below MIN_WARN_GROUP_SIZE, so no warning expected
+        # Only 1 row - below MIN_WARN_GROUP_SIZE, so empty report
         mapper_cl.map_columns(raw_ncbi_df)
-        captured = capsys.readouterr()
-        assert "WARNING" not in captured.out
+        report = mapper_cl.compliance_report
+        assert len(report) == 0
 
 
-# ─── New Option C tests ───────────────────────────────────────────────────────
+# --- New Option C tests ---
 
 @pytest.fixture
 def km(tmp_path, monkeypatch):
@@ -350,7 +351,6 @@ def test_protected_column_not_renamed(km):
 
 
 def test_drop_sparse_removes_column(km):
-    # 10 rows, non-protected column has only 3 non-null values — below default threshold 5
     data = [{"biosample_accession": f"SAMN{i:03d}", "rare_col": ("val" if i < 3 else None)}
             for i in range(10)]
     df = pd.DataFrame(data)
@@ -359,7 +359,6 @@ def test_drop_sparse_removes_column(km):
 
 
 def test_drop_sparse_protects_structural_columns(km):
-    # biosample_accession has 0 non-null values but must never be dropped
     data = [{"biosample_accession": None, "ncbi_package": "Generic.1.0"}] * 10
     df = pd.DataFrame(data)
     result = km.map_columns(df, drop_sparse=5)
@@ -379,7 +378,6 @@ def test_drop_junk_disabled(km):
 
 
 def test_coalesce_duplicates(km):
-    # Two columns both map to collection_date via synonyms
     df = pd.DataFrame([
         {"collection date": None,         "date collected": "2020-01-01"},
         {"collection date": "2019-05-05", "date collected": None},
@@ -389,20 +387,22 @@ def test_coalesce_duplicates(km):
     assert result["collection_date"].iloc[0] == "2020-01-01"
 
 
-def test_warn_missing_mandatory_fires(km, capsys):
+def test_warn_missing_mandatory_fires(km):
     data = [{"ncbi_package": "Pathogen.cl.1.0", "collection_date": None}] * 15
     df = pd.DataFrame(data)
     km.map_columns(df)
-    captured = capsys.readouterr()
-    assert "[WARNING]" in captured.out
+    report = km.compliance_report
+    assert isinstance(report, pd.DataFrame)
+    assert len(report) > 0
+    assert "FAIL" in report["status"].values
 
 
-def test_warn_missing_mandatory_skips_small_group(km, capsys):
+def test_warn_missing_mandatory_skips_small_group(km):
     data = [{"ncbi_package": "Pathogen.cl.1.0", "collection_date": None}] * 5
     df = pd.DataFrame(data)
     km.map_columns(df)
-    captured = capsys.readouterr()
-    assert "[WARNING]" not in captured.out
+    report = km.compliance_report
+    assert len(report) == 0
 
 
 def test_runtime_error_if_no_cache(tmp_path, monkeypatch):

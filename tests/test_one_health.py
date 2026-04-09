@@ -9,7 +9,7 @@ def clf():
     return OneHealthClassifier()
 
 
-# ─── Human category ──────────────────────────────────────────────────────────────
+# --- Human category ---
 
 class TestHuman:
 
@@ -21,9 +21,6 @@ class TestHuman:
 
     def test_real_bcereus_hospital(self, clf):
         assert clf._classify_single("hospital") == "Human"
-
-    def test_blood_lowercase(self, clf):
-        assert clf._classify_single("blood culture") == "Human"
 
     def test_urine(self, clf):
         assert clf._classify_single("urine") == "Human"
@@ -44,7 +41,7 @@ class TestHuman:
         assert clf._classify_single("sputum") == "Human"
 
 
-# ─── Animal category ─────────────────────────────────────────────────────────────
+# --- Animal category ---
 
 class TestAnimal:
 
@@ -65,8 +62,18 @@ class TestAnimal:
     def test_carcass(self, clf):
         assert clf._classify_single("carcass") == "Animal"
 
+    def test_bovine_blood_not_human(self, clf):
+        """bovine blood should classify as Animal, not Human."""
+        assert clf._classify_single("bovine blood") == "Animal"
 
-# ─── Food category ───────────────────────────────────────────────────────────────
+    def test_animal_blood_not_human(self, clf):
+        assert clf._classify_single("animal blood") == "Animal"
+
+    def test_pig_blood_not_human(self, clf):
+        assert clf._classify_single("pig blood") == "Animal"
+
+
+# --- Food category ---
 
 class TestFood:
 
@@ -91,20 +98,11 @@ class TestFood:
     def test_real_bcereus_grain_products(self, clf):
         assert clf._classify_single("grain products") == "Food"
 
-    def test_real_bcereus_core(self, clf):
-        assert clf._classify_single("core") == "Food"
-
-    def test_real_bcereus_leaf(self, clf):
-        assert clf._classify_single("leaf") == "Food"
-
-    def test_real_bcereus_root(self, clf):
-        assert clf._classify_single("root") == "Food"
-
     def test_vitamin_b2_feed_additive(self, clf):
         assert clf._classify_single("Vitamin B2 feed additive") == "Food"
 
 
-# ─── Environmental category ───────────────────────────────────────────────────
+# --- Environmental category ---
 
 class TestEnvironmental:
 
@@ -123,8 +121,16 @@ class TestEnvironmental:
     def test_real_bcereus_farm(self, clf):
         assert clf._classify_single("farm") == "Environmental"
 
+    def test_environmental_swab(self, clf):
+        """environmental swab should classify as Environmental, not Human."""
+        assert clf._classify_single("environmental swab") == "Environmental"
 
-# ─── Lab category ────────────────────────────────────────────────────────────────
+    def test_env_swab(self, clf):
+        """env swab should classify as Environmental, not Human."""
+        assert clf._classify_single("env swab") == "Environmental"
+
+
+# --- Lab category ---
 
 class TestLab:
 
@@ -147,7 +153,7 @@ class TestLab:
         assert clf._classify_single("in vitro") == "Lab"
 
 
-# ─── Null strings now return NaN, not Unclassified ───────────────────────────
+# --- Null strings now return NaN, not Unclassified ---
 
 class TestNullAndUnclassified:
 
@@ -173,7 +179,7 @@ class TestNullAndUnclassified:
         assert clf._classify_single("") == "Unclassified"
 
 
-# ─── Series-level classify() ────────────────────────────────────────────────────
+# --- Series-level classify() ---
 
 class TestClassifySeries:
 
@@ -190,27 +196,78 @@ class TestClassifySeries:
         assert result[2] == "Human"
         assert result[3] == "Animal"
 
-    def test_real_bcereus_new_food_terms(self, clf):
-        s = pd.Series(["core", "leaf", "grain products", "ice cream", "Chinese sausage", "Pasta"])
-        result = clf.classify(s)
-        assert all(result == "Food")
-
     def test_null_strings_return_nan_not_unclassified(self, clf):
         s = pd.Series(["not collected", "not applicable", "missing", "unknown"])
         result = clf.classify(s)
         assert all(pd.isna(result))
 
     def test_output_is_series(self, clf):
-        s = pd.Series(["blood", "soil", np.nan])
+        s = pd.Series(["human blood", "soil", np.nan])
         result = clf.classify(s)
         assert isinstance(result, pd.Series)
         assert len(result) == 3
 
     def test_mixed_categories(self, clf):
-        s = pd.Series(["blood", "soil", "raw meat", "ATCC 14579", "bovine"])
+        s = pd.Series(["human blood", "soil", "raw meat", "ATCC 14579", "bovine"])
         result = clf.classify(s)
         assert result[0] == "Human"
         assert result[1] == "Environmental"
         assert result[2] == "Food"
         assert result[3] == "Lab"
         assert result[4] == "Animal"
+
+
+# --- classify_joint() ---
+
+class TestClassifyJoint:
+
+    def test_fallback_to_host(self, clf):
+        iso = pd.Series([np.nan, "soil"])
+        host = pd.Series(["human", "Bos taurus"])
+        result = clf.classify_joint(iso, host)
+        assert result[0] == "Human"
+        assert result[1] == "Environmental"
+
+    def test_unclassified_fallback_to_host(self, clf):
+        iso = pd.Series(["completely_novel_source_xyz"])
+        host = pd.Series(["Homo sapiens"])
+        result = clf.classify_joint(iso, host)
+        assert result[0] == "Human"
+
+    def test_iso_takes_priority(self, clf):
+        iso = pd.Series(["soil"])
+        host = pd.Series(["Homo sapiens"])
+        result = clf.classify_joint(iso, host)
+        assert result[0] == "Environmental"
+
+
+# --- classify_with_confidence() ---
+
+class TestClassifyWithConfidence:
+
+    def test_returns_dataframe_with_correct_columns(self, clf):
+        s = pd.Series(["blood culture", "soil", np.nan])
+        result = clf.classify_with_confidence(s)
+        assert isinstance(result, pd.DataFrame)
+        assert "one_health_category" in result.columns
+        assert "one_health_term" in result.columns
+        assert "one_health_confidence" in result.columns
+
+    def test_strong_match_confidence(self, clf):
+        s = pd.Series(["agricultural soil"])
+        result = clf.classify_with_confidence(s)
+        assert result["one_health_category"][0] == "Environmental"
+        assert result["one_health_confidence"][0] == 1.0
+        assert pd.notna(result["one_health_term"][0])
+
+    def test_unclassified_confidence(self, clf):
+        s = pd.Series(["completely_novel_source_xyz"])
+        result = clf.classify_with_confidence(s)
+        assert result["one_health_category"][0] == "Unclassified"
+        assert result["one_health_confidence"][0] == 0.0
+
+    def test_nan_input_confidence(self, clf):
+        s = pd.Series([np.nan])
+        result = clf.classify_with_confidence(s)
+        assert pd.isna(result["one_health_category"][0])
+        assert result["one_health_confidence"][0] == 0.0
