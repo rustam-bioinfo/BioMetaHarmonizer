@@ -69,11 +69,11 @@ Optional flags:
 |------|---------|-------------|
 | `--api-key KEY` | — | NCBI API key (raises rate limit to 10 req/s) |
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Assembly summary cache directory |
-| `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` |
+| `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` (case-insensitive) |
 | `--summary FILE` | — | Write per-column fill-rate CSV |
 | `--model MODEL` | from cache metadata | sentence-transformers model for Layer 2 semantic matching; must match the model used to build `ncbi_embeddings.npy` |
 | `--threshold FLOAT` | 0.75 | Cosine similarity threshold for Layer 2 acceptance (lower = more recall, less precision) |
-| `--drop-sparse N` | 5 | Drop columns with fewer than N non-null values |
+| `--drop-sparse N` | 5 | Drop columns below this non-null threshold. An integer (e.g. `5`) is an absolute row count; a float between 0 and 1 (e.g. `0.05`) is a fractional fill rate and drops columns with less than that fraction of non-null values. Set to `0` to disable. |
 | `--no-drop-junk` | off | Keep submitter-artifact columns (person names, emails) |
 | `--skip-dates` | off | Skip ISO 8601 date parsing |
 | `--skip-geo` | off | Skip geospatial resolution |
@@ -102,7 +102,9 @@ df["collection_date"] = date_df["collection_date"]
 # 4. Resolve geography → snake_case columns
 ge = GeoEngine()
 geo = ge.parse(df["geo_loc_name"])   # returns DataFrame with geo_country, geo_region, ...
-df = df.join(geo)
+# Only join columns not already present to avoid collisions with raw input columns
+new_geo_cols = [c for c in geo.columns if c not in df.columns]
+df = df.join(geo[new_geo_cols])
 
 # 5. Classify isolation source + host → One Health category
 oh = OneHealthClassifier()
@@ -200,22 +202,25 @@ The model is loaded lazily on first use. Both layers are entirely config-driven 
 Python code changes are needed when NCBI adds new attributes or when new synonym
 patterns appear in submissions.
 
-## Validated Performance
+## Geospatial Parsing
 
-Validated on 6,618 *Bacillus cereus* group BioSample records (NCBI, 2025):
+`GeoEngine` accepts the standard NCBI `geo_loc_name` field and splits it into four columns:
+`geo_country`, `geo_region`, `geo_locality`, and `geo_iso3166` (ISO 3166-1 alpha-2 code).
 
-| Field | Fill rate |
+Supported input formats:
+
+| Input | Parsed as |
 |---|---|
-| `biosample_accession` | 100% |
-| `organism_name` | 95.8% |
-| `bioproject_accession` | 96.4% |
-| `collection_date` (parsed) | 79.3% |
-| `geo_loc_name` — country | 94.9% |
-| `geo_loc_name` — region | 58.8% |
-| `one_health_category` | 76.6% |
+| `"USA: California, Los Angeles"` | country=USA, region=California, locality=Los Angeles |
+| `"USA: California"` | country=USA, region=California |
+| `"Germany, Bavaria"` | country=Germany, locality=Bavaria |
+| `"France"` | country=France |
+| `"Pacific Ocean"` | sea/ocean flag set, country columns left empty |
+| Decimal coordinates | stored in `geo_loc_raw`, country columns left empty |
 
-Raw DataFrame shape after ingestion: 6,508 × 346.
-After `KeyMapper.map_columns()`: 6,508 × 195 (122 sparse + 23 junk columns removed).
+UK sub-country names (England, Scotland, Wales, Northern Ireland) are normalised to
+`"United Kingdom"` with ISO code `GB`. Ambiguous `"Korea"` defaults to South Korea (`KR`)
+with a warning logged.
 
 ## Input Formats
 
@@ -237,6 +242,8 @@ write(df, "harmonized.parquet", fmt="parquet")
 
 write_summary(df, "fill_rates.csv")          # column_name, non_null_count, fill_pct
 ```
+
+Output format strings are case-insensitive (`"CSV"`, `"csv"`, and `"Csv"` are all accepted).
 
 ## Running Tests
 
