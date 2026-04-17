@@ -149,7 +149,7 @@ BioMetaHarmonizer/
 │   ├── test_geo_engine.py
 │   ├── test_one_health.py
 │   ├── test_output.py
-│   └── test_pipeline.py
+└─── test_pipeline.py
 ├── docs/SESSION_PROTOCOL.md
 ├── pyproject.toml
 └── requirements.txt
@@ -254,10 +254,6 @@ pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing
 ```
 
 All tests are self-contained (no live NCBI calls). Current: **170/170 passing**.
-
-## Target Publication
-
-*Bioinformatics* (Application Note), *GigaScience*, or *Microbial Genomics*
 
 ## License
 
