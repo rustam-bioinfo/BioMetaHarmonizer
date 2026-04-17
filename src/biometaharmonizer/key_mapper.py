@@ -73,19 +73,8 @@ _EMAIL_RE       = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 
 def _schemas_dir() -> Path:
-    """
-    Locate the schemas/ directory in a way that works for both editable and
-    non-editable installs.
-
-    Strategy:
-      1. Try importlib.resources (correct for wheel / non-editable installs).
-      2. Fall back to __file__-relative path (works for editable installs and
-         development checkouts where schemas/ is inside src/biometaharmonizer/).
-    """
     try:
-        # Python 3.9+: importlib.resources.files() returns a Traversable
         ref = importlib.resources.files("biometaharmonizer") / "schemas"
-        # Materialise to a real Path so callers can use / operator freely
         return Path(str(ref))
     except (TypeError, ModuleNotFoundError):
         return Path(__file__).parent / "schemas"
@@ -99,16 +88,10 @@ _META_FILE    = _SCHEMAS_DIR / "ncbi_cache_meta.json"
 
 _DEFAULT_MANDATORY = _SCHEMAS_DIR / "mandatory_fields.json"
 
-# Default model -- used when ncbi_cache_meta.json is absent or has no model key.
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 
 def _cached_model_name() -> str:
-    """
-    Return the sentence-transformers model name that was used to build the
-    current embedding cache, as recorded in ncbi_cache_meta.json.
-    Falls back to _DEFAULT_MODEL if the metadata file does not exist.
-    """
     if _META_FILE.exists():
         try:
             with open(_META_FILE, "r", encoding="utf-8") as fh:
@@ -119,6 +102,7 @@ def _cached_model_name() -> str:
         except (json.JSONDecodeError, OSError):
             pass
     return _DEFAULT_MODEL
+
 
 MIN_WARN_GROUP_SIZE = 10
 
@@ -131,33 +115,19 @@ class KeyMapper:
     raw DataFrame column names to standard NCBI keys using exact synonym
     matching (Layer 1) with a sentence-transformers semantic fallback (Layer 2).
 
+    Layer 2 encodes all unresolved column names in a single model.encode()
+    call (one batch) rather than one call per column, so there is at most
+    one progress bar regardless of how many columns need semantic resolution.
+
     Parameters
     ----------
     mandatory_path : str or Path, optional
-        Override path to mandatory_fields.json. Defaults to schemas/mandatory_fields.json.
+        Override path to mandatory_fields.json.
     model : str, optional
-        sentence-transformers model name to use for Layer 2 semantic matching.
-        Defaults to the model recorded in ncbi_cache_meta.json (written by
-        build_ncbi_attribute_cache.py), which is 'all-MiniLM-L6-v2' unless
-        you rebuilt the cache with a different model.
-
-        IMPORTANT: the model you pass here must match the model used to build
-        ncbi_embeddings.npy, otherwise similarity scores will be meaningless.
-        Rebuild the cache with the same model first:
-
-            python scripts/build_ncbi_attribute_cache.py --model <model_name>
-
-        Supported examples:
-            "all-MiniLM-L6-v2"       (default)
-            "all-MiniLM-L12-v2"
-            "all-mpnet-base-v2"
-            "BAAI/bge-small-en-v1.5"
-            "BAAI/bge-base-en-v1.5"
-            "intfloat/e5-small-v2"
-            "intfloat/e5-base-v2"
+        sentence-transformers model name for Layer 2. Defaults to the model
+        recorded in ncbi_cache_meta.json.
     threshold : float, optional
         Cosine similarity threshold for Layer 2 acceptance (default 0.75).
-        Lower values increase recall at the cost of precision.
     """
 
     SEMANTIC_THRESHOLD = 0.75
@@ -185,7 +155,6 @@ class KeyMapper:
         self._embeddings = raw_emb / np.where(norms == 0, 1, norms)
         self._embeddings = self._embeddings.astype(np.float32)
 
-        # Model name: explicit argument > cache metadata > hardcoded default
         self._model_name: str = model if model is not None else _cached_model_name()
         self._model = None  # loaded lazily on first semantic lookup
 
@@ -202,11 +171,6 @@ class KeyMapper:
 
     @staticmethod
     def _parse_xml_cache(xml_path: Path) -> dict:
-        """
-        Parse ncbi_attributes.xml and return a dict mapping every
-        synonym.lower() and harmonized_name.lower() to the canonical
-        harmonized_name string.
-        """
         exact: dict[str, str] = {}
         tree = ET.parse(str(xml_path))
         root = tree.getroot()
@@ -221,27 +185,77 @@ class KeyMapper:
                     exact[syn_el.text.strip().lower()] = hn
         return exact
 
-    def _resolve_column(self, col_lower: str):
+    def _load_model(self):
         """
-        Two-layer column resolution.
+        Load the sentence-transformers model lazily on first use.
+        Third-party loggers (httpx, huggingface_hub, sentence_transformers,
+        datasets) are muted to WARNING before loading to suppress the flood
+        of HTTP HEAD request lines that these libraries emit at INFO level.
+        """
+        for noisy_logger in (
+            "httpx",
+            "huggingface_hub",
+            "huggingface_hub.utils._http",
+            "sentence_transformers",
+            "sentence_transformers.base.model",
+            "datasets",
+        ):
+            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
-        Returns the canonical NCBI harmonized name, or None if no match
-        meets the threshold.
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading sentence-transformers model: %s", self._model_name)
+        self._model = SentenceTransformer(self._model_name)
+
+    def _resolve_columns_batch(self, col_lowers: list) -> dict:
         """
-        if col_lower in self._exact:
-            return self._exact[col_lower]
+        Resolve a list of lowercased column names to NCBI standard keys.
+
+        Layer 1 (exact/synonym lookup) is applied first for every name.
+        All names not resolved by Layer 1 are encoded together in a single
+        model.encode() call, then matched against precomputed embeddings
+        via a single matrix multiply.
+
+        Parameters
+        ----------
+        col_lowers : list of str
+            Lowercased, stripped column names to resolve.
+
+        Returns
+        -------
+        dict mapping col_lower -> canonical NCBI name (only resolved entries
+        are included; unresolved names are absent from the dict).
+        """
+        resolved = {}
+        unresolved = []
+
+        for col in col_lowers:
+            if col in self._exact:
+                resolved[col] = self._exact[col]
+            else:
+                unresolved.append(col)
+
+        if not unresolved:
+            return resolved
 
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            logger.debug("Loading sentence-transformers model: %s", self._model_name)
-            self._model = SentenceTransformer(self._model_name)
+            self._load_model()
 
-        vec = self._model.encode([col_lower], normalize_embeddings=True)[0].astype(np.float32)
-        sims = self._embeddings @ vec
-        best_idx = int(np.argmax(sims))
-        if sims[best_idx] >= self.SEMANTIC_THRESHOLD:
-            return self._emb_names[best_idx]
-        return None
+        vecs = self._model.encode(
+            unresolved,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        ).astype(np.float32)
+
+        # Shape: (n_unresolved, n_harmonized_names)
+        sims = vecs @ self._embeddings.T
+        best_indices = np.argmax(sims, axis=1)
+        best_scores  = sims[np.arange(len(unresolved)), best_indices]
+
+        for col, idx, score in zip(unresolved, best_indices, best_scores):
+            if score >= self.SEMANTIC_THRESHOLD:
+                resolved[col] = self._emb_names[int(idx)]
+
+        return resolved
 
     def map_columns(self, df, drop_sparse=5, drop_junk=True):
         """
@@ -255,21 +269,28 @@ class KeyMapper:
         drop_sparse : int or float, default 5
             Drop columns whose non-null count falls below this threshold.
             An integer value is treated as an absolute row count.
-            A float between 0 and 1 is treated as a fractional fill rate
-            (e.g. 0.05 drops columns with less than 5% non-null values).
+            A float between 0 and 1 is treated as a fractional fill rate.
             Set to 0 to disable. Protected structural columns are never dropped.
         drop_junk : bool, default True
-            Drop columns whose names look like person names or submitter
-            artifacts. Protected structural columns are never dropped.
+            Drop columns whose names look like person names or email artifacts.
         """
-        rename_map = {}
-        for col in df.columns:
-            col_lower = col.lower().strip()
-            if col_lower in _PROTECTED_COLUMNS:
-                continue
-            resolved = self._resolve_column(col_lower)
-            if resolved is not None:
-                rename_map[col] = resolved
+        # Collect all columns that need resolution (skip protected ones)
+        to_resolve = [
+            (col, col.lower().strip())
+            for col in df.columns
+            if col.lower().strip() not in _PROTECTED_COLUMNS
+        ]
+
+        if to_resolve:
+            col_lowers = [col_lower for _, col_lower in to_resolve]
+            batch_result = self._resolve_columns_batch(col_lowers)
+            rename_map = {
+                col: batch_result[col_lower]
+                for col, col_lower in to_resolve
+                if col_lower in batch_result
+            }
+        else:
+            rename_map = {}
 
         df = df.rename(columns=rename_map)
         df = self._coalesce_duplicates(df)
@@ -295,12 +316,6 @@ class KeyMapper:
         return df
 
     def _drop_sparse_columns(self, df, threshold):
-        """
-        Drop non-protected columns whose non-null count is below threshold.
-        An integer threshold is an absolute row count.
-        A float in (0, 1) is interpreted as a fractional fill rate relative
-        to the total number of rows.
-        """
         n_rows = len(df)
         if isinstance(threshold, float) and 0.0 < threshold < 1.0:
             min_required = int(n_rows * threshold)
@@ -319,15 +334,6 @@ class KeyMapper:
         return df
 
     def _coalesce_duplicates(self, df):
-        """
-        When multiple raw columns rename to the same standard key,
-        collapse them into one column using first-non-null coalescing.
-
-        Uses df.columns.duplicated(keep=False) to correctly identify every
-        column occurrence that is part of a duplicated group, then builds
-        a fresh DataFrame from per-column Series so the result has no
-        duplicate column names.
-        """
         if not df.columns.duplicated().any():
             return df
 
@@ -336,7 +342,6 @@ class KeyMapper:
 
         for col in df.columns.unique():
             if col in duped_keys:
-                # df[col] returns a DataFrame when the label is duplicated
                 block = df[col]
                 coalesced = block.iloc[:, 0].copy()
                 for i in range(1, block.shape[1]):
@@ -349,20 +354,6 @@ class KeyMapper:
         return pd.DataFrame(output_cols, index=df.index)
 
     def _warn_missing_mandatory(self, df):
-        """
-        For each ncbi_package group in df with >= MIN_WARN_GROUP_SIZE records,
-        check fill rate of mandatory fields from mandatory_fields.json and
-        return a compliance DataFrame with columns:
-            package, field, total_records, filled_records, fill_pct, status
-
-        Status thresholds:
-            PASS: fill_pct >= 95
-            WARN: 80 <= fill_pct < 95
-            FAIL: fill_pct < 80
-
-        Logs warnings for WARN/FAIL rows. Falls back to 'default' for
-        unknown packages. Packages below MIN_WARN_GROUP_SIZE are silently skipped.
-        """
         rows = []
         if "ncbi_package" not in df.columns:
             return pd.DataFrame(
@@ -376,9 +367,6 @@ class KeyMapper:
             pkg_key = pkg if pkg in self.mandatory else "default"
             required = self.mandatory.get(pkg_key, [])
             for field in required:
-                # Check against group.columns, not df.columns, because sparse-column
-                # dropping may have removed a field that exists in df but not in a
-                # particular package group after filtering.
                 if field not in group.columns:
                     filled = 0
                     pct = 0.0
