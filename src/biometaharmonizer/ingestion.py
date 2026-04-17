@@ -3,10 +3,10 @@ Module 1: Universal Data Ingestion.
 
 Fetches NCBI BioSample metadata for lists of BioSample IDs or assembly accessions.
 BioProject accession is resolved from NCBI assembly summary flat files, which are
-downloaded once to a configurable cache directory and reused on subsequent runs.
+downloaded once to a configurable cache directory and refreshed every 7 days.
 
 Entrez rate limits:
-  Without API key: 3 requests/second
+  Without API key: 3 requests/second (1 batch = 1 request)
   With API key:   10 requests/second
 Register a free API key at https://www.ncbi.nlm.nih.gov/account/ and pass it to
 set_api_key() or ingest(api_key=...).
@@ -35,9 +35,10 @@ CACHE_DIR      = Path.home() / ".biometaharmonizer" / "cache"
 ASSEMBLY_SUMMARY_REFSEQ  = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_refseq.txt"
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
-_BATCH_SIZE   = 500
-_MAX_RETRIES  = 3
-_RETRY_BASE_S = 2   # seconds; exponential backoff: 2, 4, 8
+_BATCH_SIZE     = 500
+_MAX_RETRIES    = 3
+_RETRY_BASE_S   = 2   # seconds; exponential backoff: 2, 4, 8
+_CACHE_TTL_DAYS = 7   # refresh cache if older than this many days
 
 
 def set_email(email: str) -> None:
@@ -64,7 +65,7 @@ def set_cache_dir(path) -> None:
     CACHE_DIR = Path(path)
 
 
-# ─── Public API ──────────────────────────────────────────────────────────────
+# ─── Public API ────────────────────────────────────────────────────────────────
 
 def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     """
@@ -128,7 +129,11 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     print("[INFO] Resolving BioProject accessions from assembly summary flat files...")
     bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
     if bioproject_map:
-        df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map)
+        # Use fillna so that any BioProject already parsed from XML is preserved;
+        # the flat-file map only fills in rows that are still NaN.
+        df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map).fillna(
+            df["bioproject_accession"]
+        )
         filled = df["bioproject_accession"].notna().sum()
         print(f"[INFO] BioProject accession resolved for {filled} / {len(df)} records.")
     else:
@@ -137,7 +142,7 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     return df
 
 
-# ─── Internal helpers ─────────────────────────────────────────────────────────
+# ─── Internal helpers ───────────────────────────────────────────────────────────
 
 def _load_ids(source) -> list:
     """Load IDs from a file path, Path object, or a Python list."""
@@ -168,9 +173,10 @@ def _classify_ids(ids: list) -> tuple:
     """Separate a mixed list of IDs into assembly, BioSample, and unrecognized."""
     gcx, samn, unrecognized = [], [], []
     for i in ids:
-        if i.startswith(("GCF_", "GCA_")):
-            gcx.append(i)
-        elif i.upper().startswith(("SAMN", "SAME", "SAMD")):
+        i_upper = i.upper()
+        if i_upper.startswith(("GCF_", "GCA_")):
+            gcx.append(i)  # preserve original case for flat-file lookup
+        elif i_upper.startswith(("SAMN", "SAME", "SAMD")):
             samn.append(i)
         else:
             unrecognized.append(i)
@@ -179,7 +185,8 @@ def _classify_ids(ids: list) -> tuple:
 
 def _ensure_assembly_summaries() -> None:
     """
-    Download and cache NCBI assembly summary flat files if not already present.
+    Download and cache NCBI assembly summary flat files if not already present
+    or if the cached copy is older than _CACHE_TTL_DAYS days.
     Files are stored in CACHE_DIR (~/.biometaharmonizer/cache/ by default).
     Called unconditionally by ingest() so both resolution functions always have
     the files regardless of input ID type.
@@ -190,6 +197,19 @@ def _ensure_assembly_summaries() -> None:
         (ASSEMBLY_SUMMARY_GENBANK, "genbank"),
     ]:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
+
+        if cache_path.exists():
+            age_days = (time.time() - cache_path.stat().st_mtime) / (24 * 3600)
+            if age_days > _CACHE_TTL_DAYS:
+                print(
+                    f"[INFO] {label} assembly summary is {age_days:.1f} days old "
+                    f"(TTL={_CACHE_TTL_DAYS}d). Refreshing cache..."
+                )
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+
         if not cache_path.exists():
             print(f"[INFO] Downloading {label} assembly summary (~100 MB) to {cache_path}...")
             _download_file(url, cache_path)
@@ -321,7 +341,8 @@ def _parse_biosample_xml(xml_bytes: bytes) -> list:
       - <Ids> block: sra_accession (db=SRA), sample_name_id (db_label=Sample name),
         bioproject_accession from XML as rare fallback (primary resolution via flat files)
       - <Description>: title, description_comment, taxonomy_id, taxonomy_name
-        organism_name = taxonomy_name (no <OrganismName> child exists in NCBI BioSample XML)
+      - <Organism>: organism_name from <OrganismName> child if present,
+        otherwise falls back to taxonomy_name attribute
       - <Package>: ncbi_package
       - <Status>: status, status_date
       - All <Attribute> key-value pairs (empty values stored as None)
@@ -369,7 +390,13 @@ def _parse_biosample_xml(xml_bytes: bytes) -> list:
         if organism is not None:
             record["taxonomy_id"]   = organism.get("taxonomy_id")
             record["taxonomy_name"] = organism.get("taxonomy_name")
-            record["organism_name"] = organism.get("taxonomy_name")
+            # Prefer the submitter-supplied <OrganismName> child; fall back to
+            # the taxonomy_name attribute when the child element is absent.
+            org_name_el = organism.find(".//OrganismName")
+            if org_name_el is not None and org_name_el.text:
+                record["organism_name"] = org_name_el.text.strip()
+            else:
+                record["organism_name"] = organism.get("taxonomy_name")
         else:
             record["taxonomy_id"]   = None
             record["taxonomy_name"] = None

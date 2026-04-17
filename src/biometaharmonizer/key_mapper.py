@@ -99,7 +99,7 @@ _META_FILE    = _SCHEMAS_DIR / "ncbi_cache_meta.json"
 
 _DEFAULT_MANDATORY = _SCHEMAS_DIR / "mandatory_fields.json"
 
-# Default model — used when ncbi_cache_meta.json is absent or has no model key.
+# Default model -- used when ncbi_cache_meta.json is absent or has no model key.
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 
@@ -252,8 +252,11 @@ class KeyMapper:
         ----------
         df : pd.DataFrame
             Raw ingested DataFrame.
-        drop_sparse : int, default 5
-            Drop columns with fewer than drop_sparse non-null values.
+        drop_sparse : int or float, default 5
+            Drop columns whose non-null count falls below this threshold.
+            An integer value is treated as an absolute row count.
+            A float between 0 and 1 is treated as a fractional fill rate
+            (e.g. 0.05 drops columns with less than 5% non-null values).
             Set to 0 to disable. Protected structural columns are never dropped.
         drop_junk : bool, default True
             Drop columns whose names look like person names or submitter
@@ -292,14 +295,26 @@ class KeyMapper:
         return df
 
     def _drop_sparse_columns(self, df, threshold):
+        """
+        Drop non-protected columns whose non-null count is below threshold.
+        An integer threshold is an absolute row count.
+        A float in (0, 1) is interpreted as a fractional fill rate relative
+        to the total number of rows.
+        """
+        n_rows = len(df)
+        if isinstance(threshold, float) and 0.0 < threshold < 1.0:
+            min_required = int(n_rows * threshold)
+        else:
+            min_required = int(threshold)
+
         non_null = df.notna().sum()
         sparse = [
             col for col in df.columns
             if col not in _PROTECTED_COLUMNS
-            and non_null[col] < threshold
+            and non_null[col] < min_required
         ]
         if sparse:
-            print(f"[INFO] Dropping {len(sparse)} sparse columns (< {threshold} non-null values).")
+            print(f"[INFO] Dropping {len(sparse)} sparse columns (< {min_required} non-null values).")
             df = df.drop(columns=sparse)
         return df
 
@@ -307,30 +322,30 @@ class KeyMapper:
         """
         When multiple raw columns rename to the same standard key,
         collapse them into one column using first-non-null coalescing.
+
+        Uses df.columns.duplicated(keep=False) to correctly identify every
+        column occurrence that is part of a duplicated group, then builds
+        a fresh DataFrame from per-column Series so the result has no
+        duplicate column names.
         """
         if not df.columns.duplicated().any():
             return df
 
-        seen = set()
         output_cols = {}
-        duped = []
+        duped_keys = set(df.columns[df.columns.duplicated(keep=False)])
 
-        for col in df.columns:
-            if col not in seen:
-                seen.add(col)
+        for col in df.columns.unique():
+            if col in duped_keys:
+                # df[col] returns a DataFrame when the label is duplicated
                 block = df[col]
-                if isinstance(block, pd.DataFrame):
-                    duped.append(col)
-                    coalesced = block.iloc[:, 0]
-                    for i in range(1, block.shape[1]):
-                        coalesced = coalesced.combine_first(block.iloc[:, i])
-                    output_cols[col] = coalesced
-                else:
-                    output_cols[col] = block
+                coalesced = block.iloc[:, 0].copy()
+                for i in range(1, block.shape[1]):
+                    coalesced = coalesced.combine_first(block.iloc[:, i])
+                output_cols[col] = coalesced
+            else:
+                output_cols[col] = df[col]
 
-        if duped:
-            print(f"[INFO] Coalesced duplicate columns: {duped}")
-
+        print(f"[INFO] Coalesced duplicate columns: {sorted(duped_keys)}")
         return pd.DataFrame(output_cols, index=df.index)
 
     def _warn_missing_mandatory(self, df):
@@ -361,7 +376,10 @@ class KeyMapper:
             pkg_key = pkg if pkg in self.mandatory else "default"
             required = self.mandatory.get(pkg_key, [])
             for field in required:
-                if field not in df.columns:
+                # Check against group.columns, not df.columns, because sparse-column
+                # dropping may have removed a field that exists in df but not in a
+                # particular package group after filtering.
+                if field not in group.columns:
                     filled = 0
                     pct = 0.0
                 else:
@@ -391,7 +409,7 @@ class KeyMapper:
                     )
                 elif status == "WARN":
                     logger.warning(
-                        "[%s] mandatory field '%s' fill rate: %d/%d (%.0f%%) — below 95%%.",
+                        "[%s] mandatory field '%s' fill rate: %d/%d (%.0f%%) -- below 95%%.",
                         pkg, field, filled, n, pct,
                     )
 
