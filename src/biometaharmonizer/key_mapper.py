@@ -46,10 +46,13 @@ When multiple raw columns map to the same standard key, they are coalesced
 (first non-null value wins).
 """
 
+import contextlib
 import importlib.resources
 import json
 import logging
+import os
 import re
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -70,6 +73,39 @@ _PROTECTED_COLUMNS = frozenset([
 
 _PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
 _EMAIL_RE       = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+@contextlib.contextmanager
+def _silence_stdio():
+    """
+    Context manager that redirects both Python-level sys.stdout/sys.stderr
+    and the underlying OS-level file descriptors 1 and 2 to /dev/null.
+
+    This suppresses all print() calls and low-level C-library writes
+    (e.g. tqdm bars written directly to fd 2) that originate inside
+    third-party library constructors such as SentenceTransformer().
+    """
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    old_stdout_fd = os.dup(1)
+    old_stderr_fd = os.dup(2)
+    old_sys_stdout = sys.stdout
+    old_sys_stderr = sys.stderr
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        sys.stdout = open(os.devnull, "w")
+        sys.stderr = open(os.devnull, "w")
+        yield
+    finally:
+        sys.stdout.close()
+        sys.stderr.close()
+        sys.stdout = old_sys_stdout
+        sys.stderr = old_sys_stderr
+        os.dup2(old_stdout_fd, 1)
+        os.dup2(old_stderr_fd, 2)
+        os.close(old_stdout_fd)
+        os.close(old_stderr_fd)
+        os.close(devnull_fd)
 
 
 def _schemas_dir() -> Path:
@@ -188,11 +224,19 @@ class KeyMapper:
     def _load_model(self):
         """
         Load the sentence-transformers model lazily on first use.
-        Third-party loggers (httpx, huggingface_hub, sentence_transformers,
-        datasets) are muted to WARNING before loading to suppress the flood
-        of HTTP HEAD request lines that these libraries emit at INFO level.
+
+        All stdout/stderr output produced during SentenceTransformer.__init__
+        is suppressed via _silence_stdio(), which redirects both Python-level
+        streams and the underlying OS file descriptors to /dev/null. This
+        silences print()-based warnings from huggingface_hub, tqdm weight-
+        loading bars from mlx/jax, and the BertModel LOAD REPORT block from
+        sentence-transformers >= 3.x -- for any model, not just the default.
+
+        Logger levels for noisy third-party loggers are also set to WARNING
+        so that HTTP HEAD request lines logged at INFO do not reappear on
+        subsequent encode() calls.
         """
-        for noisy_logger in (
+        for noisy in (
             "httpx",
             "huggingface_hub",
             "huggingface_hub.utils._http",
@@ -200,11 +244,12 @@ class KeyMapper:
             "sentence_transformers.base.model",
             "datasets",
         ):
-            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+            logging.getLogger(noisy).setLevel(logging.WARNING)
 
         from sentence_transformers import SentenceTransformer
         logger.info("Loading sentence-transformers model: %s", self._model_name)
-        self._model = SentenceTransformer(self._model_name)
+        with _silence_stdio():
+            self._model = SentenceTransformer(self._model_name)
 
     def _resolve_columns_batch(self, col_lowers: list) -> dict:
         """
@@ -214,16 +259,6 @@ class KeyMapper:
         All names not resolved by Layer 1 are encoded together in a single
         model.encode() call, then matched against precomputed embeddings
         via a single matrix multiply.
-
-        Parameters
-        ----------
-        col_lowers : list of str
-            Lowercased, stripped column names to resolve.
-
-        Returns
-        -------
-        dict mapping col_lower -> canonical NCBI name (only resolved entries
-        are included; unresolved names are absent from the dict).
         """
         resolved = {}
         unresolved = []
@@ -246,7 +281,6 @@ class KeyMapper:
             show_progress_bar=False,
         ).astype(np.float32)
 
-        # Shape: (n_unresolved, n_harmonized_names)
         sims = vecs @ self._embeddings.T
         best_indices = np.argmax(sims, axis=1)
         best_scores  = sims[np.arange(len(unresolved)), best_indices]
@@ -274,7 +308,6 @@ class KeyMapper:
         drop_junk : bool, default True
             Drop columns whose names look like person names or email artifacts.
         """
-        # Collect all columns that need resolution (skip protected ones)
         to_resolve = [
             (col, col.lower().strip())
             for col in df.columns
