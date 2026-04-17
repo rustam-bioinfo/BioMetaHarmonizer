@@ -39,10 +39,11 @@ CACHE_DIR      = Path.home() / ".biometaharmonizer" / "cache"
 ASSEMBLY_SUMMARY_REFSEQ  = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_refseq.txt"
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
-_BATCH_SIZE     = 500
+_BATCH_SIZE     = 200   # UIDs per efetch call; kept moderate for reliability
+_ESEARCH_BATCH  = 200   # accessions per esearch OR query
 _MAX_RETRIES    = 3
-_RETRY_BASE_S   = 2   # seconds; exponential backoff: 2, 4, 8
-_CACHE_TTL_DAYS = 7   # refresh cache if older than this many days
+_RETRY_BASE_S   = 2     # seconds; exponential backoff: 2, 4, 8
+_CACHE_TTL_DAYS = 7     # refresh cache if older than this many days
 
 
 def set_email(email: str) -> None:
@@ -189,9 +190,7 @@ def _ensure_assembly_summaries() -> None:
     """
     Ensure NCBI assembly summary flat files are present in CACHE_DIR.
     Files are downloaded on first use and refreshed when older than
-    _CACHE_TTL_DAYS days. Called unconditionally by ingest() so that
-    both resolution functions always have the files regardless of
-    input ID type.
+    _CACHE_TTL_DAYS days.
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for url, label in [
@@ -253,8 +252,6 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
 def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
     """
     Build a {biosample_accession: bioproject_accession} lookup from cached flat files.
-    BioProject is not in BioSample XML; the assembly summary files are the canonical source.
-    Returns an empty dict if neither flat file is readable.
     """
     lookup = {}
     for label in ["refseq", "genbank"]:
@@ -276,50 +273,165 @@ def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
     return lookup
 
 
+def _resolve_accessions_to_uids(accessions: list) -> dict:
+    """
+    Resolve a list of BioSample accessions (SAMN/SAME/SAMD) to NCBI
+    integer UIDs via Entrez esearch, using batched OR queries.
+
+    Returns a dict mapping accession (str) -> uid (str).
+    Accessions that esearch cannot resolve are absent from the result
+    and will be logged as warnings by the caller.
+
+    Using esearch([Accession] field) is the only reliable way to obtain
+    the canonical UID for a BioSample accession. Passing accession strings
+    directly to efetch(db=biosample) is unreliable: NCBI interprets the
+    id parameter as a numeric UID list, so non-numeric accession strings
+    can match arbitrary unrelated records.
+    """
+    inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
+    acc_to_uid = {}
+
+    for start in range(0, len(accessions), _ESEARCH_BATCH):
+        batch = accessions[start:start + _ESEARCH_BATCH]
+        term  = " OR ".join(f"{acc}[Accession]" for acc in batch)
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                handle = Entrez.esearch(
+                    db="biosample",
+                    term=term,
+                    retmax=len(batch),
+                    usehistory="n",
+                )
+                result = Entrez.read(handle)
+                handle.close()
+                break
+            except Exception as exc:
+                wait = _RETRY_BASE_S ** attempt
+                print(f"[WARNING] esearch attempt {attempt}/{_MAX_RETRIES} failed: {exc}. "
+                      f"Retrying in {wait}s...")
+                time.sleep(wait)
+        else:
+            print(f"[WARNING] esearch failed for batch starting at index {start}. "
+                  f"These accessions will be skipped.")
+            continue
+
+        uids = result.get("IdList", [])
+        if not uids:
+            continue
+
+        # Fetch summaries to map uid -> accession
+        for uid_start in range(0, len(uids), _ESEARCH_BATCH):
+            uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    sum_handle = Entrez.esummary(db="biosample", id=",".join(uid_batch))
+                    summaries  = Entrez.read(sum_handle)
+                    sum_handle.close()
+                    break
+                except Exception as exc:
+                    wait = _RETRY_BASE_S ** attempt
+                    print(f"[WARNING] esummary attempt {attempt}/{_MAX_RETRIES} failed: {exc}. "
+                          f"Retrying in {wait}s...")
+                    time.sleep(wait)
+            else:
+                continue
+
+            for doc in summaries["DocumentSummarySet"]["DocumentSummary"]:
+                uid = doc.attributes.get("uid", "")
+                # The accession is stored in the SampleIds/Id block or
+                # can be extracted from the Accession field of the XML.
+                acc = doc.get("Accession", "")
+                if acc and uid:
+                    acc_to_uid[acc] = uid
+
+        time.sleep(inter_req_sleep)
+
+    return acc_to_uid
+
+
 def _fetch_biosample_metadata(samn_ids: list) -> pd.DataFrame:
     """
-    Fetch raw BioSample attribute metadata via NCBI Entrez efetch in batches.
-    Retries each failed batch up to _MAX_RETRIES times with exponential backoff.
-    Accessions that fail after all retries are logged and excluded from output.
+    Fetch raw BioSample attribute metadata via a two-step process:
+
+    Step 1 -- esearch: resolve every BioSample accession to its canonical
+    NCBI integer UID. This is necessary because efetch(db=biosample)
+    treats the id parameter as a numeric UID list; passing accession
+    strings directly causes NCBI to interpret them as numeric IDs and
+    can return completely unrelated records.
+
+    Step 2 -- efetch by UID: fetch full XML for resolved UIDs in batches.
+    After parsing, every record is validated: if its biosample_accession
+    attribute is not in the requested input set, the record is dropped and
+    logged as a warning. This makes silent cross-contamination impossible.
     """
-    records      = []
-    failed_ids   = []
-    total        = len(samn_ids)
-    n_batches    = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
+    requested_set = set(samn_ids)
+
+    # ─── Step 1: resolve accessions to UIDs ────────────────────────────────
+    print(f"[INFO] Resolving {len(samn_ids)} accessions to NCBI UIDs...")
+    acc_to_uid = _resolve_accessions_to_uids(samn_ids)
+
+    unresolved = [a for a in samn_ids if a not in acc_to_uid]
+    if unresolved:
+        print(f"[WARNING] {len(unresolved)} accessions could not be resolved to UIDs "
+              f"and will be skipped: {unresolved[:5]}")
+
+    uid_list = list(acc_to_uid.values())
+    if not uid_list:
+        raise ValueError("No UIDs could be resolved from the provided BioSample accessions.")
+
+    print(f"[INFO] Fetching metadata for {len(uid_list)} resolved UIDs...")
+
+    # ─── Step 2: efetch by UID in batches ────────────────────────────────
+    records    = []
+    failed_ids = []
+    total      = len(uid_list)
+    n_batches  = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
 
     for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
-        batch = samn_ids[start:start + _BATCH_SIZE]
-        batch_records = _fetch_batch_with_retry(batch)
+        uid_batch = uid_list[start:start + _BATCH_SIZE]
+        batch_records = _fetch_batch_with_retry(uid_batch)
+
         if batch_records is None:
             print(
                 f"[ERROR] Batch {batch_i + 1}/{n_batches} failed after {_MAX_RETRIES} retries. "
-                f"{len(batch)} records excluded."
+                f"{len(uid_batch)} records excluded."
             )
-            failed_ids.extend(batch)
+            failed_ids.extend(uid_batch)
         else:
-            records.extend(batch_records)
+            # Validate: drop any record whose accession is not in the requested set
+            clean = []
+            for rec in batch_records:
+                acc = rec.get("biosample_accession", "")
+                if acc in requested_set:
+                    clean.append(rec)
+                else:
+                    print(f"[WARNING] Unexpected record returned by NCBI and discarded: "
+                          f"biosample_accession={acc!r} (not in requested input set)")
+            records.extend(clean)
+
         fetched = min(start + _BATCH_SIZE, total)
         print(f"[INFO] Fetched {fetched} / {total} ({batch_i + 1}/{n_batches} batches)")
         if batch_i < n_batches - 1:
             time.sleep(inter_batch_sleep)
 
     if failed_ids:
-        print(f"[WARNING] {len(failed_ids)} accessions could not be fetched: {failed_ids[:10]}")
+        print(f"[WARNING] {len(failed_ids)} UIDs could not be fetched: {failed_ids[:10]}")
 
     return pd.DataFrame(records)
 
 
-def _fetch_batch_with_retry(batch: list):
+def _fetch_batch_with_retry(uid_batch: list):
     """
-    Fetch a single batch via Entrez efetch with exponential-backoff retry.
+    Fetch a single batch of integer UIDs via Entrez efetch.
     Returns a list of record dicts on success, or None after all retries fail.
     """
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
                 db="biosample",
-                id=",".join(batch),
+                id=",".join(uid_batch),
                 rettype="full",
                 retmode="xml",
             )
@@ -337,18 +449,6 @@ def _fetch_batch_with_retry(batch: list):
 def _parse_biosample_xml(xml_bytes: bytes) -> list:
     """
     Parse raw BioSample XML bytes into a list of flat attribute dicts.
-
-    Structural fields extracted:
-      - BioSample element attributes: accession, id, submission_date, last_update,
-        publication_date, access
-      - <Ids> block: sra_accession (db=SRA), sample_name_id (db_label=Sample name),
-        bioproject_accession from XML as rare fallback (primary resolution via flat files)
-      - <Description>: title, description_comment, taxonomy_id, taxonomy_name
-      - <Organism>: organism_name from <OrganismName> child if present,
-        otherwise falls back to taxonomy_name attribute
-      - <Package>: ncbi_package
-      - <Status>: status, status_date
-      - All <Attribute> key-value pairs (empty values stored as None)
     """
     records = []
     root    = ET.fromstring(xml_bytes)
