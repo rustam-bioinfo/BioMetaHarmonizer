@@ -219,6 +219,20 @@ def _infer_format(path: Path) -> str:
     return mapping.get(suffix, "csv")
 
 
+def _looks_like_filepath(s: str) -> bool:
+    """
+    Return True when s appears to be a file path rather than an accession string.
+    Heuristic: the last path component contains a dot (i.e. has an extension)
+    AND the string does not match the known accession prefixes.
+    This catches 'accessions.txt', 'data/ids.csv', etc.
+    """
+    accession_prefixes = ("SAMN", "SAME", "SAMD", "GCF_", "GCA_")
+    last_part = Path(s).name
+    has_extension = "." in last_part
+    looks_like_accession = any(s.upper().startswith(p) for p in accession_prefixes)
+    return has_extension and not looks_like_accession
+
+
 def _run(args: argparse.Namespace) -> int:
     """Execute the full harmonization pipeline."""
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -230,10 +244,20 @@ def _run(args: argparse.Namespace) -> int:
 
     # ---- resolve input -------------------------------------------------------
     input_arg = args.input.strip()
-    if Path(input_arg).exists():
-        source = Path(input_arg)
+    input_path = Path(input_arg)
+
+    if input_path.exists():
+        source = input_path
         logger.debug("Input: file %s", source)
+    elif _looks_like_filepath(input_arg):
+        # Looks like a filename but does not exist -- fail clearly.
+        print(
+            f"ERROR: Input file not found: '{input_arg}'",
+            file=sys.stderr,
+        )
+        return 1
     else:
+        # Treat as comma-separated accession list.
         accessions = [a.strip() for a in input_arg.split(",") if a.strip()]
         if not accessions:
             print(
@@ -331,8 +355,6 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("Step 4/5  Geospatial parsing")
         ge = GeoEngine()
         geo_df = ge.parse(df["geo_loc_name"])
-        # Only join columns not already present in df to avoid ValueError
-        # on duplicate column names (e.g. if raw data contained 'geo_country').
         new_geo_cols = [c for c in geo_df.columns if c not in df.columns]
         df = df.join(geo_df[new_geo_cols])
         resolved = df["geo_country"].notna().sum() if "geo_country" in df.columns else 0

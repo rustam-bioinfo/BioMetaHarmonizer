@@ -17,6 +17,7 @@ Working directory note (Colab):
   if you want them in the working directory.
 """
 
+import logging
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -24,6 +25,9 @@ from pathlib import Path
 import pandas as pd
 import requests
 from Bio import Entrez
+
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Module-level configuration ──────────────────────────────────────────────
@@ -126,18 +130,16 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     print(f"[INFO] Fetching metadata for {len(samn)} BioSample accessions...")
     df = _fetch_biosample_metadata(samn)
 
-    print("[INFO] Resolving BioProject accessions from assembly summary flat files...")
+    print("[INFO] Resolving BioProject accessions from assembly index...")
     bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
     if bioproject_map:
-        # Use fillna so that any BioProject already parsed from XML is preserved;
-        # the flat-file map only fills in rows that are still NaN.
         df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map).fillna(
             df["bioproject_accession"]
         )
         filled = df["bioproject_accession"].notna().sum()
         print(f"[INFO] BioProject accession resolved for {filled} / {len(df)} records.")
     else:
-        print("[WARNING] No BioProject accessions found in assembly summary files for this dataset.")
+        print("[WARNING] No BioProject accessions found in assembly index for this dataset.")
 
     return df
 
@@ -175,7 +177,7 @@ def _classify_ids(ids: list) -> tuple:
     for i in ids:
         i_upper = i.upper()
         if i_upper.startswith(("GCF_", "GCA_")):
-            gcx.append(i)  # preserve original case for flat-file lookup
+            gcx.append(i)
         elif i_upper.startswith(("SAMN", "SAME", "SAMD")):
             samn.append(i)
         else:
@@ -185,11 +187,11 @@ def _classify_ids(ids: list) -> tuple:
 
 def _ensure_assembly_summaries() -> None:
     """
-    Download and cache NCBI assembly summary flat files if not already present
-    or if the cached copy is older than _CACHE_TTL_DAYS days.
-    Files are stored in CACHE_DIR (~/.biometaharmonizer/cache/ by default).
-    Called unconditionally by ingest() so both resolution functions always have
-    the files regardless of input ID type.
+    Ensure NCBI assembly summary flat files are present in CACHE_DIR.
+    Files are downloaded on first use and refreshed when older than
+    _CACHE_TTL_DAYS days. Called unconditionally by ingest() so that
+    both resolution functions always have the files regardless of
+    input ID type.
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for url, label in [
@@ -201,19 +203,21 @@ def _ensure_assembly_summaries() -> None:
         if cache_path.exists():
             age_days = (time.time() - cache_path.stat().st_mtime) / (24 * 3600)
             if age_days > _CACHE_TTL_DAYS:
-                print(
-                    f"[INFO] {label} assembly summary is {age_days:.1f} days old "
-                    f"(TTL={_CACHE_TTL_DAYS}d). Refreshing cache..."
+                logger.info(
+                    "Assembly index (%s) is %d days old -- refreshing.",
+                    label, int(age_days),
                 )
                 try:
                     cache_path.unlink()
                 except OSError:
                     pass
+            else:
+                logger.debug("Assembly index cache OK: %s (%.1f days old)", label, age_days)
 
         if not cache_path.exists():
-            print(f"[INFO] Downloading {label} assembly summary (~100 MB) to {cache_path}...")
+            print(f"[INFO] Fetching NCBI assembly index ({label}) -- this runs once and may take a moment...")
             _download_file(url, cache_path)
-            print(f"[INFO] Saved: {cache_path}")
+            print(f"[INFO] Assembly index ({label}) ready.")
 
 
 def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
@@ -268,7 +272,7 @@ def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
                 if row["biosample"] not in lookup:
                     lookup[row["biosample"]] = row["bioproject"]
         except Exception as exc:
-            print(f"[WARNING] Could not read {cache_path} for BioProject resolution: {exc}")
+            print(f"[WARNING] Could not read assembly index ({label}) for BioProject resolution: {exc}")
     return lookup
 
 
@@ -282,7 +286,6 @@ def _fetch_biosample_metadata(samn_ids: list) -> pd.DataFrame:
     failed_ids   = []
     total        = len(samn_ids)
     n_batches    = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
-    # Respect NCBI rate limit: 3 req/s without API key, 10 with
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
 
     for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
@@ -390,8 +393,6 @@ def _parse_biosample_xml(xml_bytes: bytes) -> list:
         if organism is not None:
             record["taxonomy_id"]   = organism.get("taxonomy_id")
             record["taxonomy_name"] = organism.get("taxonomy_name")
-            # Prefer the submitter-supplied <OrganismName> child; fall back to
-            # the taxonomy_name attribute when the child element is absent.
             org_name_el = organism.find(".//OrganismName")
             if org_name_el is not None and org_name_el.text:
                 record["organism_name"] = org_name_el.text.strip()
