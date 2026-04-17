@@ -85,7 +85,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "(.csv, .tsv, .xlsx, .parquet) unless --format is given.",
     )
 
-    # Optional — ingestion
+    # Optional -- ingestion
     run_p.add_argument(
         "--api-key",
         metavar="KEY",
@@ -101,7 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "(default: ~/.biometaharmonizer/cache/).",
     )
 
-    # Optional — key mapper
+    # Optional -- key mapper
     run_p.add_argument(
         "--model",
         metavar="MODEL",
@@ -126,11 +126,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--drop-sparse",
-        type=int,
+        type=float,
         metavar="N",
         default=5,
-        help="Drop columns with fewer than N non-null values (default: 5). "
-             "Set to 0 to disable.",
+        help="Drop columns whose non-null count falls below this threshold. "
+             "An integer value (e.g. 5) is treated as an absolute row count. "
+             "A value between 0 and 1 (e.g. 0.05) is treated as a fractional "
+             "fill rate and drops columns with less than that fraction of "
+             "non-null values. Set to 0 to disable (default: 5).",
     )
     run_p.add_argument(
         "--no-drop-junk",
@@ -140,7 +143,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "(person names, email addresses used as keys).",
     )
 
-    # Optional — output
+    # Optional -- output
     run_p.add_argument(
         "--format", "-f",
         choices=["csv", "tsv", "excel", "parquet"],
@@ -156,7 +159,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional path to write a column fill-rate summary CSV.",
     )
 
-    # Optional — pipeline switches
+    # Optional -- pipeline switches
     run_p.add_argument(
         "--skip-dates",
         action="store_true",
@@ -176,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip One Health classification.",
     )
 
-    # Optional — logging
+    # Optional -- logging
     run_p.add_argument(
         "--verbose", "-v",
         action="store_true",
@@ -226,13 +229,11 @@ def _run(args: argparse.Namespace) -> int:
     logger = logging.getLogger("biometaharmonizer.cli")
 
     # ---- resolve input -------------------------------------------------------
-    # Accept either a file path or a comma-separated string of accessions
     input_arg = args.input.strip()
     if Path(input_arg).exists():
         source = Path(input_arg)
         logger.debug("Input: file %s", source)
     else:
-        # Treat as comma-separated accession list
         accessions = [a.strip() for a in input_arg.split(",") if a.strip()]
         if not accessions:
             print(
@@ -249,7 +250,7 @@ def _run(args: argparse.Namespace) -> int:
 
     # ---- imports (deferred to keep --help fast) ------------------------------
     try:
-        from biometaharmonizer.ingestion import set_email, set_api_key, set_cache_dir, ingest
+        from biometaharmonizer.ingestion import set_email, ingest
         from biometaharmonizer.key_mapper import KeyMapper
         from biometaharmonizer.date_engine import DateEngine
         from biometaharmonizer.geo_engine import GeoEngine
@@ -330,8 +331,11 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("Step 4/5  Geospatial parsing")
         ge = GeoEngine()
         geo_df = ge.parse(df["geo_loc_name"])
-        df = df.join(geo_df)
-        resolved = df["geo_country"].notna().sum()
+        # Only join columns not already present in df to avoid ValueError
+        # on duplicate column names (e.g. if raw data contained 'geo_country').
+        new_geo_cols = [c for c in geo_df.columns if c not in df.columns]
+        df = df.join(geo_df[new_geo_cols])
+        resolved = df["geo_country"].notna().sum() if "geo_country" in df.columns else 0
         logger.info("         %d / %d geo_loc_name values resolved to country.", resolved, len(df))
     else:
         if args.skip_geo:

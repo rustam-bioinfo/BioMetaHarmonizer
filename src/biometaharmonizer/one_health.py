@@ -1,6 +1,7 @@
-import pandas as pd
-import numpy as np
 import re
+
+import numpy as np
+import pandas as pd
 
 
 class OneHealthClassifier:
@@ -21,6 +22,7 @@ class OneHealthClassifier:
     substring false positives (e.g. 'rat' inside 'laboratory').
 
     NULL_PATTERNS are checked first and return NaN, not Unclassified.
+    Empty strings also return NaN (not Unclassified) for the same reason.
     """
 
     NULL_PATTERNS = re.compile(
@@ -79,8 +81,9 @@ class OneHealthClassifier:
         if pd.isna(value):
             return np.nan
         value = str(value).strip()
+        # Empty string is semantically missing, not Unclassified
         if not value:
-            return "Unclassified"
+            return np.nan
         if self.NULL_PATTERNS.match(value):
             return np.nan
         for category, pattern in self.TIER1_PATTERNS.items():
@@ -97,6 +100,7 @@ class OneHealthClassifier:
         ----------
         isolation_source_series : pd.Series
         host_series : pd.Series
+            Must share the same index as isolation_source_series.
 
         Returns
         -------
@@ -105,8 +109,10 @@ class OneHealthClassifier:
         result = self.classify(isolation_source_series)
         fallback_mask = result.isna() | (result == "Unclassified")
         if fallback_mask.any():
-            host_result = self.classify(host_series.loc[fallback_mask])
-            result.loc[fallback_mask] = host_result
+            # Use boolean indexing (not .loc) to avoid KeyError when the two
+            # series have been passed with different or reset indexes.
+            host_result = self.classify(host_series[fallback_mask])
+            result[fallback_mask] = host_result
         return result
 
     def classify_with_confidence(self, series):
@@ -137,12 +143,9 @@ class OneHealthClassifier:
         if pd.isna(value):
             return empty
         value = str(value).strip()
+        # Empty string is semantically missing, not Unclassified
         if not value:
-            return {
-                "one_health_category": "Unclassified",
-                "one_health_term": np.nan,
-                "one_health_confidence": 0.0,
-            }
+            return empty
         if self.NULL_PATTERNS.match(value):
             return empty
         for category, pattern in self.TIER1_PATTERNS.items():

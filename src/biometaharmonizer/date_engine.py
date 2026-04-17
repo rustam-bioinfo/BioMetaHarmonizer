@@ -1,8 +1,9 @@
 import logging
-import pandas as pd
-import numpy as np
-from dateutil import parser as dateutil_parser
 import re
+
+import numpy as np
+import pandas as pd
+from dateutil import parser as dateutil_parser
 
 
 logger = logging.getLogger(__name__)
@@ -28,10 +29,12 @@ class DateEngine:
         r")$",
         re.IGNORECASE,
     )
-    YEAR_ONLY = re.compile(r"^(\d{4})$")
-    YEAR_MONTH = re.compile(r"^(\d{4})[-/](\d{1,2})$|^([A-Za-z]{3,9})[-/\s](\d{4})$")
+    YEAR_ONLY   = re.compile(r"^(\d{4})$")
+    YEAR_MONTH  = re.compile(r"^(\d{4})[-/](\d{1,2})$|^([A-Za-z]{3,9})[-/\s](\d{4})$")
     TWO_DIGIT_YEAR = re.compile(r"^\d{2}$")
-    INSDC_RANGE = re.compile(r"^(\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?)\s*/\s*(\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?)$")
+    INSDC_RANGE = re.compile(
+        r"^(\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?)\s*/\s*(\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?)$"
+    )
 
     def parse(self, series):
         if isinstance(series, pd.DataFrame):
@@ -55,20 +58,19 @@ class DateEngine:
 
     def _parse_single_with_range(self, value):
         empty = {"collection_date": np.nan, "collection_date_range": np.nan}
-        if not isinstance(value, str) and pd.isna(value):
+
+        # Covers None, float NaN, pd.NaT, and any other NA type before str() cast
+        if pd.isna(value):
             return empty
+
         value = str(value).strip()
         if not value:
             return empty
         if self.NULL_PATTERNS.match(value):
             return empty
 
-        # Two-digit year guard
-        if self.TWO_DIGIT_YEAR.match(value):
-            logger.warning("Rejecting two-digit year string: '%s'", value)
-            return empty
-
-        # INSDC date range: "2019/2020" or "2019-01/2020-03"
+        # INSDC date range must be checked before TWO_DIGIT_YEAR so that a
+        # year-only range like "19/20" is not prematurely rejected.
         range_match = self.INSDC_RANGE.match(value)
         if range_match:
             start_str = range_match.group(1)
@@ -77,6 +79,11 @@ class DateEngine:
                 "collection_date": parsed_start,
                 "collection_date_range": value,
             }
+
+        # Reject bare two-digit strings only after ruling out valid range formats
+        if self.TWO_DIGIT_YEAR.match(value):
+            logger.warning("Rejecting two-digit year string: '%s'", value)
+            return empty
 
         parsed = self._parse_date_string(value)
         return {"collection_date": parsed, "collection_date_range": np.nan}
@@ -91,6 +98,7 @@ class DateEngine:
             parsed = dateutil_parser.parse(value, dayfirst=False)
             return parsed.strftime("%Y-%m-%d")
         except (ValueError, OverflowError):
+            logger.warning("Could not parse date string: '%s'", value)
             return np.nan
 
     def _resolve_year_month(self, value):
@@ -98,4 +106,5 @@ class DateEngine:
             parsed = dateutil_parser.parse(value, dayfirst=False)
             return parsed.strftime("%Y-%m")
         except (ValueError, OverflowError):
+            logger.warning("Could not parse year-month string: '%s'", value)
             return np.nan

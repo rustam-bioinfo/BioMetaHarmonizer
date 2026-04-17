@@ -1,8 +1,9 @@
 import logging
-import pandas as pd
-import numpy as np
-import pycountry
 import re
+
+import numpy as np
+import pandas as pd
+import pycountry
 
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ class GeoEngine:
             result["geo_sea_ocean"] = country_str
             return result
 
-        # UK sub-country: override country name
+        # UK sub-country: normalise display name
         lower_country = country_str.lower().strip()
         if lower_country in self._UK_SUBCOUNTRY:
             display_country = "United Kingdom"
@@ -85,7 +86,7 @@ class GeoEngine:
             "geo_locality": locality_str if locality_str else np.nan,
             "geo_iso3166": iso_code,
             "geo_sea_ocean": np.nan,
-            "geo_loc_raw": np.nan,
+            "geo_loc_raw": value,  # always store raw input for audit traceability
         }
 
     def _split_geo_string(self, value):
@@ -117,7 +118,7 @@ class GeoEngine:
         # Korea ambiguity
         if lower == "korea":
             logger.warning(
-                "Ambiguous 'Korea' — defaulting to South Korea (KR). "
+                "Ambiguous 'Korea' -- defaulting to South Korea (KR). "
                 "Use 'North Korea' or 'South Korea' for precision."
             )
             return "KR"
@@ -125,6 +126,12 @@ class GeoEngine:
         # Taiwan explicit lookup
         if lower in ("taiwan", "taiwan, province of china"):
             return "TW"
+
+        # Guard against very short strings that produce false-positive fuzzy matches
+        # (e.g. 'EU', 'NA', 'US' passed as free-text rather than proper country names)
+        if len(lower) < 3:
+            logger.warning("Country string too short for reliable ISO lookup: '%s'", country_str)
+            return np.nan
 
         try:
             result = pycountry.countries.search_fuzzy(country_str)
