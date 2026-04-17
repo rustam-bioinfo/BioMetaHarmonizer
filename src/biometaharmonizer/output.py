@@ -1,4 +1,4 @@
-"""Module 5: Output — write harmonized DataFrame to disk."""
+"""Module 6: Output -- write harmonized DataFrame to disk."""
 
 from pathlib import Path
 
@@ -19,6 +19,7 @@ def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
         Destination file path. Parent directories are created automatically.
     fmt : str, default "csv"
         Output format. One of: "csv", "tsv", "excel", "parquet".
+        Case-insensitive.
 
     Returns
     -------
@@ -30,6 +31,7 @@ def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
     ValueError
         If fmt is not one of the supported formats.
     """
+    fmt = fmt.lower()
     if fmt not in _VALID_FORMATS:
         raise ValueError(
             f"Unsupported format {fmt!r}. Valid options: {', '.join(_VALID_FORMATS)}"

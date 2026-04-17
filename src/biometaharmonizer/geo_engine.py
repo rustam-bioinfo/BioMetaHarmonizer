@@ -15,6 +15,7 @@ class GeoEngine:
     Parses NCBI-style geo_loc_name strings into
     separate geo_country, geo_region, and geo_locality columns.
     Expected input format: 'Country: Region, Locality'
+    Fallback format (no colon): 'Country, Locality'
     """
 
     NULL_PATTERNS = re.compile(
@@ -86,10 +87,21 @@ class GeoEngine:
             "geo_locality": locality_str if locality_str else np.nan,
             "geo_iso3166": iso_code,
             "geo_sea_ocean": np.nan,
-            "geo_loc_raw": value,  # always store raw input for audit traceability
+            "geo_loc_raw": value,
         }
 
     def _split_geo_string(self, value):
+        """
+        Split an NCBI geo_loc_name string into (country, region, locality).
+
+        Parsing rules (in order):
+          1. 'Country: Region, Locality'  -> colon separates country; comma
+             separates region and locality within the remainder.
+          2. 'Country: Region'            -> colon present, no comma.
+          3. 'Country, Locality'          -> no colon; comma separates country
+             and locality (region left empty).
+          4. 'Country'                    -> no colon, no comma.
+        """
         country_str = region_str = locality_str = ""
         if ":" in value:
             parts = value.split(":", 1)
@@ -102,7 +114,13 @@ class GeoEngine:
             else:
                 region_str = remainder
         else:
-            country_str = value
+            # No colon: treat text before first comma as country, after as locality
+            if "," in value:
+                parts = value.split(",", 1)
+                country_str = parts[0].strip()
+                locality_str = parts[1].strip()
+            else:
+                country_str = value
         return country_str, region_str, locality_str
 
     def _resolve_iso(self, country_str):
@@ -128,7 +146,6 @@ class GeoEngine:
             return "TW"
 
         # Guard against very short strings that produce false-positive fuzzy matches
-        # (e.g. 'EU', 'NA', 'US' passed as free-text rather than proper country names)
         if len(lower) < 3:
             logger.warning("Country string too short for reliable ISO lookup: '%s'", country_str)
             return np.nan
@@ -136,5 +153,7 @@ class GeoEngine:
         try:
             result = pycountry.countries.search_fuzzy(country_str)
             return result[0].alpha_2
-        except LookupError:
+        except Exception:
+            # pycountry raises LookupError for no match, but may also raise
+            # AttributeError or TypeError on unusual input in some versions.
             return np.nan

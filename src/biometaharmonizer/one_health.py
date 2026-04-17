@@ -18,6 +18,10 @@ class OneHealthClassifier:
     so that 'environmental swab' resolves to Environmental rather than Human.
     Animal is checked before Human so that 'bovine blood' resolves to Animal.
 
+    TIER1_PATTERNS is a tuple of (category, pattern) pairs rather than a dict
+    so that the priority order is structurally enforced and cannot be silently
+    broken by future insertions.
+
     Word boundaries are applied to all short tokens to prevent
     substring false positives (e.g. 'rat' inside 'laboratory').
 
@@ -30,8 +34,9 @@ class OneHealthClassifier:
         re.IGNORECASE
     )
 
-    TIER1_PATTERNS = {
-        "Environmental": re.compile(
+    # Tuple of (category, compiled pattern) pairs — order defines priority.
+    TIER1_PATTERNS = (
+        ("Environmental", re.compile(
             r"soil|\bwater\b|river|lake|sewage|wastewater|\bair\b|"
             r"rhizosphere|sediment|environment|dust|biofilm|"
             r"compost|manure|surface|outdoor|indoor|cave|sand|"
@@ -39,24 +44,24 @@ class OneHealthClassifier:
             r"wipe|swab.*surface|\bbaby\b.*wipe|"
             r"environmental\s+swab|env\s+swab",
             re.IGNORECASE
-        ),
-        "Animal": re.compile(
+        )),
+        ("Animal", re.compile(
             r"bovine|cattle|\bpig\b|swine|poultry|chicken|sheep|horse|"
             r"\bdog\b|\bcat\b|rodent|\bmouse\b|\brat\b|\bbird\b|\bfish\b|animal|"
             r"insect|\bbee\b|\bant\b|wasp|queen|colony|\blarva\b|larvae|"
             r"wild.caught|reared|invertebrate|arthropod|carcass|gut|flea|tick|"
             r"\bfly\b|\bmite\b|\bworm\b|nematode",
             re.IGNORECASE
-        ),
-        "Human": re.compile(
+        )),
+        ("Human", re.compile(
             r"human|patient|clinical|homo sapiens|person|"
             r"(?<!bovine )(?<!animal )(?<!pig )(?<!cattle )\bblood\b|"
             r"urine|sputum|wound|stool|feces|fecal|"
             r"dental|plaque|biopsy|serum|plasma|\bcsf\b|cerebrospinal|"
             r"nasopharyngeal|throat|(?<!environmental )(?<!env )\bswab\b|abscess|hospital",
             re.IGNORECASE
-        ),
-        "Food": re.compile(
+        )),
+        ("Food", re.compile(
             r"food|\bmeat\b|\bmilk\b|cheese|vegetable|fruit|poultry product|"
             r"dairy|\begg\b|seafood|water supply|spice|grain|cereal|"
             r"flour|bread|fermented|beverage|pasta|sausage|ice.?cream|"
@@ -65,14 +70,14 @@ class OneHealthClassifier:
             r"\bbean\b|\bnut\b|\bherb\b|spore.?forming|"
             r"slaughterhouse|abattoir|retail food",
             re.IGNORECASE
-        ),
-        "Lab": re.compile(
+        )),
+        ("Lab", re.compile(
             r"\blab\b|laboratory|\bculture\b|atcc|reference strain|"
             r"type strain|synthetic|in vitro|\bdna\b|whole organism|"
             r"\bstrain\b.*collection",
             re.IGNORECASE
-        ),
-    }
+        )),
+    )
 
     def classify(self, series):
         return series.apply(self._classify_single)
@@ -86,7 +91,7 @@ class OneHealthClassifier:
             return np.nan
         if self.NULL_PATTERNS.match(value):
             return np.nan
-        for category, pattern in self.TIER1_PATTERNS.items():
+        for category, pattern in self.TIER1_PATTERNS:
             if pattern.search(value):
                 return category
         return "Unclassified"
@@ -106,11 +111,11 @@ class OneHealthClassifier:
         -------
         pd.Series of one_health_category
         """
-        result = self.classify(isolation_source_series)
+        # .copy() prevents SettingWithCopyWarning on the mask assignment below
+        result = self.classify(isolation_source_series).copy()
         fallback_mask = result.isna() | (result == "Unclassified")
         if fallback_mask.any():
-            # Use boolean indexing (not .loc) to avoid KeyError when the two
-            # series have been passed with different or reset indexes.
+            # Boolean indexing avoids KeyError when series have different indexes
             host_result = self.classify(host_series[fallback_mask])
             result[fallback_mask] = host_result
         return result
@@ -148,7 +153,7 @@ class OneHealthClassifier:
             return empty
         if self.NULL_PATTERNS.match(value):
             return empty
-        for category, pattern in self.TIER1_PATTERNS.items():
+        for category, pattern in self.TIER1_PATTERNS:
             match = pattern.search(value)
             if match:
                 return {
