@@ -253,7 +253,7 @@ def _run(args: argparse.Namespace) -> int:
         from biometaharmonizer.geo_engine import GeoEngine
         from biometaharmonizer.one_health import OneHealthClassifier
         from biometaharmonizer.output import write, write_summary
-    except RuntimeError as exc:
+    except (ImportError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
