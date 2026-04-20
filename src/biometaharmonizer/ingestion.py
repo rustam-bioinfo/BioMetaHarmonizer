@@ -149,8 +149,13 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     if unrecognized:
         logger.warning("%d unrecognized IDs skipped: %s", len(unrecognized), unrecognized[:5])
 
+    # Always ensure assembly summaries are cached so that BioProject accessions
+    # can be resolved for any input type (GCF_/GCA_ or SAMN/SAME/SAMD).
+    # Previously this block was inside `if gcx:`, which meant SAMN-only input
+    # never downloaded the flat files and bioproject_accession was always NaN.
+    _ensure_assembly_summaries()
+
     if gcx:
-        _ensure_assembly_summaries()
         logger.info("Resolving %d assembly accessions to BioSample IDs...", len(gcx))
         resolved = _resolve_assembly_to_biosample(gcx)
         samn = list(set(samn + resolved))
