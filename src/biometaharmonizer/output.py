@@ -1,8 +1,12 @@
 """Module 6: Output -- write harmonized DataFrame to disk."""
 
+import logging
 from pathlib import Path
 
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 _VALID_FORMATS = ("csv", "tsv", "excel", "parquet")
 
@@ -49,7 +53,10 @@ def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
     elif fmt == "parquet":
         df.to_parquet(path, index=False, engine="pyarrow")
 
-    print(f"[INFO] Output written: {path} ({len(df)} records, {len(df.columns)} columns)")
+    logger.info(
+        "Output written: %s (%d records, %d columns)",
+        path, len(df), len(df.columns),
+    )
     return path
 
 
