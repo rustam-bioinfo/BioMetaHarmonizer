@@ -103,28 +103,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Optional -- key mapper
     run_p.add_argument(
-        "--model",
-        metavar="MODEL",
-        default=None,
-        help=(
-            "sentence-transformers model for Layer 2 semantic column matching. "
-            "Defaults to the model recorded in ncbi_cache_meta.json "
-            "(written by build_ncbi_attribute_cache.py), which is "
-            "'all-MiniLM-L6-v2' unless the cache was rebuilt with a different model. "
-            "The model you pass MUST match the one used to build ncbi_embeddings.npy. "
-            "Examples: 'all-mpnet-base-v2', 'BAAI/bge-small-en-v1.5', "
-            "'intfloat/e5-small-v2'."
-        ),
-    )
-    run_p.add_argument(
-        "--threshold",
-        type=float,
-        metavar="FLOAT",
-        default=None,
-        help="Cosine similarity threshold for Layer 2 acceptance (default: 0.75). "
-             "Lower values increase recall at the cost of precision.",
-    )
-    run_p.add_argument(
         "--drop-sparse",
         type=float,
         metavar="N",
@@ -222,9 +200,6 @@ def _infer_format(path: Path) -> str:
 def _looks_like_filepath(s: str) -> bool:
     """
     Return True when s appears to be a file path rather than an accession string.
-    Heuristic: the last path component contains a dot (i.e. has an extension)
-    AND the string does not match the known accession prefixes.
-    This catches 'accessions.txt', 'data/ids.csv', etc.
     """
     accession_prefixes = ("SAMN", "SAME", "SAMD", "GCF_", "GCA_")
     last_part = Path(s).name
@@ -250,14 +225,12 @@ def _run(args: argparse.Namespace) -> int:
         source = input_path
         logger.debug("Input: file %s", source)
     elif _looks_like_filepath(input_arg):
-        # Looks like a filename but does not exist -- fail clearly.
         print(
             f"ERROR: Input file not found: '{input_arg}'",
             file=sys.stderr,
         )
         return 1
     else:
-        # Treat as comma-separated accession list.
         accessions = [a.strip() for a in input_arg.split(",") if a.strip()]
         if not accessions:
             print(
@@ -308,13 +281,8 @@ def _run(args: argparse.Namespace) -> int:
 
     # ---- 2. Key harmonization ------------------------------------------------
     logger.info("Step 2/5  Key harmonization")
-    km_kwargs = {}
-    if args.model:
-        km_kwargs["model"] = args.model
-    if args.threshold is not None:
-        km_kwargs["threshold"] = args.threshold
     try:
-        mapper = KeyMapper(**km_kwargs)
+        mapper = KeyMapper()
         df = mapper.map_columns(
             df,
             drop_sparse=args.drop_sparse,
