@@ -12,9 +12,10 @@ The NCBI BioSample database is the central repository for genomic metadata. Beca
 
 - Fetches BioSample XML records directly from NCBI Entrez for any list of BioSample or assembly accessions
 - Resolves BioProject accessions from NCBI assembly summary flat files
-- Maps raw free-text attribute variants to NCBI standard keys using the **official NCBI BioSample harmonization table** as primary authority (Layer 1) and **unified.json synonym lists** as fallback (Layer 2) — no manual curation required
-- Parses dates (40+ formats → ISO 8601), resolves ISO-3166 country/region geography, and classifies isolation source into One Health categories (Human / Animal / Food / Environmental / Lab)
-- Drops submitter-artifact columns (person names used as keys, one-off fields with fewer than 5 records)
+- Produces a **fixed, deterministic output schema** — every run on any dataset outputs the same columns in the same order, regardless of what attributes individual submitters included
+- Maps raw free-text attribute variants to standard keys using the **official NCBI BioSample `harmonized_name` XML attribute** as the primary signal, with a two-layer synonym lookup (unified.json + NCBI attribute table) as fallback
+- Any attribute that does not resolve to a known schema column is preserved losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
+- Parses dates (40+ formats → ISO 8601), resolves ISO-3166 country/region geography, and classifies isolation source into One Health categories (Human / Animal / Food / Environmental / Lab) — all in-place into the fixed schema columns
 - Validates mandatory field completeness per NCBI submission package
 - Writes harmonized output to CSV, TSV, Excel, or Parquet
 
@@ -45,8 +46,6 @@ Optional flags:
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Assembly summary cache directory |
 | `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` (case-insensitive) |
 | `--summary FILE` | — | Write per-column fill-rate CSV |
-| `--drop-sparse N` | 5 | Drop columns below this non-null threshold. An integer (e.g. `5`) is an absolute row count; a float between 0 and 1 (e.g. `0.05`) is a fractional fill rate. Set to `0` to disable. |
-| `--no-drop-junk` | off | Keep submitter-artifact columns (person names, emails) |
 | `--skip-dates` | off | Skip ISO 8601 date parsing |
 | `--skip-geo` | off | Skip geospatial resolution |
 | `--skip-one-health` | off | Skip One Health classification |
@@ -59,26 +58,30 @@ from biometaharmonizer.ingestion import set_email, ingest
 from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier, write, write_summary
 
 # 1. Ingest — accepts BioSample IDs, assembly accessions, or a mixed file
+#    Output is already a fixed-schema DataFrame: every column always present.
 set_email("your@email.com")
 df = ingest("accessions.txt")
 
-# 2. Harmonize column names (Layer 1: NCBI XML synonyms; Layer 2: unified.json)
+# 2. Harmonize column names (for non-ingestion/custom workflows)
+#    In the fixed-schema pipeline this step only coalesces any duplicate
+#    columns and runs per-package mandatory field compliance reporting.
 mapper = KeyMapper()
-df = mapper.map_columns(df)          # drop_sparse=5, drop_junk=True by default
+df = mapper.map_columns(df)
 
 # 3. Parse dates → ISO 8601 truncated (YYYY / YYYY-MM / YYYY-MM-DD)
+#    Written in-place into collection_date and collection_date_range columns.
 de = DateEngine()
 date_df = de.parse_with_range(df["collection_date"])
 df["collection_date"] = date_df["collection_date"]
+df["collection_date_range"] = date_df["collection_date_range"]
 
-# 4. Resolve geography → snake_case columns
+# 4. Resolve geography → in-place into geo_country, geo_region, etc.
 ge = GeoEngine()
-geo = ge.parse(df["geo_loc_name"])   # returns DataFrame with geo_country, geo_region, ...
-# Only join columns not already present to avoid collisions with raw input columns
-new_geo_cols = [c for c in geo.columns if c not in df.columns]
-df = df.join(geo[new_geo_cols])
+geo_df = ge.parse(df["geo_loc_name"])
+for col in geo_df.columns:
+    df[col] = geo_df[col]
 
-# 5. Classify isolation source + host → One Health category
+# 5. Classify isolation source + host → in-place into one_health_category
 oh = OneHealthClassifier()
 df["one_health_category"] = oh.classify_joint(df["isolation_source"], df["host"])
 
@@ -86,8 +89,72 @@ df["one_health_category"] = oh.classify_joint(df["isolation_source"], df["host"]
 write(df, "harmonized.csv")
 write_summary(df, "fill_rates.csv")
 
-print(df.shape)
+print(df.shape)   # (N_records, fixed number of columns — always identical)
 ```
+
+## Output Schema
+
+Every output file contains exactly the following columns, in this order, regardless of dataset:
+
+| # | Column | Source |
+|---|--------|--------|
+| 1 | `biosample_accession` | BioSample XML structural field |
+| 2 | `biosample_id` | BioSample XML structural field |
+| 3 | `sra_accession` | BioSample XML structural field |
+| 4 | `bioproject_accession` | BioSample XML / assembly index |
+| 5 | `sample_name_id` | BioSample XML structural field |
+| 6 | `submission_date` | BioSample XML structural field |
+| 7 | `last_update` | BioSample XML structural field |
+| 8 | `publication_date` | BioSample XML structural field |
+| 9 | `access` | BioSample XML structural field |
+| 10 | `status` | BioSample XML structural field |
+| 11 | `status_date` | BioSample XML structural field |
+| 12 | `title` | BioSample XML structural field |
+| 13 | `description_comment` | BioSample XML structural field |
+| 14 | `ncbi_package` | BioSample XML structural field |
+| 15 | `taxonomy_id` | BioSample XML structural field |
+| 16 | `taxonomy_name` | BioSample XML structural field |
+| 17 | `organism_name` | BioSample XML structural field |
+| 18 | `collection_date` | BioSample attribute → DateEngine |
+| 19 | `geo_loc_name` | BioSample attribute |
+| 20 | `lat_lon` | BioSample attribute |
+| 21 | `host` | BioSample attribute → OneHealthClassifier |
+| 22 | `isolation_source` | BioSample attribute → OneHealthClassifier |
+| 23 | `env_broad_scale` | BioSample attribute |
+| 24 | `env_local_scale` | BioSample attribute |
+| 25 | `env_medium` | BioSample attribute |
+| 26 | `host_disease` | BioSample attribute |
+| 27 | `isolate` | BioSample attribute |
+| 28 | `sub_strain` | BioSample attribute |
+| 29 | `serotype` | BioSample attribute |
+| 30 | `serovar` | BioSample attribute |
+| 31 | `host_age` | BioSample attribute |
+| 32 | `host_sex` | BioSample attribute |
+| 33 | `host_tissue_sampled` | BioSample attribute |
+| 34 | `genotype` | BioSample attribute |
+| 35 | `antimicrobial_resistance` | BioSample attribute |
+| 36 | `outbreak` | BioSample attribute |
+| 37 | `collected_by` | BioSample attribute |
+| 38 | `sequencing_method` | BioSample attribute |
+| 39 | `assembly_method` | BioSample attribute |
+| 40 | `culture_collection` | BioSample attribute |
+| 41 | `samp_size` | BioSample attribute |
+| 42 | `samp_mat_process` | BioSample attribute |
+| 43 | `temp` | BioSample attribute |
+| 44 | `ph` | BioSample attribute |
+| 45 | `depth` | BioSample attribute |
+| 46 | `elev` | BioSample attribute |
+| 47 | `collection_date_range` | DateEngine output |
+| 48 | `geo_country` | GeoEngine output |
+| 49 | `geo_region` | GeoEngine output |
+| 50 | `geo_locality` | GeoEngine output |
+| 51 | `geo_iso3166` | GeoEngine output |
+| 52 | `geo_sea_ocean` | GeoEngine output |
+| 53 | `geo_loc_raw` | GeoEngine output (coordinate-only inputs) |
+| 54 | `one_health_category` | OneHealthClassifier output |
+| 55 | `_extra_attributes` | JSON dict of all unresolved submitter attributes |
+
+Columns that have no data for a given dataset are present but filled with `NaN`. No columns are ever added, dropped, or reordered at runtime.
 
 ## Architecture
 
@@ -96,15 +163,16 @@ BioMetaHarmonizer/
 ├── src/biometaharmonizer/
 │   ├── __init__.py             # version 0.4.0, full public API
 │   ├── cli.py                  # CLI entrypoint: biometaharmonizer run
-│   ├── ingestion.py            # Module 1: Ingestion + BioProject resolution
-│   ├── key_mapper.py           # Module 2: NCBI XML (Layer 1) + unified.json (Layer 2)
-│   ├── date_engine.py          # Module 3: Temporal parsing (40+ formats → ISO 8601)
+│   ├── ingestion.py            # Module 1: fixed schema, XML parsing, BioProject resolution
+│   ├── synonyms.py             # Shared two-layer synonym lookup (unified.json + NCBI XML)
+│   ├── key_mapper.py           # Module 2: column rename/coalesce + compliance reporting
+│   ├── date_engine.py          # Module 3: temporal parsing (40+ formats → ISO 8601)
 │   ├── geo_engine.py           # Module 4: ISO-3166 geospatial resolution
 │   ├── one_health.py           # Module 5: One Health categorization (Tier 1 Regex)
-│   ├── output.py               # Module 6: Write CSV / TSV / Excel / Parquet
+│   ├── output.py               # Module 6: write CSV / TSV / Excel / Parquet
 │   └── schemas/
-│       ├── ncbi_attributes.xml         # NCBI official harmonization table
-│       ├── unified.json                # synonym lookup (Layer 2)
+│       ├── ncbi_attributes.xml         # NCBI official harmonization table (Layer 2)
+│       ├── unified.json                # standard_key definitions + synonym lists (Layer 1)
 │       ├── mandatory_fields.json       # per-package required field lists (22 packages)
 │       ├── pathogen_cl_1.0.json        # legacy
 │       └── pathogen_env_1.0.json       # legacy
@@ -128,46 +196,35 @@ BioMetaHarmonizer/
 
 | Module | File | Status | Notes |
 |---|---|---|---|
-| 1. Ingestion | `ingestion.py` | Complete | BioProject resolved via assembly summary flat files |
-| 2. Key Harmonization | `key_mapper.py` | Complete | NCBI XML (Layer 1) + unified.json synonyms (Layer 2); exact-match only |
+| 1. Ingestion | `ingestion.py` | Complete | Fixed schema defined here; BioProject resolved via assembly index |
+| Synonym Lookup | `synonyms.py` | Complete | Single shared two-layer lookup used by ingestion + key_mapper |
+| 2. Key Harmonization | `key_mapper.py` | Complete | Rename/coalesce + compliance reporting; no columns dropped or added |
 | 3. Temporal Parsing | `date_engine.py` | Complete | 40+ date formats, ISO 8601 output |
-| 4. Geospatial Resolution | `geo_engine.py` | Complete | ISO-3166 country, region, locality |
+| 4. Geospatial Resolution | `geo_engine.py` | Complete | ISO-3166 country, region, locality; assigned in-place |
 | 5. One Health Categorization | `one_health.py` | Complete | Human / Animal / Food / Environmental / Lab |
 | 6. Output | `output.py` | Complete | CSV, TSV, Excel, Parquet; fill-rate summary |
 
-## Key Harmonization: How It Works
+## Attribute Resolution: How It Works
 
-`KeyMapper` resolves raw submitter column names to NCBI standard keys using two exact-match layers:
+When parsing a live BioSample XML record, each `<Attribute>` element is resolved in the following priority order:
 
-**Layer 1 — NCBI attribute XML (authoritative)**
-The [NCBI BioSample harmonization table](https://www.ncbi.nlm.nih.gov/biosample/docs/attributes/?format=xml)
-maps every known submitter synonym to its canonical `HarmonizedName`. This covers the vast
-majority of real-world column names without any manual curation.
+1. **NCBI `harmonized_name` (authoritative)** — if the `harmonized_name` attribute in the XML element matches a known final output column directly, it is used without any synonym lookup. This is the signal NCBI itself assigns and is the most reliable mapping available.
+2. **Synonym lookup on `harmonized_name`** — if the `harmonized_name` is not a direct schema column but appears in the unified synonym table, the resolved standard key is used.
+3. **Synonym lookup on `attribute_name`** — if `harmonized_name` is absent or unresolvable, the raw `attribute_name` is looked up in the synonym table.
+4. **`_extra_attributes`** — any attribute that cannot be resolved by any of the above is serialized as a JSON key-value pair into the `_extra_attributes` column. No data is discarded.
 
-**Layer 2 — unified.json synonym lists**
-Column names absent from the NCBI XML are matched against the manually curated synonym
-lists in `schemas/unified.json`. Both layers are case-insensitive exact lookups — no
-embedding models or external dependencies are required.
+The synonym table (`synonyms.py`) is built from two layers on startup:
 
-When the NCBI XML is absent (e.g. fresh install), `KeyMapper` falls back to
-`unified.json` synonyms only, which is sufficient for the vast majority of real-world
-column names.
+- **Layer 1 — `unified.json`** — manually curated synonym lists for all standard keys
+- **Layer 2 — `ncbi_attributes.xml`** — the official NCBI BioSample harmonization table; loaded on top of Layer 1 and wins on any conflict
 
-When multiple raw columns resolve to the same standard key, they are coalesced
-(first non-null value wins).
-
-```python
-# Default: uses ncbi_attributes.xml (Layer 1) + unified.json (Layer 2)
-mapper = KeyMapper()
-
-# Custom mandatory fields path
-mapper = KeyMapper(mandatory_path="/path/to/mandatory_fields.json")
-```
+Both `ingestion.py` and `key_mapper.py` import the same `build_synonym_lookup()` function, so the mapping is always identical across both modules.
 
 ## Geospatial Parsing
 
-`GeoEngine` accepts the standard NCBI `geo_loc_name` field and splits it into four columns:
+`GeoEngine` accepts the standard NCBI `geo_loc_name` field and fills four in-schema columns:
 `geo_country`, `geo_region`, `geo_locality`, and `geo_iso3166` (ISO 3166-1 alpha-2 code).
+For coordinate-only inputs (e.g. `"40.71 N, 74.00 W"`), the raw value is preserved in `geo_loc_raw`.
 
 Supported input formats:
 
@@ -177,12 +234,10 @@ Supported input formats:
 | `"USA: California"` | country=USA, region=California |
 | `"Germany, Bavaria"` | country=Germany, locality=Bavaria |
 | `"France"` | country=France |
-| `"Pacific Ocean"` | sea/ocean flag set, country columns left empty |
-| Decimal coordinates | stored in `geo_loc_raw`, country columns left empty |
+| `"Pacific Ocean"` | geo_sea_ocean=True, country columns left empty |
+| Decimal coordinates | preserved in `geo_loc_raw`, country columns left empty |
 
-UK sub-country names (England, Scotland, Wales, Northern Ireland) are normalised to
-`"United Kingdom"` with ISO code `GB`. Ambiguous `"Korea"` defaults to South Korea (`KR`)
-with a warning logged.
+UK sub-country names (England, Scotland, Wales, Northern Ireland) are normalised to `"United Kingdom"` with ISO code `GB`. Ambiguous `"Korea"` defaults to South Korea (`KR`) with a warning logged.
 
 ## Input Formats
 
