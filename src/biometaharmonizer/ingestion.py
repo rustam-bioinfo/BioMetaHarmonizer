@@ -73,7 +73,8 @@ def _load_final_schema() -> list:
       1. Structural BioSample fields extracted directly from XML
       2. All standard_key values from unified.json, in schema order
       3. Downstream in-place enrichment columns
-      4. _extra_attributes last
+      4. Assembly accession columns resolved from flat files
+      5. _extra_attributes last
     """
     structural = [
         "biosample_accession", "biosample_id", "sra_accession",
@@ -96,6 +97,8 @@ def _load_final_schema() -> list:
         "geo_country", "geo_region", "geo_locality",
         "geo_iso3166", "geo_sea_ocean", "geo_loc_raw",
         "one_health_category",
+        "assembly_accession_refseq",
+        "assembly_accession_genbank",
     ]
 
     final = []
@@ -150,9 +153,7 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
         logger.warning("%d unrecognized IDs skipped: %s", len(unrecognized), unrecognized[:5])
 
     # Always ensure assembly summaries are cached so that BioProject accessions
-    # can be resolved for any input type (GCF_/GCA_ or SAMN/SAME/SAMD).
-    # Previously this block was inside `if gcx:`, which meant SAMN-only input
-    # never downloaded the flat files and bioproject_accession was always NaN.
+    # and assembly accessions can be resolved for any input type.
     _ensure_assembly_summaries()
 
     if gcx:
@@ -167,16 +168,32 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
     df = _fetch_biosample_metadata(samn, synonym_lookup=synonym_lookup)
 
-    logger.info("Resolving BioProject accessions from assembly index...")
-    bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
-    if bioproject_map:
-        df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map).fillna(
-            df["bioproject_accession"]
+    biosample_set = set(df["biosample_accession"].dropna())
+
+    logger.info("Resolving BioProject and assembly accessions from assembly index...")
+    assembly_map = _resolve_biosample_to_assembly(biosample_set)
+
+    if assembly_map:
+        df["bioproject_accession"] = df["biosample_accession"].map(
+            lambda x: assembly_map.get(x, {}).get("bioproject")
+        ).fillna(df["bioproject_accession"])
+
+        df["assembly_accession_refseq"] = df["biosample_accession"].map(
+            lambda x: assembly_map.get(x, {}).get("refseq")
         )
-        filled = df["bioproject_accession"].notna().sum()
-        logger.info("BioProject accession resolved for %d / %d records.", filled, len(df))
+        df["assembly_accession_genbank"] = df["biosample_accession"].map(
+            lambda x: assembly_map.get(x, {}).get("genbank")
+        )
+
+        filled_bp = df["bioproject_accession"].notna().sum()
+        filled_rs = df["assembly_accession_refseq"].notna().sum()
+        filled_gb = df["assembly_accession_genbank"].notna().sum()
+        logger.info(
+            "Resolved: bioproject=%d  refseq=%d  genbank=%d  (of %d records)",
+            filled_bp, filled_rs, filled_gb, len(df),
+        )
     else:
-        logger.warning("No BioProject accessions found in assembly index for this dataset.")
+        logger.warning("No assembly index hits found for this dataset.")
 
     return df.reindex(columns=BIOSAMPLE_SCHEMA)
 
@@ -278,8 +295,26 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
     return resolved
 
 
-def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
-    lookup = {}
+def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
+    """
+    For each BioSample accession, collect bioproject, GCF_ (refseq), and GCA_ (genbank)
+    accessions from the NCBI assembly flat files.
+
+    Returns a dict keyed by biosample accession:
+      {
+        "SAMN...": {
+          "bioproject": "PRJNA...",
+          "refseq":     "GCF_...",   # None if not in RefSeq
+          "genbank":    "GCA_...",   # None if not in GenBank
+        },
+        ...
+      }
+
+    Both flat files are always checked independently so that a BioSample present
+    in only one source still gets all available accessions populated.
+    """
+    lookup: dict = {}
+
     for label in ["refseq", "genbank"]:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
         if not cache_path.exists():
@@ -287,18 +322,40 @@ def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
         try:
             df = pd.read_csv(
                 cache_path, sep="\t", skiprows=1,
-                usecols=["biosample", "bioproject"],
+                usecols=["# assembly_accession", "biosample", "bioproject"],
                 low_memory=False,
-            )
-            hits = df[df["biosample"].isin(biosample_ids) & df["bioproject"].notna()]
-            for biosample, bioproject in zip(hits["biosample"], hits["bioproject"]):
-                if biosample not in lookup:
-                    lookup[biosample] = bioproject
+            ).rename(columns={"# assembly_accession": "assembly_accession"})
+
+            hits = df[
+                df["biosample"].isin(biosample_ids)
+                & df["assembly_accession"].notna()
+            ]
+
+            for _, row in hits.iterrows():
+                bs = row["biosample"]
+                asm = row["assembly_accession"]
+                bp = row["bioproject"] if pd.notna(row["bioproject"]) else None
+
+                if bs not in lookup:
+                    lookup[bs] = {"bioproject": None, "refseq": None, "genbank": None}
+
+                # bioproject: take the first non-null value found
+                if lookup[bs]["bioproject"] is None and bp:
+                    lookup[bs]["bioproject"] = bp
+
+                # GCF_ = RefSeq, GCA_ = GenBank
+                if asm.startswith("GCF_"):
+                    if lookup[bs]["refseq"] is None:
+                        lookup[bs]["refseq"] = asm
+                elif asm.startswith("GCA_"):
+                    if lookup[bs]["genbank"] is None:
+                        lookup[bs]["genbank"] = asm
+
         except Exception as exc:
             logger.warning(
-                "Could not read assembly index (%s) for BioProject resolution: %s",
-                label, exc,
+                "Could not read assembly index (%s) for resolution: %s", label, exc
             )
+
     return lookup
 
 
