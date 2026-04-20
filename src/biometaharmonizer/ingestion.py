@@ -66,16 +66,6 @@ def _schemas_dir() -> Path:
 
 
 def _load_final_schema() -> list:
-    """
-    Build the canonical ordered final output schema.
-
-    Order:
-      1. Structural BioSample fields extracted directly from XML
-      2. All standard_key values from unified.json, in schema order
-      3. Downstream in-place enrichment columns
-      4. Assembly accession columns resolved from flat files
-      5. _extra_attributes last
-    """
     structural = [
         "biosample_accession", "biosample_id", "sra_accession",
         "bioproject_accession", "sample_name_id", "submission_date",
@@ -129,6 +119,56 @@ def set_cache_dir(path) -> None:
     CACHE_DIR = Path(path)
 
 
+def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
+    """
+    Read an NCBI assembly summary flat file robustly.
+
+    NCBI's format has two header lines:
+      Line 1: a free-text comment starting with '#'
+      Line 2: the actual column names, where the first column is
+              '# assembly_accession' (with a leading '# ').
+
+    Pandas reads line 2 as the header (skiprows=1), so the first column
+    name will be exactly '# assembly_accession' including the hash and
+    the space.  However, the precise string has varied across NCBI
+    releases -- it has been seen as:
+      '# assembly_accession'   (current canonical form)
+      '#assembly_accession'    (no space after hash)
+      'assembly_accession'     (hash stripped by some FTP clients / mirrors)
+
+    Rather than hard-coding any of those variants, this function reads
+    the raw header line, detects the actual first-column name, renames
+    it to the stable internal name 'assembly_accession', and then
+    filters to the requested columns.
+    """
+    needed = ["assembly_accession", "biosample", "bioproject"] + (extra_cols or [])
+
+    # Peek at line 2 (index 1 after skipping the comment) to find the
+    # actual first column name as pandas will see it.
+    with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if i == 1:
+                raw_first_col = line.split("\t")[0].strip()
+                break
+        else:
+            raise ValueError(f"Assembly summary file appears to be empty: {cache_path}")
+
+    df = pd.read_csv(
+        cache_path,
+        sep="\t",
+        skiprows=1,
+        low_memory=False,
+        dtype=str,
+    )
+
+    # Normalise the first column name regardless of '#' / whitespace variants.
+    df = df.rename(columns={raw_first_col: "assembly_accession"})
+
+    # Keep only the columns we need; ignore any that are absent.
+    available = [c for c in needed if c in df.columns]
+    return df[available]
+
+
 def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     if api_key is not None:
         set_api_key(api_key)
@@ -152,8 +192,6 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     if unrecognized:
         logger.warning("%d unrecognized IDs skipped: %s", len(unrecognized), unrecognized[:5])
 
-    # Always ensure assembly summaries are cached so that BioProject accessions
-    # and assembly accessions can be resolved for any input type.
     _ensure_assembly_summaries()
 
     n_gcx_input = len(gcx)
@@ -198,7 +236,6 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     else:
         logger.warning("No assembly index hits found for this dataset.")
 
-    # Final ingestion summary
     logger.info("=" * 60)
     logger.info("INGEST SUMMARY")
     logger.info("  Input IDs provided  : %d", len(ids))
@@ -296,14 +333,6 @@ def _ensure_assembly_summaries() -> None:
 
 
 def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
-    """
-    Resolve GCF_/GCA_ accessions to BioSample accessions via the assembly flat files.
-
-    Returns:
-        resolved   -- list of BioSample accessions successfully resolved
-        unresolved -- list of input GCF_/GCA_ accessions not found in either index
-                      (suppressed, very new, or never submitted to assembly DB)
-    """
     resolved = []
     gcx_set = set(gcx_ids)
 
@@ -313,17 +342,21 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
         if not cache_path.exists():
             continue
-        df = pd.read_csv(
-            cache_path, sep="\t", skiprows=1,
-            usecols=["# assembly_accession", "biosample"],
-            low_memory=False,
-        ).rename(columns={"# assembly_accession": "accession"})
-
-        hits = df[df["accession"].isin(gcx_set) & df["biosample"].notna()]
-        for acc, biosample in zip(hits["accession"], hits["biosample"]):
-            if acc in gcx_set:
-                resolved.append(biosample)
-                gcx_set.discard(acc)
+        try:
+            df = _read_assembly_summary(cache_path)
+            hits = df[
+                df["assembly_accession"].isin(gcx_set)
+                & df["biosample"].notna()
+            ]
+            for acc, biosample in zip(hits["assembly_accession"], hits["biosample"]):
+                if acc in gcx_set:
+                    resolved.append(biosample)
+                    gcx_set.discard(acc)
+        except Exception as exc:
+            logger.warning(
+                "Could not read assembly index (%s) during accession resolution: %s",
+                label, exc,
+            )
 
     unresolved = list(gcx_set)
     if unresolved:
@@ -339,16 +372,6 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
     For each BioSample accession, collect bioproject, GCF_ (refseq), and GCA_ (genbank)
     accessions from the NCBI assembly flat files.
 
-    Returns a dict keyed by biosample accession:
-      {
-        "SAMN...": {
-          "bioproject": "PRJNA...",
-          "refseq":     "GCF_...",   # None if not in RefSeq
-          "genbank":    "GCA_...",   # None if not in GenBank
-        },
-        ...
-      }
-
     Both flat files are always checked independently so that a BioSample present
     in only one source still gets all available accessions populated.
     """
@@ -359,12 +382,7 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
         if not cache_path.exists():
             continue
         try:
-            df = pd.read_csv(
-                cache_path, sep="\t", skiprows=1,
-                usecols=["# assembly_accession", "biosample", "bioproject"],
-                low_memory=False,
-            ).rename(columns={"# assembly_accession": "assembly_accession"})
-
+            df = _read_assembly_summary(cache_path)
             hits = df[
                 df["biosample"].isin(biosample_ids)
                 & df["assembly_accession"].notna()
@@ -373,7 +391,9 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
             for _, row in hits.iterrows():
                 bs = row["biosample"]
                 asm = row["assembly_accession"]
-                bp = row["bioproject"] if pd.notna(row["bioproject"]) else None
+                bp = row.get("bioproject")
+                if pd.isna(bp):
+                    bp = None
 
                 if bs not in lookup:
                     lookup[bs] = {"bioproject": None, "refseq": None, "genbank": None}
@@ -542,16 +562,6 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
 
 
 def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
-    """
-    Parse raw BioSample XML bytes into a list of flat dicts with fixed schema.
-
-    Resolution priority for each <Attribute>:
-      1. If harmonized_name is present and is a known final output column,
-         trust it directly (this is the official NCBI harmonization signal).
-      2. Else if harmonized_name resolves via synonym_lookup, use that.
-      3. Else if attribute_name resolves via synonym_lookup, use that.
-      4. Else preserve the raw key/value inside _extra_attributes.
-    """
     records = []
     root = ET.fromstring(xml_bytes)
 
