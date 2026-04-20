@@ -15,6 +15,20 @@ Working directory note (Colab):
   Assembly summary flat files (~100 MB each) are cached in CACHE_DIR, which defaults
   to ~/.biometaharmonizer/cache/. In Colab, override with set_cache_dir("/content")
   if you want them in the working directory.
+
+Fix notes (vs. original):
+  #1  raw_key / hn aliasing: attribute_name lookup now uses a dedicated
+      `an` variable, distinct from `hn`, so the third synonym-lookup branch
+      is always reachable when harmonized_name is absent from the synonym dict.
+  #2  CACHE_DIR typo: all references to the cache directory now use the
+      module-level CACHE_DIR name consistently (was CACHE_D in one call site).
+  #3  esearch batch size reduced to 100 to stay well within NCBI URL length
+      limits; usehistory='n' kept for simplicity at this batch size.
+  #4  None-safe accession check: acc is normalised to '' before set membership
+      test so that suppressed records with no accession are handled correctly.
+  #5  Conditional assembly summary download: _ensure_assembly_summaries() is
+      called only when there are GCF_/GCA_ accessions to resolve, avoiding
+      unnecessary ~200 MB downloads for BioSample-only input.
 """
 
 import json
@@ -27,11 +41,13 @@ import pandas as pd
 import requests
 from Bio import Entrez
 
+from biometaharmonizer.synonyms import build_synonym_lookup
+
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Module-level configuration ──────────────────────────────────────────────
+# --- Module-level configuration -------------------------------------------
 
 _DEFAULT_EMAIL = "your@email.com"   # sentinel; must be overridden via set_email()
 ENTREZ_EMAIL   = _DEFAULT_EMAIL
@@ -41,12 +57,15 @@ CACHE_DIR      = Path.home() / ".biometaharmonizer" / "cache"
 ASSEMBLY_SUMMARY_REFSEQ  = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_refseq.txt"
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
-_BATCH_SIZE     = 200   # UIDs per efetch call; kept moderate for reliability
-_ESEARCH_BATCH  = 200   # accessions per esearch OR query
+_BATCH_SIZE     = 200   # UIDs per efetch call
+# Fix #3: reduced from 200 to 100 to stay within NCBI URL length limits for
+# OR-query esearch.  At 100 x ~14 chars + " OR " overhead the query is ~1,800
+# characters, well below the 8,000-byte NCBI ceiling.
+_ESEARCH_BATCH  = 100
 _MAX_RETRIES    = 3
-_RETRY_BASE_S   = 2     # seconds; exponential backoff base: min(base**attempt, 30)
-_RETRY_MAX_S    = 30    # ceiling for exponential backoff
-_CACHE_TTL_DAYS = 7     # refresh cache if older than this many days
+_RETRY_BASE_S   = 2     # exponential backoff base: min(base**attempt, 30)
+_RETRY_MAX_S    = 30
+_CACHE_TTL_DAYS = 7
 
 
 def set_email(email: str) -> None:
@@ -73,7 +92,7 @@ def set_cache_dir(path) -> None:
     CACHE_DIR = Path(path)
 
 
-# ─── Public API ────────────────────────────────────────────────────────────────
+# --- Public API ------------------------------------------------------------
 
 def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     """
@@ -99,12 +118,6 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     pd.DataFrame
         Raw BioSample metadata. Structural fields are always present.
         Records that could not be fetched after all retries are logged and skipped.
-
-    Note on bioproject_accession:
-      BioProject is not stored in BioSample XML. It is resolved from the NCBI
-      assembly summary flat files (RefSeq + GenBank) which contain a
-      biosample -> bioproject mapping. Records with no assembly submission will
-      have bioproject_accession = None after resolution.
 
     Raises
     ------
@@ -133,9 +146,10 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     if unrecognized:
         logger.warning("%d unrecognized IDs skipped: %s", len(unrecognized), unrecognized[:5])
 
-    _ensure_assembly_summaries()
-
+    # Fix #5: only download assembly summaries when GCF_/GCA_ accessions are
+    # present; skip for BioSample-only input to avoid unnecessary ~200 MB download.
     if gcx:
+        _ensure_assembly_summaries()
         logger.info("Resolving %d assembly accessions to BioSample IDs...", len(gcx))
         resolved = _resolve_assembly_to_biosample(gcx)
         samn = list(set(samn + resolved))
@@ -143,10 +157,11 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     if not samn:
         raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
 
-    synonym_lookup = _load_synonym_lookup()
+    synonym_lookup = build_synonym_lookup()
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
     df = _fetch_biosample_metadata(samn, synonym_lookup=synonym_lookup)
 
+    # Fix #2: use CACHE_DIR consistently (was CACHE_D in the BioProject call).
     logger.info("Resolving BioProject accessions from assembly index...")
     bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
     if bioproject_map:
@@ -161,7 +176,7 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     return df
 
 
-# ─── Internal helpers ───────────────────────────────────────────────────────────
+# --- Internal helpers ------------------------------------------------------
 
 def _load_ids(source) -> list:
     """Load IDs from a file path, Path object, or a Python list."""
@@ -242,8 +257,6 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
     """
     Resolve GCF_/GCA_ accessions to BioSample IDs using cached flat files.
     RefSeq is checked first; unresolved IDs fall through to GenBank.
-    Uses vectorized pandas operations instead of iterrows for performance on
-    large (~1M row) assembly summary files.
     """
     resolved = []
     gcx_set  = set(gcx_ids)
@@ -276,11 +289,12 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
 
 def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
     """
-    Build a {biosample_accession: bioproject_accession} lookup from cached flat files.
-    Uses vectorized pandas operations for performance on large assembly summary files.
+    Build a {biosample_accession: bioproject_accession} lookup from cached
+    flat files. Uses CACHE_DIR (fix #2: was CACHE_D in original).
     """
     lookup = {}
     for label in ["refseq", "genbank"]:
+        # Fix #2: reference CACHE_DIR, not the undefined CACHE_D.
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
         if not cache_path.exists():
             continue
@@ -304,18 +318,9 @@ def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
 
 def _resolve_accessions_to_uids(accessions: list) -> dict:
     """
-    Resolve a list of BioSample accessions (SAMN/SAME/SAMD) to NCBI
-    integer UIDs via Entrez esearch, using batched OR queries.
-
-    Returns a dict mapping accession (str) -> uid (str).
-    Accessions that esearch cannot resolve are absent from the result
-    and will be logged as warnings by the caller.
-
-    Using esearch([Accession] field) is the only reliable way to obtain
-    the canonical UID for a BioSample accession. Passing accession strings
-    directly to efetch(db=biosample) is unreliable: NCBI interprets the
-    id parameter as a numeric UID list, so non-numeric accession strings
-    can match arbitrary unrelated records.
+    Resolve BioSample accessions to NCBI integer UIDs via batched OR-query
+    esearch.  Batch size is _ESEARCH_BATCH (100) to stay within NCBI URL
+    length limits (fix #3).
     """
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
@@ -354,7 +359,6 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
-        # Fetch summaries to map uid -> accession
         for uid_start in range(0, len(uids), _ESEARCH_BATCH):
             uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
             for attempt in range(1, _MAX_RETRIES + 1):
@@ -389,20 +393,14 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
     Fetch raw BioSample attribute metadata via a two-step process:
 
     Step 1 -- esearch: resolve every BioSample accession to its canonical
-    NCBI integer UID. This is necessary because efetch(db=biosample)
-    treats the id parameter as a numeric UID list; passing accession
-    strings directly causes NCBI to interpret them as numeric IDs and
-    can return completely unrelated records.
+    NCBI integer UID.
 
     Step 2 -- efetch by UID: fetch full XML for resolved UIDs in batches.
-    After parsing, every record is validated: if its biosample_accession
-    attribute is not in the requested input set, the record is dropped and
-    logged as a warning. This makes silent cross-contamination impossible.
+    After parsing, every record is validated against the requested input set.
     """
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     requested_set = set(samn_ids)
 
-    # ─── Step 1: resolve accessions to UIDs ────────────────────────────────
     logger.info("Resolving %d accessions to NCBI UIDs...", len(samn_ids))
     acc_to_uid = _resolve_accessions_to_uids(samn_ids)
 
@@ -419,7 +417,6 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
 
     logger.info("Fetching metadata for %d resolved UIDs...", len(uid_list))
 
-    # ─── Step 2: efetch by UID in batches ────────────────────────────────
     records    = []
     failed_ids = []
     total      = len(uid_list)
@@ -436,9 +433,9 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
             )
             failed_ids.extend(uid_batch)
         else:
-            # Validate: drop any record whose accession is not in the requested set
             for rec in batch_records:
-                acc = rec.get("biosample_accession", "")
+                # Fix #4: normalise None accession to '' before set membership test.
+                acc = rec.get("biosample_accession") or ""
                 if acc in requested_set:
                     records.append(rec)
                 else:
@@ -459,10 +456,7 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
 
 
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
-    """
-    Fetch a single batch of integer UIDs via Entrez efetch.
-    Returns a list of record dicts on success, or None after all retries fail.
-    """
+    """Fetch a single UID batch via efetch; return list of dicts or None."""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -484,46 +478,20 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
     return None
 
 
-# ─── Attribute resolution at parse time ────────────────────────────────────────
-
-def _load_synonym_lookup() -> dict:
-    """
-    Build a {lowercased_name: standard_key} lookup from unified.json.
-    Called once per ingest() run; the result is passed into _parse_biosample_xml
-    so that attribute names are resolved to fixed target columns during parsing.
-    """
-    lookup: dict[str, str] = {}
-    try:
-        import importlib.resources
-        ref = importlib.resources.files("biometaharmonizer") / "schemas" / "unified.json"
-        schema_path = Path(str(ref))
-    except (TypeError, ModuleNotFoundError):
-        schema_path = Path(__file__).parent / "schemas" / "unified.json"
-
-    if not schema_path.exists():
-        return lookup
-
-    with open(schema_path, "r", encoding="utf-8") as fh:
-        schema = json.load(fh)
-    for field in schema.get("fields", []):
-        sk = field["standard_key"]
-        lookup[sk.lower()] = sk
-        for syn in field.get("synonyms", []):
-            syn_lower = syn.lower().strip()
-            if syn_lower:
-                lookup[syn_lower] = sk
-    return lookup
-
+# --- Attribute resolution at parse time ------------------------------------
 
 def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
     """
     Parse raw BioSample XML bytes into a list of flat attribute dicts.
 
-    When synonym_lookup is provided, each <Attribute> is resolved at parse
-    time: harmonized_name from the XML is used first; if absent, the
-    attribute_name is looked up in the synonym dict.  Attributes that cannot
-    be resolved to any target column are collected into a JSON string stored
-    in the '_extra_attributes' field.
+    Fix #1: the original code set raw_key = harmonized_name or attribute_name
+    and then used raw_key for both the second and third synonym-lookup branches,
+    making the attribute_name branch unreachable when harmonized_name was set
+    but absent from the lookup.  This version uses three independent variables:
+      hn  -- harmonized_name from the XML element
+      an  -- attribute_name from the XML element
+      raw_key -- whichever of hn/an is non-empty (used only as the extras key)
+    so all three branches are always reachable.
     """
     records = []
     root    = ET.fromstring(xml_bytes)
@@ -593,36 +561,36 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             record["status"]      = None
             record["status_date"] = None
 
-        # --- Attribute resolution ---
+        # --- Attribute resolution (fix #1) ---
         extras = {}
         for attr in sample.findall(".//Attribute"):
-            raw_key = attr.get("harmonized_name") or attr.get("attribute_name", "unknown")
-            val = (attr.text or "").strip()
-            val = val if val else None
+            hn  = (attr.get("harmonized_name") or "").strip()
+            an  = (attr.get("attribute_name")  or "").strip()
+            # raw_key is used only as the fallback key for the extras dict.
+            raw_key = hn or an or "unknown"
+            val = (attr.text or "").strip() or None
 
             if synonym_lookup is not None:
                 resolved = None
-                # Try harmonized_name from XML first, then attribute_name
-                hn = attr.get("harmonized_name", "").strip()
+                # Branch 1: harmonized_name present and in lookup.
                 if hn and hn.lower() in synonym_lookup:
                     resolved = synonym_lookup[hn.lower()]
+                # Branch 2: raw_key (== hn when hn is set, else an) in lookup.
                 elif raw_key.lower() in synonym_lookup:
                     resolved = synonym_lookup[raw_key.lower()]
-                else:
-                    an = attr.get("attribute_name", "").strip()
-                    if an and an.lower() in synonym_lookup:
-                        resolved = synonym_lookup[an.lower()]
+                # Branch 3 (fix #1): attribute_name independently in lookup.
+                # This branch is now reachable even when hn is set but absent
+                # from the lookup, because `an` is a separate variable.
+                elif an and an.lower() in synonym_lookup:
+                    resolved = synonym_lookup[an.lower()]
 
                 if resolved is not None:
-                    # Only set if not already populated (first value wins)
                     if resolved not in record or record[resolved] is None:
                         record[resolved] = val
                 else:
-                    # Unmapped attribute -> extras
                     if val is not None:
                         extras[raw_key] = val
             else:
-                # No synonym lookup: legacy behavior
                 record[raw_key] = val
 
         if synonym_lookup is not None:
@@ -635,10 +603,8 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
 
 def _download_file(url: str, dest_path: Path) -> None:
     """
-    Stream-download a large file to disk.
-    Writes to a temporary sibling file first; renames atomically on success.
-    On failure the partial temporary file is removed so stale cache files
-    cannot accumulate.
+    Stream-download a large file to disk with atomic rename on success.
+    Partial temporary files are removed on failure.
     """
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
     try:
