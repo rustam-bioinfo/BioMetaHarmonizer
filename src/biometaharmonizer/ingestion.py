@@ -129,8 +129,9 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     if not samn:
         raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
 
+    synonym_lookup = _load_synonym_lookup()
     print(f"[INFO] Fetching metadata for {len(samn)} BioSample accessions...")
-    df = _fetch_biosample_metadata(samn)
+    df = _fetch_biosample_metadata(samn, synonym_lookup=synonym_lookup)
 
     print("[INFO] Resolving BioProject accessions from assembly index...")
     bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
@@ -351,7 +352,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
     return acc_to_uid
 
 
-def _fetch_biosample_metadata(samn_ids: list) -> pd.DataFrame:
+def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
     """
     Fetch raw BioSample attribute metadata via a two-step process:
 
@@ -392,7 +393,7 @@ def _fetch_biosample_metadata(samn_ids: list) -> pd.DataFrame:
 
     for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
         uid_batch = uid_list[start:start + _BATCH_SIZE]
-        batch_records = _fetch_batch_with_retry(uid_batch)
+        batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
 
         if batch_records is None:
             print(
@@ -423,7 +424,7 @@ def _fetch_biosample_metadata(samn_ids: list) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def _fetch_batch_with_retry(uid_batch: list):
+def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
     """
     Fetch a single batch of integer UIDs via Entrez efetch.
     Returns a list of record dicts on success, or None after all retries fail.
@@ -438,7 +439,7 @@ def _fetch_batch_with_retry(uid_batch: list):
             )
             raw = handle.read()
             handle.close()
-            return _parse_biosample_xml(raw)
+            return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
         except Exception as exc:
             wait = _RETRY_BASE_S ** attempt
             print(f"[WARNING] Batch fetch attempt {attempt}/{_MAX_RETRIES} failed: {exc}. "
