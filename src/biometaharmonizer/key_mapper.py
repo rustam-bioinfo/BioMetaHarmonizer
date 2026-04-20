@@ -1,62 +1,37 @@
 """
-Module 2: Key Harmonization.
+Module 2: Key Harmonization (fixed-schema approach).
 
-Resolves raw DataFrame column names to NCBI standard keys using a two-layer approach:
+Resolves raw DataFrame column names to a fixed set of NCBI standard keys
+defined in schemas/unified.json.  Resolution uses two exact-match layers:
 
-  Layer 1 (authoritative): exact/synonym lookup from the NCBI BioSample attribute
-      harmonization table (schemas/ncbi_attributes.xml), built by
-      scripts/build_ncbi_attribute_cache.py.
+  Layer 1 (authoritative): the NCBI BioSample attribute harmonization table
+      (schemas/ncbi_attributes.xml), if present.  Every known synonym maps to
+      its canonical HarmonizedName.
 
-  Layer 2 (semantic fallback): cosine similarity between a sentence-transformers
-      embedding of the column name and precomputed embeddings of all NCBI
-      harmonized names (schemas/ncbi_embeddings.npy).
+  Layer 2 (schema synonyms): the synonym lists in unified.json.
 
-      The model used for Layer 2 is configurable.  The default is the model
-      that was used when building the cache (stored in ncbi_cache_meta.json).
-      You can override it at KeyMapper construction time:
+Both layers are exact (case-insensitive) lookups -- no embedding models, no
+semantic similarity.  This eliminates the sentence-transformers dependency and
+the one-time build_ncbi_attribute_cache.py step.
 
-          mapper = KeyMapper(model="BAAI/bge-small-en-v1.5")
-
-      IMPORTANT: if you override the model, the precomputed embeddings in
-      ncbi_embeddings.npy will no longer match because they were produced by
-      a different model.  Rebuild the cache first:
-
-          python scripts/build_ncbi_attribute_cache.py --model BAAI/bge-small-en-v1.5
-
-      Supported models (any sentence-transformers model works; these are tested):
-          all-MiniLM-L6-v2         (default, 384-dim, fast, small)
-          all-MiniLM-L12-v2        (384-dim, slightly better quality)
-          all-mpnet-base-v2        (768-dim, higher quality, slower)
-          BAAI/bge-small-en-v1.5   (384-dim, strong retrieval)
-          BAAI/bge-base-en-v1.5    (768-dim, strong retrieval)
-          intfloat/e5-small-v2     (384-dim, E5 family)
-          intfloat/e5-base-v2      (768-dim, E5 family)
-
-      Threshold: SEMANTIC_THRESHOLD = 0.75. Model is loaded lazily on first use.
-
-The NCBI attribute cache must be built before using KeyMapper:
-    python scripts/build_ncbi_attribute_cache.py [--model MODEL_NAME]
-
-Mandatory field validation is per-package: each record's ncbi_package value is
-looked up in mandatory_fields.json and fill rates are reported per package rather
-than as a single global check. Packages with fewer than MIN_WARN_GROUP_SIZE records
-are silently skipped to avoid noise from singleton or near-singleton submissions.
+When the NCBI XML cache is absent (e.g. fresh install before the optional
+build step), KeyMapper falls back to unified.json synonyms only.  This is
+sufficient for the vast majority of real-world column names.
 
 When multiple raw columns map to the same standard key, they are coalesced
 (first non-null value wins).
+
+Mandatory field validation is per-package: each record's ncbi_package value is
+looked up in mandatory_fields.json and fill rates are reported per package.
 """
 
-import contextlib
 import importlib.resources
 import json
 import logging
-import os
 import re
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 
@@ -69,43 +44,11 @@ _PROTECTED_COLUMNS = frozenset([
     "last_update", "publication_date", "access", "status",
     "status_date", "title", "description_comment", "ncbi_package",
     "taxonomy_id", "taxonomy_name", "organism_name",
+    "_extra_attributes",
 ])
 
 _PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
 _EMAIL_RE       = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
-
-
-@contextlib.contextmanager
-def _silence_stdio():
-    """
-    Context manager that redirects both Python-level sys.stdout/sys.stderr
-    and the underlying OS-level file descriptors 1 and 2 to /dev/null.
-
-    This suppresses all print() calls and low-level C-library writes
-    (e.g. tqdm bars written directly to fd 2) that originate inside
-    third-party library constructors such as SentenceTransformer().
-    """
-    devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    old_stdout_fd = os.dup(1)
-    old_stderr_fd = os.dup(2)
-    old_sys_stdout = sys.stdout
-    old_sys_stderr = sys.stderr
-    try:
-        os.dup2(devnull_fd, 1)
-        os.dup2(devnull_fd, 2)
-        sys.stdout = open(os.devnull, "w")
-        sys.stderr = open(os.devnull, "w")
-        yield
-    finally:
-        sys.stdout.close()
-        sys.stderr.close()
-        sys.stdout = old_sys_stdout
-        sys.stderr = old_sys_stderr
-        os.dup2(old_stdout_fd, 1)
-        os.dup2(old_stderr_fd, 2)
-        os.close(old_stdout_fd)
-        os.close(old_stderr_fd)
-        os.close(devnull_fd)
 
 
 def _schemas_dir() -> Path:
@@ -116,86 +59,89 @@ def _schemas_dir() -> Path:
         return Path(__file__).parent / "schemas"
 
 
-_SCHEMAS_DIR  = _schemas_dir()
-_XML_CACHE    = _SCHEMAS_DIR / "ncbi_attributes.xml"
-_EMB_FILE     = _SCHEMAS_DIR / "ncbi_embeddings.npy"
-_NAMES_FILE   = _SCHEMAS_DIR / "ncbi_harmonized_names.json"
-_META_FILE    = _SCHEMAS_DIR / "ncbi_cache_meta.json"
-
+_SCHEMAS_DIR       = _schemas_dir()
+_XML_CACHE         = _SCHEMAS_DIR / "ncbi_attributes.xml"
+_UNIFIED_SCHEMA    = _SCHEMAS_DIR / "unified.json"
 _DEFAULT_MANDATORY = _SCHEMAS_DIR / "mandatory_fields.json"
-
-_DEFAULT_MODEL = "all-MiniLM-L6-v2"
-
-
-def _cached_model_name() -> str:
-    if _META_FILE.exists():
-        try:
-            with open(_META_FILE, "r", encoding="utf-8") as fh:
-                meta = json.load(fh)
-            model = meta.get("model", _DEFAULT_MODEL)
-            if model:
-                return model
-        except (json.JSONDecodeError, OSError):
-            pass
-    return _DEFAULT_MODEL
 
 
 MIN_WARN_GROUP_SIZE = 10
 
 
+def _build_synonym_lookup(xml_path: Path, schema_path: Path) -> dict:
+    """
+    Build a combined {lowercased_synonym: harmonized_name} lookup from:
+      1. The NCBI BioSample attribute XML (if present).
+      2. The unified.json synonym lists.
+
+    unified.json synonyms are loaded first; NCBI XML synonyms are merged on
+    top so that the official NCBI mapping always wins when both define the
+    same synonym.
+    """
+    lookup: dict[str, str] = {}
+
+    # --- unified.json synonyms ---
+    target_keys = set()
+    if schema_path.exists():
+        with open(schema_path, "r", encoding="utf-8") as fh:
+            schema = json.load(fh)
+        for field in schema.get("fields", []):
+            sk = field["standard_key"]
+            target_keys.add(sk)
+            lookup[sk.lower()] = sk
+            for syn in field.get("synonyms", []):
+                syn_lower = syn.lower().strip()
+                if syn_lower:
+                    lookup[syn_lower] = sk
+
+    # --- NCBI XML synonyms (optional, layered on top) ---
+    if xml_path.exists():
+        try:
+            tree = ET.parse(str(xml_path))
+            root = tree.getroot()
+            for attr in root.iter("Attribute"):
+                hn_el = attr.find("HarmonizedName")
+                if hn_el is None or not hn_el.text:
+                    continue
+                hn = hn_el.text.strip()
+                lookup[hn.lower()] = hn
+                for syn_el in attr.findall("Synonym"):
+                    if syn_el.text and syn_el.text.strip():
+                        lookup[syn_el.text.strip().lower()] = hn
+        except ET.ParseError:
+            logger.warning("Could not parse NCBI attribute XML; using unified.json only.")
+
+    return lookup
+
+
 class KeyMapper:
     """
-    Module 2: Key Harmonization.
+    Module 2: Key Harmonization (fixed-schema).
 
-    Loads the NCBI attribute XML cache and precomputed embeddings, then maps
-    raw DataFrame column names to standard NCBI keys using exact synonym
-    matching (Layer 1) with a sentence-transformers semantic fallback (Layer 2).
-
-    Layer 2 encodes all unresolved column names in a single model.encode()
-    call (one batch) rather than one call per column, so there is at most
-    one progress bar regardless of how many columns need semantic resolution.
+    Maps raw DataFrame column names to NCBI standard keys using exact synonym
+    lookup from the NCBI BioSample attribute XML and unified.json.
 
     Parameters
     ----------
     mandatory_path : str or Path, optional
         Override path to mandatory_fields.json.
-    model : str, optional
-        sentence-transformers model name for Layer 2. Defaults to the model
-        recorded in ncbi_cache_meta.json.
-    threshold : float, optional
-        Cosine similarity threshold for Layer 2 acceptance (default 0.75).
     """
 
-    SEMANTIC_THRESHOLD = 0.75
-
-    def __init__(self, mandatory_path=None, model: str = None, threshold: float = None):
+    def __init__(self, mandatory_path=None):
         import biometaharmonizer.key_mapper as _this_module
 
-        xml_cache  = _this_module._XML_CACHE
-        emb_file   = _this_module._EMB_FILE
-        names_file = _this_module._NAMES_FILE
+        xml_cache   = _this_module._XML_CACHE
+        schema_path = _this_module._UNIFIED_SCHEMA
 
-        if not xml_cache.exists():
-            raise RuntimeError(
-                "NCBI attribute cache not found. "
-                "Run scripts/build_ncbi_attribute_cache.py first."
-            )
+        self._exact = _build_synonym_lookup(xml_cache, schema_path)
 
-        self._exact = self._parse_xml_cache(xml_cache)
-
-        with open(names_file, "r", encoding="utf-8") as fh:
-            self._emb_names = json.load(fh)
-
-        raw_emb = np.load(str(emb_file)).astype(np.float32)
-        norms = np.linalg.norm(raw_emb, axis=1, keepdims=True)
-        self._embeddings = raw_emb / np.where(norms == 0, 1, norms)
-        self._embeddings = self._embeddings.astype(np.float32)
-
-        self._model_name: str = model if model is not None else _cached_model_name()
-        self._model = None  # loaded lazily on first semantic lookup
-
-        if threshold is not None:
-            self.SEMANTIC_THRESHOLD = float(threshold)
+        # Load target keys from unified.json for reference
+        self._target_keys = set()
+        if schema_path.exists():
+            with open(schema_path, "r", encoding="utf-8") as fh:
+                schema = json.load(fh)
+            for field in schema.get("fields", []):
+                self._target_keys.add(field["standard_key"])
 
         mandatory_path = Path(mandatory_path) if mandatory_path else _DEFAULT_MANDATORY
         if mandatory_path.exists():
@@ -204,92 +150,6 @@ class KeyMapper:
             self.mandatory = {k: v for k, v in raw.items() if not k.startswith("_")}
         else:
             self.mandatory = {"default": ["collection_date", "geo_loc_name", "isolate"]}
-
-    @staticmethod
-    def _parse_xml_cache(xml_path: Path) -> dict:
-        exact: dict[str, str] = {}
-        tree = ET.parse(str(xml_path))
-        root = tree.getroot()
-        for attr in root.iter("Attribute"):
-            hn_el = attr.find("HarmonizedName")
-            if hn_el is None or not hn_el.text:
-                continue
-            hn = hn_el.text.strip()
-            exact[hn.lower()] = hn
-            for syn_el in attr.findall("Synonym"):
-                if syn_el.text and syn_el.text.strip():
-                    exact[syn_el.text.strip().lower()] = hn
-        return exact
-
-    def _load_model(self):
-        """
-        Load the sentence-transformers model lazily on first use.
-
-        All stdout/stderr output produced during SentenceTransformer.__init__
-        is suppressed via _silence_stdio(), which redirects both Python-level
-        streams and the underlying OS file descriptors to /dev/null. This
-        silences print()-based warnings from huggingface_hub, tqdm weight-
-        loading bars from mlx/jax, and the BertModel LOAD REPORT block from
-        sentence-transformers >= 3.x -- for any model, not just the default.
-
-        Logger levels for noisy third-party loggers are also set to WARNING
-        so that HTTP HEAD request lines logged at INFO do not reappear on
-        subsequent encode() calls.
-        """
-        for noisy in (
-            "httpx",
-            "huggingface_hub",
-            "huggingface_hub.utils._http",
-            "sentence_transformers",
-            "sentence_transformers.base.model",
-            "datasets",
-        ):
-            logging.getLogger(noisy).setLevel(logging.WARNING)
-
-        from sentence_transformers import SentenceTransformer
-        logger.info("Loading sentence-transformers model: %s", self._model_name)
-        with _silence_stdio():
-            self._model = SentenceTransformer(self._model_name)
-
-    def _resolve_columns_batch(self, col_lowers: list) -> dict:
-        """
-        Resolve a list of lowercased column names to NCBI standard keys.
-
-        Layer 1 (exact/synonym lookup) is applied first for every name.
-        All names not resolved by Layer 1 are encoded together in a single
-        model.encode() call, then matched against precomputed embeddings
-        via a single matrix multiply.
-        """
-        resolved = {}
-        unresolved = []
-
-        for col in col_lowers:
-            if col in self._exact:
-                resolved[col] = self._exact[col]
-            else:
-                unresolved.append(col)
-
-        if not unresolved:
-            return resolved
-
-        if self._model is None:
-            self._load_model()
-
-        vecs = self._model.encode(
-            unresolved,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        ).astype(np.float32)
-
-        sims = vecs @ self._embeddings.T
-        best_indices = np.argmax(sims, axis=1)
-        best_scores  = sims[np.arange(len(unresolved)), best_indices]
-
-        for col, idx, score in zip(unresolved, best_indices, best_scores):
-            if score >= self.SEMANTIC_THRESHOLD:
-                resolved[col] = self._emb_names[int(idx)]
-
-        return resolved
 
     def map_columns(self, df, drop_sparse=5, drop_junk=True):
         """
@@ -308,22 +168,15 @@ class KeyMapper:
         drop_junk : bool, default True
             Drop columns whose names look like person names or email artifacts.
         """
-        to_resolve = [
-            (col, col.lower().strip())
-            for col in df.columns
-            if col.lower().strip() not in _PROTECTED_COLUMNS
-        ]
-
-        if to_resolve:
-            col_lowers = [col_lower for _, col_lower in to_resolve]
-            batch_result = self._resolve_columns_batch(col_lowers)
-            rename_map = {
-                col: batch_result[col_lower]
-                for col, col_lower in to_resolve
-                if col_lower in batch_result
-            }
-        else:
-            rename_map = {}
+        rename_map = {}
+        for col in df.columns:
+            col_lower = col.lower().strip()
+            if col_lower in _PROTECTED_COLUMNS:
+                continue
+            if col_lower in self._exact:
+                target = self._exact[col_lower]
+                if target != col:
+                    rename_map[col] = target
 
         df = df.rename(columns=rename_map)
         df = self._coalesce_duplicates(df)
