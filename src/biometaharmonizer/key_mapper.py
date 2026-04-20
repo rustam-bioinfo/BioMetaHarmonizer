@@ -4,114 +4,64 @@ Module 2: Key Harmonization (fixed-schema approach).
 Resolves raw DataFrame column names to a fixed set of NCBI standard keys
 defined in schemas/unified.json.  Resolution uses two exact-match layers:
 
-  Layer 1 (authoritative): the NCBI BioSample attribute harmonization table
+  Layer 1 (schema synonyms): the synonym lists in unified.json.
+  Layer 2 (authoritative):   the NCBI BioSample attribute harmonization table
       (schemas/ncbi_attributes.xml), if present.  Every known synonym maps to
       its canonical HarmonizedName.
 
-  Layer 2 (schema synonyms): the synonym lists in unified.json.
+Both layers are sourced from the shared build_synonym_lookup() in synonyms.py,
+so ingestion and key harmonization always use an identical, complete dictionary.
 
-Both layers are exact (case-insensitive) lookups -- no embedding models, no
-semantic similarity.  This eliminates the sentence-transformers dependency and
-the one-time build_ncbi_attribute_cache.py step.
-
-When the NCBI XML cache is absent (e.g. fresh install before the optional
-build step), KeyMapper falls back to unified.json synonyms only.  This is
-sufficient for the vast majority of real-world column names.
+When the NCBI XML cache is absent (e.g. fresh install), KeyMapper falls back
+to unified.json synonyms only.
 
 When multiple raw columns map to the same standard key, they are coalesced
 (first non-null value wins).
 
 Mandatory field validation is per-package: each record's ncbi_package value is
 looked up in mandatory_fields.json and fill rates are reported per package.
+
+Protected structural columns (biosample_accession, taxonomy_id, etc.) are
+never renamed, dropped, or coalesced regardless of threshold settings.
+The set also includes columns added by downstream pipeline steps so that a
+custom pipeline calling map_columns() on an already-enriched DataFrame is safe.
 """
 
-import importlib.resources
 import json
 import logging
 import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pandas as pd
+
+from biometaharmonizer.synonyms import build_synonym_lookup, _schemas_dir
 
 
 logger = logging.getLogger(__name__)
 
 
 _PROTECTED_COLUMNS = frozenset([
+    # Structural BioSample fields
     "biosample_accession", "biosample_id", "sra_accession",
     "bioproject_accession", "sample_name_id", "submission_date",
     "last_update", "publication_date", "access", "status",
     "status_date", "title", "description_comment", "ncbi_package",
     "taxonomy_id", "taxonomy_name", "organism_name",
     "_extra_attributes",
+    # Downstream pipeline output columns
+    "collection_date_range",
+    "geo_country", "geo_region", "geo_locality",
+    "geo_iso3166", "geo_sea_ocean", "geo_loc_raw",
+    "one_health_category",
 ])
 
 _PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
 _EMAIL_RE       = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
-
-def _schemas_dir() -> Path:
-    try:
-        ref = importlib.resources.files("biometaharmonizer") / "schemas"
-        return Path(str(ref))
-    except (TypeError, ModuleNotFoundError):
-        return Path(__file__).parent / "schemas"
-
-
 _SCHEMAS_DIR       = _schemas_dir()
-_XML_CACHE         = _SCHEMAS_DIR / "ncbi_attributes.xml"
-_UNIFIED_SCHEMA    = _SCHEMAS_DIR / "unified.json"
 _DEFAULT_MANDATORY = _SCHEMAS_DIR / "mandatory_fields.json"
 
-
 MIN_WARN_GROUP_SIZE = 10
-
-
-def _build_synonym_lookup(xml_path: Path, schema_path: Path) -> dict:
-    """
-    Build a combined {lowercased_synonym: harmonized_name} lookup from:
-      1. The NCBI BioSample attribute XML (if present).
-      2. The unified.json synonym lists.
-
-    unified.json synonyms are loaded first; NCBI XML synonyms are merged on
-    top so that the official NCBI mapping always wins when both define the
-    same synonym.
-    """
-    lookup: dict[str, str] = {}
-
-    # --- unified.json synonyms ---
-    target_keys = set()
-    if schema_path.exists():
-        with open(schema_path, "r", encoding="utf-8") as fh:
-            schema = json.load(fh)
-        for field in schema.get("fields", []):
-            sk = field["standard_key"]
-            target_keys.add(sk)
-            lookup[sk.lower()] = sk
-            for syn in field.get("synonyms", []):
-                syn_lower = syn.lower().strip()
-                if syn_lower:
-                    lookup[syn_lower] = sk
-
-    # --- NCBI XML synonyms (optional, layered on top) ---
-    if xml_path.exists():
-        try:
-            tree = ET.parse(str(xml_path))
-            root = tree.getroot()
-            for attr in root.iter("Attribute"):
-                hn_el = attr.find("HarmonizedName")
-                if hn_el is None or not hn_el.text:
-                    continue
-                hn = hn_el.text.strip()
-                lookup[hn.lower()] = hn
-                for syn_el in attr.findall("Synonym"):
-                    if syn_el.text and syn_el.text.strip():
-                        lookup[syn_el.text.strip().lower()] = hn
-        except ET.ParseError:
-            logger.warning("Could not parse NCBI attribute XML; using unified.json only.")
-
-    return lookup
 
 
 class KeyMapper:
@@ -119,7 +69,7 @@ class KeyMapper:
     Module 2: Key Harmonization (fixed-schema).
 
     Maps raw DataFrame column names to NCBI standard keys using exact synonym
-    lookup from the NCBI BioSample attribute XML and unified.json.
+    lookup from the shared two-layer synonym table (synonyms.py).
 
     Parameters
     ----------
@@ -128,14 +78,9 @@ class KeyMapper:
     """
 
     def __init__(self, mandatory_path=None):
-        import biometaharmonizer.key_mapper as _this_module
+        self._exact = build_synonym_lookup()
 
-        xml_cache   = _this_module._XML_CACHE
-        schema_path = _this_module._UNIFIED_SCHEMA
-
-        self._exact = _build_synonym_lookup(xml_cache, schema_path)
-
-        # Load target keys from unified.json for reference
+        schema_path = _SCHEMAS_DIR / "unified.json"
         self._target_keys = set()
         if schema_path.exists():
             with open(schema_path, "r", encoding="utf-8") as fh:
@@ -163,11 +108,25 @@ class KeyMapper:
         drop_sparse : int or float, default 5
             Drop columns whose non-null count falls below this threshold.
             An integer value is treated as an absolute row count.
-            A float between 0 and 1 is treated as a fractional fill rate.
-            Set to 0 to disable. Protected structural columns are never dropped.
+            A float strictly between 0 and 1 is treated as a fractional fill
+            rate and drops columns below that fraction of non-null values.
+            Set to 0 (or 0.0) to disable. Protected columns are never dropped.
+            Passing True is treated as integer 1 and a TypeError is raised to
+            prevent silent data destruction.
         drop_junk : bool, default True
             Drop columns whose names look like person names or email artifacts.
         """
+        if not isinstance(drop_sparse, (int, float)):
+            raise TypeError(
+                f"drop_sparse must be int or float, got {type(drop_sparse).__name__}. "
+                "Pass 0 to disable."
+            )
+        if drop_sparse is True or (isinstance(drop_sparse, int) and drop_sparse is True):
+            raise TypeError(
+                "drop_sparse=True is not valid. Pass an int row count or float fill "
+                "rate. Pass 0 to disable."
+            )
+
         rename_map = {}
         for col in df.columns:
             col_lower = col.lower().strip()
@@ -235,10 +194,15 @@ class KeyMapper:
         for col in df.columns.unique():
             if col in duped_keys:
                 block = df[col]
-                coalesced = block.iloc[:, 0].copy()
-                for i in range(1, block.shape[1]):
-                    coalesced = coalesced.combine_first(block.iloc[:, i])
-                output_cols[col] = coalesced
+                # df[col] returns a Series when there is exactly one column
+                # with that name (edge case when keep=False over-marks).
+                if isinstance(block, pd.Series):
+                    output_cols[col] = block
+                else:
+                    coalesced = block.iloc[:, 0].copy()
+                    for i in range(1, block.shape[1]):
+                        coalesced = coalesced.combine_first(block.iloc[:, i])
+                    output_cols[col] = coalesced
             else:
                 output_cols[col] = df[col]
 
@@ -284,13 +248,16 @@ class KeyMapper:
 
                 if status == "FAIL":
                     logger.warning(
-                        "[%s] mandatory field '%s' fill rate: %d/%d (%.0f%%).",
+                        "[%s] mandatory field '%s' fill rate: %d/%d (%.1f%%).",
                         pkg, field, filled, n, pct,
                     )
                 elif status == "WARN":
                     logger.warning(
-                        "[%s] mandatory field '%s' fill rate: %d/%d (%.0f%%) -- below 95%%.",
+                        "[%s] mandatory field '%s' fill rate: %d/%d (%.1f%%) -- below 95%%.",
                         pkg, field, filled, n, pct,
                     )
 
-        return pd.DataFrame(rows, columns=["package", "field", "total_records", "filled_records", "fill_pct", "status"])
+        return pd.DataFrame(
+            rows,
+            columns=["package", "field", "total_records", "filled_records", "fill_pct", "status"],
+        )

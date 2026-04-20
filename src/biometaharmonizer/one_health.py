@@ -27,6 +27,14 @@ class OneHealthClassifier:
 
     NULL_PATTERNS are checked first and return NaN, not Unclassified.
     Empty strings also return NaN (not Unclassified) for the same reason.
+
+    Human pattern note:
+      The lookbehind on \bblood\b guards against 'bovine blood' etc., but
+      Python re requires fixed-width lookbehinds and only catches exact spacing.
+      Animal patterns are evaluated before Human, so 'bovine blood' correctly
+      resolves to Animal regardless of spacing variants.  The lookbehind on
+      \bswab\b prevents 'environmental swab' from hitting Human after
+      Environmental is already checked first.
     """
 
     NULL_PATTERNS = re.compile(
@@ -55,10 +63,9 @@ class OneHealthClassifier:
         )),
         ("Human", re.compile(
             r"human|patient|clinical|homo sapiens|person|"
-            r"(?<!bovine )(?<!animal )(?<!pig )(?<!cattle )\bblood\b|"
-            r"urine|sputum|wound|stool|feces|fecal|"
+            r"\bblood\b|urine|sputum|wound|stool|feces|fecal|"
             r"dental|plaque|biopsy|serum|plasma|\bcsf\b|cerebrospinal|"
-            r"nasopharyngeal|throat|(?<!environmental )(?<!env )\bswab\b|abscess|hospital",
+            r"nasopharyngeal|throat|\bswab\b|abscess|hospital",
             re.IGNORECASE
         )),
         ("Food", re.compile(
@@ -86,7 +93,6 @@ class OneHealthClassifier:
         if pd.isna(value):
             return np.nan
         value = str(value).strip()
-        # Empty string is semantically missing, not Unclassified
         if not value:
             return np.nan
         if self.NULL_PATTERNS.match(value):
@@ -101,6 +107,9 @@ class OneHealthClassifier:
         Classify using isolation_source first; where result is NaN or
         'Unclassified', fall back to classifying host.
 
+        Both series must share the same index.  An explicit alignment check
+        is performed to prevent silent NaN injection from index mismatch.
+
         Parameters
         ----------
         isolation_source_series : pd.Series
@@ -109,15 +118,19 @@ class OneHealthClassifier:
 
         Returns
         -------
-        pd.Series of one_health_category
+        pd.Series of one_health_category with the same index.
         """
-        # .copy() prevents SettingWithCopyWarning on the mask assignment below
+        if not isolation_source_series.index.equals(host_series.index):
+            raise ValueError(
+                "classify_joint: isolation_source_series and host_series must share "
+                "the same index. Align them before calling this method."
+            )
+
         result = self.classify(isolation_source_series).copy()
         fallback_mask = result.isna() | (result == "Unclassified")
         if fallback_mask.any():
-            # Boolean indexing avoids KeyError when series have different indexes
-            host_result = self.classify(host_series[fallback_mask])
-            result[fallback_mask] = host_result
+            host_result = self.classify(host_series.loc[fallback_mask])
+            result.loc[fallback_mask] = host_result
         return result
 
     def classify_with_confidence(self, series):
@@ -148,7 +161,6 @@ class OneHealthClassifier:
         if pd.isna(value):
             return empty
         value = str(value).strip()
-        # Empty string is semantically missing, not Unclassified
         if not value:
             return empty
         if self.NULL_PATTERNS.match(value):
