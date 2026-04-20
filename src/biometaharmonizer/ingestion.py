@@ -17,6 +17,7 @@ Working directory note (Colab):
   if you want them in the working directory.
 """
 
+import json
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -446,9 +447,46 @@ def _fetch_batch_with_retry(uid_batch: list):
     return None
 
 
-def _parse_biosample_xml(xml_bytes: bytes) -> list:
+# ─── Attribute resolution at parse time ────────────────────────────────────────
+
+def _load_synonym_lookup() -> dict:
+    """
+    Build a {lowercased_name: standard_key} lookup from unified.json.
+    Called once per ingest() run; the result is passed into _parse_biosample_xml
+    so that attribute names are resolved to fixed target columns during parsing.
+    """
+    lookup: dict[str, str] = {}
+    try:
+        import importlib.resources
+        ref = importlib.resources.files("biometaharmonizer") / "schemas" / "unified.json"
+        schema_path = Path(str(ref))
+    except (TypeError, ModuleNotFoundError):
+        schema_path = Path(__file__).parent / "schemas" / "unified.json"
+
+    if not schema_path.exists():
+        return lookup
+
+    with open(schema_path, "r", encoding="utf-8") as fh:
+        schema = json.load(fh)
+    for field in schema.get("fields", []):
+        sk = field["standard_key"]
+        lookup[sk.lower()] = sk
+        for syn in field.get("synonyms", []):
+            syn_lower = syn.lower().strip()
+            if syn_lower:
+                lookup[syn_lower] = sk
+    return lookup
+
+
+def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
     """
     Parse raw BioSample XML bytes into a list of flat attribute dicts.
+
+    When synonym_lookup is provided, each <Attribute> is resolved at parse
+    time: harmonized_name from the XML is used first; if absent, the
+    attribute_name is looked up in the synonym dict.  Attributes that cannot
+    be resolved to any target column are collected into a JSON string stored
+    in the '_extra_attributes' field.
     """
     records = []
     root    = ET.fromstring(xml_bytes)
@@ -518,10 +556,41 @@ def _parse_biosample_xml(xml_bytes: bytes) -> list:
             record["status"]      = None
             record["status_date"] = None
 
+        # --- Attribute resolution ---
+        extras = {}
         for attr in sample.findall(".//Attribute"):
-            key = attr.get("harmonized_name") or attr.get("attribute_name", "unknown")
+            raw_key = attr.get("harmonized_name") or attr.get("attribute_name", "unknown")
             val = (attr.text or "").strip()
-            record[key] = val if val else None
+            val = val if val else None
+
+            if synonym_lookup is not None:
+                resolved = raw_key if raw_key in record else None
+                # Try harmonized_name from XML first
+                hn = attr.get("harmonized_name", "").strip()
+                if hn and hn.lower() in synonym_lookup:
+                    resolved = synonym_lookup[hn.lower()]
+                elif raw_key.lower() in synonym_lookup:
+                    resolved = synonym_lookup[raw_key.lower()]
+                else:
+                    # Check attribute_name separately
+                    an = attr.get("attribute_name", "").strip()
+                    if an and an.lower() in synonym_lookup:
+                        resolved = synonym_lookup[an.lower()]
+
+                if resolved is not None:
+                    # Only set if not already populated (first value wins)
+                    if resolved not in record or record[resolved] is None:
+                        record[resolved] = val
+                else:
+                    # Unmapped attribute -> extras
+                    if val is not None:
+                        extras[raw_key] = val
+            else:
+                # No synonym lookup: legacy behavior
+                record[raw_key] = val
+
+        if synonym_lookup is not None:
+            record["_extra_attributes"] = json.dumps(extras) if extras else None
 
         records.append(record)
 
