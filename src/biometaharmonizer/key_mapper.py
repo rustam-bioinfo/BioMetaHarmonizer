@@ -197,7 +197,10 @@ class KeyMapper:
             and (_PERSON_NAME_RE.match(col) or _EMAIL_RE.match(col))
         ]
         if junk:
-            print(f"[INFO] Dropping {len(junk)} junk columns (person names / email artifacts): {junk}")
+            logger.info(
+                "Dropping %d junk columns (person names / email artifacts): %s",
+                len(junk), junk,
+            )
             df = df.drop(columns=junk)
         return df
 
@@ -215,7 +218,10 @@ class KeyMapper:
             and non_null[col] < min_required
         ]
         if sparse:
-            print(f"[INFO] Dropping {len(sparse)} sparse columns (< {min_required} non-null values).")
+            logger.info(
+                "Dropping %d sparse columns (< %d non-null values).",
+                len(sparse), min_required,
+            )
             df = df.drop(columns=sparse)
         return df
 
@@ -236,7 +242,7 @@ class KeyMapper:
             else:
                 output_cols[col] = df[col]
 
-        print(f"[INFO] Coalesced duplicate columns: {sorted(duped_keys)}")
+        logger.info("Coalesced duplicate columns: %s", sorted(duped_keys))
         return pd.DataFrame(output_cols, index=df.index)
 
     def _warn_missing_mandatory(self, df):
