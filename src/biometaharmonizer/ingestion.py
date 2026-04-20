@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # ─── Module-level configuration ──────────────────────────────────────────────
 
-ENTREZ_EMAIL   = "your@email.com"   # Override via set_email()
+_DEFAULT_EMAIL = "your@email.com"   # sentinel; must be overridden via set_email()
+ENTREZ_EMAIL   = _DEFAULT_EMAIL
 ENTREZ_API_KEY = None               # Override via set_api_key()
 CACHE_DIR      = Path.home() / ".biometaharmonizer" / "cache"
 
@@ -43,7 +44,8 @@ ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORT
 _BATCH_SIZE     = 200   # UIDs per efetch call; kept moderate for reliability
 _ESEARCH_BATCH  = 200   # accessions per esearch OR query
 _MAX_RETRIES    = 3
-_RETRY_BASE_S   = 2     # seconds; exponential backoff: 2, 4, 8
+_RETRY_BASE_S   = 2     # seconds; exponential backoff base: min(base**attempt, 30)
+_RETRY_MAX_S    = 30    # ceiling for exponential backoff
 _CACHE_TTL_DAYS = 7     # refresh cache if older than this many days
 
 
@@ -103,11 +105,23 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
       assembly summary flat files (RefSeq + GenBank) which contain a
       biosample -> bioproject mapping. Records with no assembly submission will
       have bioproject_accession = None after resolution.
+
+    Raises
+    ------
+    ValueError
+        If set_email() has not been called with a real address before ingesting.
     """
     if api_key is not None:
         set_api_key(api_key)
     if cache_dir is not None:
         set_cache_dir(cache_dir)
+
+    if ENTREZ_EMAIL == _DEFAULT_EMAIL:
+        raise ValueError(
+            "A valid e-mail address is required by NCBI for all Entrez API calls. "
+            "Call set_email('your@real.email') before calling ingest(), "
+            "or pass email via the CLI --email flag."
+        )
 
     Entrez.email   = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
@@ -117,12 +131,12 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     gcx, samn, unrecognized = _classify_ids(ids)
 
     if unrecognized:
-        print(f"[WARNING] {len(unrecognized)} unrecognized IDs skipped: {unrecognized[:5]}")
+        logger.warning("%d unrecognized IDs skipped: %s", len(unrecognized), unrecognized[:5])
 
     _ensure_assembly_summaries()
 
     if gcx:
-        print(f"[INFO] Resolving {len(gcx)} assembly accessions to BioSample IDs...")
+        logger.info("Resolving %d assembly accessions to BioSample IDs...", len(gcx))
         resolved = _resolve_assembly_to_biosample(gcx)
         samn = list(set(samn + resolved))
 
@@ -130,19 +144,19 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
         raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
 
     synonym_lookup = _load_synonym_lookup()
-    print(f"[INFO] Fetching metadata for {len(samn)} BioSample accessions...")
+    logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
     df = _fetch_biosample_metadata(samn, synonym_lookup=synonym_lookup)
 
-    print("[INFO] Resolving BioProject accessions from assembly index...")
+    logger.info("Resolving BioProject accessions from assembly index...")
     bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
     if bioproject_map:
         df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map).fillna(
             df["bioproject_accession"]
         )
         filled = df["bioproject_accession"].notna().sum()
-        print(f"[INFO] BioProject accession resolved for {filled} / {len(df)} records.")
+        logger.info("BioProject accession resolved for %d / %d records.", filled, len(df))
     else:
-        print("[WARNING] No BioProject accessions found in assembly index for this dataset.")
+        logger.warning("No BioProject accessions found in assembly index for this dataset.")
 
     return df
 
@@ -170,7 +184,7 @@ def _deduplicate(ids: list) -> list:
             unique.append(i)
     n_dupes = len(ids) - len(unique)
     if n_dupes:
-        print(f"[INFO] Removed {n_dupes} duplicate input IDs.")
+        logger.info("Removed %d duplicate input IDs.", n_dupes)
     return unique
 
 
@@ -216,15 +230,20 @@ def _ensure_assembly_summaries() -> None:
                 logger.debug("Assembly index cache OK: %s (%.1f days old)", label, age_days)
 
         if not cache_path.exists():
-            print(f"[INFO] Fetching NCBI assembly index ({label}) -- this runs once and may take a moment...")
+            logger.info(
+                "Fetching NCBI assembly index (%s) -- this runs once and may take a moment...",
+                label,
+            )
             _download_file(url, cache_path)
-            print(f"[INFO] Assembly index ({label}) ready.")
+            logger.info("Assembly index (%s) ready.", label)
 
 
 def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
     """
     Resolve GCF_/GCA_ accessions to BioSample IDs using cached flat files.
     RefSeq is checked first; unresolved IDs fall through to GenBank.
+    Uses vectorized pandas operations instead of iterrows for performance on
+    large (~1M row) assembly summary files.
     """
     resolved = []
     gcx_set  = set(gcx_ids)
@@ -240,20 +259,25 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
             usecols=["# assembly_accession", "biosample"],
             low_memory=False,
         ).rename(columns={"# assembly_accession": "accession"})
-        hits = df[df["accession"].isin(gcx_set)]
-        for _, row in hits.iterrows():
-            if pd.notna(row["biosample"]):
-                resolved.append(row["biosample"])
-                gcx_set.discard(row["accession"])
+
+        hits = df[df["accession"].isin(gcx_set) & df["biosample"].notna()]
+        for acc, biosample in zip(hits["accession"], hits["biosample"]):
+            if acc in gcx_set:
+                resolved.append(biosample)
+                gcx_set.discard(acc)
 
     if gcx_set:
-        print(f"[WARNING] {len(gcx_set)} assembly accessions could not be resolved: {list(gcx_set)[:5]}")
+        logger.warning(
+            "%d assembly accessions could not be resolved: %s",
+            len(gcx_set), list(gcx_set)[:5],
+        )
     return resolved
 
 
 def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
     """
     Build a {biosample_accession: bioproject_accession} lookup from cached flat files.
+    Uses vectorized pandas operations for performance on large assembly summary files.
     """
     lookup = {}
     for label in ["refseq", "genbank"]:
@@ -267,11 +291,14 @@ def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
                 low_memory=False,
             )
             hits = df[df["biosample"].isin(biosample_ids) & df["bioproject"].notna()]
-            for _, row in hits.iterrows():
-                if row["biosample"] not in lookup:
-                    lookup[row["biosample"]] = row["bioproject"]
+            for biosample, bioproject in zip(hits["biosample"], hits["bioproject"]):
+                if biosample not in lookup:
+                    lookup[biosample] = bioproject
         except Exception as exc:
-            print(f"[WARNING] Could not read assembly index ({label}) for BioProject resolution: {exc}")
+            logger.warning(
+                "Could not read assembly index (%s) for BioProject resolution: %s",
+                label, exc,
+            )
     return lookup
 
 
@@ -309,13 +336,18 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 handle.close()
                 break
             except Exception as exc:
-                wait = _RETRY_BASE_S ** attempt
-                print(f"[WARNING] esearch attempt {attempt}/{_MAX_RETRIES} failed: {exc}. "
-                      f"Retrying in {wait}s...")
+                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                logger.warning(
+                    "esearch attempt %d/%d failed: %s. Retrying in %ds...",
+                    attempt, _MAX_RETRIES, exc, wait,
+                )
                 time.sleep(wait)
         else:
-            print(f"[WARNING] esearch failed for batch starting at index {start}. "
-                  f"These accessions will be skipped.")
+            logger.warning(
+                "esearch failed for batch starting at index %d. "
+                "These accessions will be skipped.",
+                start,
+            )
             continue
 
         uids = result.get("IdList", [])
@@ -332,17 +364,17 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                     sum_handle.close()
                     break
                 except Exception as exc:
-                    wait = _RETRY_BASE_S ** attempt
-                    print(f"[WARNING] esummary attempt {attempt}/{_MAX_RETRIES} failed: {exc}. "
-                          f"Retrying in {wait}s...")
+                    wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                    logger.warning(
+                        "esummary attempt %d/%d failed: %s. Retrying in %ds...",
+                        attempt, _MAX_RETRIES, exc, wait,
+                    )
                     time.sleep(wait)
             else:
                 continue
 
             for doc in summaries["DocumentSummarySet"]["DocumentSummary"]:
                 uid = doc.attributes.get("uid", "")
-                # The accession is stored in the SampleIds/Id block or
-                # can be extracted from the Accession field of the XML.
                 acc = doc.get("Accession", "")
                 if acc and uid:
                     acc_to_uid[acc] = uid
@@ -371,19 +403,21 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
     requested_set = set(samn_ids)
 
     # ─── Step 1: resolve accessions to UIDs ────────────────────────────────
-    print(f"[INFO] Resolving {len(samn_ids)} accessions to NCBI UIDs...")
+    logger.info("Resolving %d accessions to NCBI UIDs...", len(samn_ids))
     acc_to_uid = _resolve_accessions_to_uids(samn_ids)
 
     unresolved = [a for a in samn_ids if a not in acc_to_uid]
     if unresolved:
-        print(f"[WARNING] {len(unresolved)} accessions could not be resolved to UIDs "
-              f"and will be skipped: {unresolved[:5]}")
+        logger.warning(
+            "%d accessions could not be resolved to UIDs and will be skipped: %s",
+            len(unresolved), unresolved[:5],
+        )
 
     uid_list = list(acc_to_uid.values())
     if not uid_list:
         raise ValueError("No UIDs could be resolved from the provided BioSample accessions.")
 
-    print(f"[INFO] Fetching metadata for {len(uid_list)} resolved UIDs...")
+    logger.info("Fetching metadata for %d resolved UIDs...", len(uid_list))
 
     # ─── Step 2: efetch by UID in batches ────────────────────────────────
     records    = []
@@ -396,30 +430,30 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
         batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
 
         if batch_records is None:
-            print(
-                f"[ERROR] Batch {batch_i + 1}/{n_batches} failed after {_MAX_RETRIES} retries. "
-                f"{len(uid_batch)} records excluded."
+            logger.error(
+                "Batch %d/%d failed after %d retries. %d records excluded.",
+                batch_i + 1, n_batches, _MAX_RETRIES, len(uid_batch),
             )
             failed_ids.extend(uid_batch)
         else:
             # Validate: drop any record whose accession is not in the requested set
-            clean = []
             for rec in batch_records:
                 acc = rec.get("biosample_accession", "")
                 if acc in requested_set:
-                    clean.append(rec)
+                    records.append(rec)
                 else:
-                    print(f"[WARNING] Unexpected record returned by NCBI and discarded: "
-                          f"biosample_accession={acc!r} (not in requested input set)")
-            records.extend(clean)
+                    logger.warning(
+                        "Unexpected record returned by NCBI and discarded: "
+                        "biosample_accession=%r (not in requested input set)", acc,
+                    )
 
         fetched = min(start + _BATCH_SIZE, total)
-        print(f"[INFO] Fetched {fetched} / {total} ({batch_i + 1}/{n_batches} batches)")
+        logger.info("Fetched %d / %d (%d/%d batches)", fetched, total, batch_i + 1, n_batches)
         if batch_i < n_batches - 1:
             time.sleep(inter_batch_sleep)
 
     if failed_ids:
-        print(f"[WARNING] {len(failed_ids)} UIDs could not be fetched: {failed_ids[:10]}")
+        logger.warning("%d UIDs could not be fetched: %s", len(failed_ids), failed_ids[:10])
 
     return pd.DataFrame(records)
 
@@ -441,9 +475,11 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             handle.close()
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
         except Exception as exc:
-            wait = _RETRY_BASE_S ** attempt
-            print(f"[WARNING] Batch fetch attempt {attempt}/{_MAX_RETRIES} failed: {exc}. "
-                  f"Retrying in {wait}s...")
+            wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+            logger.warning(
+                "Batch fetch attempt %d/%d failed: %s. Retrying in %ds...",
+                attempt, _MAX_RETRIES, exc, wait,
+            )
             time.sleep(wait)
     return None
 
@@ -565,15 +601,14 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             val = val if val else None
 
             if synonym_lookup is not None:
-                resolved = raw_key if raw_key in record else None
-                # Try harmonized_name from XML first
+                resolved = None
+                # Try harmonized_name from XML first, then attribute_name
                 hn = attr.get("harmonized_name", "").strip()
                 if hn and hn.lower() in synonym_lookup:
                     resolved = synonym_lookup[hn.lower()]
                 elif raw_key.lower() in synonym_lookup:
                     resolved = synonym_lookup[raw_key.lower()]
                 else:
-                    # Check attribute_name separately
                     an = attr.get("attribute_name", "").strip()
                     if an and an.lower() in synonym_lookup:
                         resolved = synonym_lookup[an.lower()]
@@ -599,9 +634,23 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
 
 
 def _download_file(url: str, dest_path: Path) -> None:
-    """Stream-download a large file to disk."""
-    with requests.get(url, stream=True) as resp:
-        resp.raise_for_status()
-        with open(dest_path, "wb") as fh:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                fh.write(chunk)
+    """
+    Stream-download a large file to disk.
+    Writes to a temporary sibling file first; renames atomically on success.
+    On failure the partial temporary file is removed so stale cache files
+    cannot accumulate.
+    """
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+    try:
+        with requests.get(url, stream=True) as resp:
+            resp.raise_for_status()
+            with open(tmp_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    fh.write(chunk)
+        tmp_path.rename(dest_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
