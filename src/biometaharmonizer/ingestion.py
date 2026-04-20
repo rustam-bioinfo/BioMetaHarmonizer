@@ -156,9 +156,12 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
     # and assembly accessions can be resolved for any input type.
     _ensure_assembly_summaries()
 
+    n_gcx_input = len(gcx)
+    unresolved_gcx = []
+
     if gcx:
         logger.info("Resolving %d assembly accessions to BioSample IDs...", len(gcx))
-        resolved = _resolve_assembly_to_biosample(gcx)
+        resolved, unresolved_gcx = _resolve_assembly_to_biosample(gcx)
         samn = list(set(samn + resolved))
 
     if not samn:
@@ -194,6 +197,33 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
         )
     else:
         logger.warning("No assembly index hits found for this dataset.")
+
+    # Final ingestion summary
+    logger.info("=" * 60)
+    logger.info("INGEST SUMMARY")
+    logger.info("  Input IDs provided  : %d", len(ids))
+    if n_gcx_input:
+        logger.info("  Assembly accessions : %d", n_gcx_input)
+        logger.info(
+            "    Resolved to BioSample : %d", n_gcx_input - len(unresolved_gcx)
+        )
+        if unresolved_gcx:
+            logger.warning(
+                "    NOT resolved (absent from assembly index or suppressed): %d",
+                len(unresolved_gcx),
+            )
+            logger.warning("    Unresolved: %s", unresolved_gcx)
+    logger.info("  Records in output   : %d", len(df))
+    logger.info("  bioproject_accession filled : %d / %d",
+                df["bioproject_accession"].notna().sum(), len(df))
+    logger.info("  assembly_accession_refseq   filled : %d / %d",
+                df["assembly_accession_refseq"].notna().sum(), len(df))
+    logger.info("  assembly_accession_genbank  filled : %d / %d",
+                df["assembly_accession_genbank"].notna().sum(), len(df))
+    if unrecognized:
+        logger.warning("  Unrecognized input IDs skipped: %d -- %s",
+                       len(unrecognized), unrecognized[:10])
+    logger.info("=" * 60)
 
     return df.reindex(columns=BIOSAMPLE_SCHEMA)
 
@@ -265,7 +295,15 @@ def _ensure_assembly_summaries() -> None:
             logger.info("Assembly index (%s) ready.", label)
 
 
-def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
+def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
+    """
+    Resolve GCF_/GCA_ accessions to BioSample accessions via the assembly flat files.
+
+    Returns:
+        resolved   -- list of BioSample accessions successfully resolved
+        unresolved -- list of input GCF_/GCA_ accessions not found in either index
+                      (suppressed, very new, or never submitted to assembly DB)
+    """
     resolved = []
     gcx_set = set(gcx_ids)
 
@@ -287,12 +325,13 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
                 resolved.append(biosample)
                 gcx_set.discard(acc)
 
-    if gcx_set:
+    unresolved = list(gcx_set)
+    if unresolved:
         logger.warning(
-            "%d assembly accessions could not be resolved: %s",
-            len(gcx_set), list(gcx_set)[:5],
+            "%d assembly accessions not found in either index (suppressed or absent): %s",
+            len(unresolved), unresolved[:5],
         )
-    return resolved
+    return resolved, unresolved
 
 
 def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
@@ -339,11 +378,9 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
                 if bs not in lookup:
                     lookup[bs] = {"bioproject": None, "refseq": None, "genbank": None}
 
-                # bioproject: take the first non-null value found
                 if lookup[bs]["bioproject"] is None and bp:
                     lookup[bs]["bioproject"] = bp
 
-                # GCF_ = RefSeq, GCA_ = GenBank
                 if asm.startswith("GCF_"):
                     if lookup[bs]["refseq"] is None:
                         lookup[bs]["refseq"] = asm
