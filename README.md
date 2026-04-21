@@ -45,9 +45,6 @@ Optional flags:
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Assembly summary cache directory |
 | `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` (case-insensitive) |
 | `--summary FILE` | — | Write per-column fill-rate CSV |
-| `--skip-dates` | off | Skip ISO 8601 date parsing |
-| `--skip-geo` | off | Skip geospatial resolution |
-| `--skip-one-health` | off | Skip One Health classification |
 | `--verbose` | off | Enable DEBUG logging |
 
 ### Python API

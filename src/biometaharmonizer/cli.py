@@ -45,9 +45,6 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--cache-dir", metavar="DIR", default=None)
     run_p.add_argument("--format", "-f", choices=["csv", "tsv", "excel", "parquet"], default=None, metavar="FORMAT")
     run_p.add_argument("--summary", metavar="FILE", default=None)
-    run_p.add_argument("--skip-dates", action="store_true", default=False)
-    run_p.add_argument("--skip-geo", action="store_true", default=False)
-    run_p.add_argument("--skip-one-health", action="store_true", default=False)
     run_p.add_argument("--verbose", "-v", action="store_true", default=False)
 
     parser.add_argument("--version", action="version", version="%(prog)s " + _get_version())
@@ -152,7 +149,7 @@ def _run(args: argparse.Namespace) -> int:
 
     logger.info("         fixed schema retained: %d columns.", len(df.columns))
 
-    if not args.skip_dates and "collection_date" in df.columns:
+    if "collection_date" in df.columns:
         logger.info("Step 3/5  Date parsing")
         de = DateEngine()
         date_df = de.parse_with_range(df["collection_date"])
@@ -162,9 +159,9 @@ def _run(args: argparse.Namespace) -> int:
         parsed = df["collection_date"].notna().sum()
         logger.info("         %d / %d dates parsed.", parsed, len(df))
     else:
-        logger.info("Step 3/5  Date parsing skipped.")
+        logger.info("Step 3/5  Date parsing skipped (no collection_date column).")
 
-    if not args.skip_geo and "geo_loc_name" in df.columns:
+    if "geo_loc_name" in df.columns:
         logger.info("Step 4/5  Geospatial parsing")
         ge = GeoEngine()
         geo_df = ge.parse(df["geo_loc_name"])
@@ -173,23 +170,20 @@ def _run(args: argparse.Namespace) -> int:
         resolved = df["geo_country"].notna().sum() if "geo_country" in df.columns else 0
         logger.info("         %d / %d geo_loc_name values resolved to country.", resolved, len(df))
     else:
-        logger.info("Step 4/5  Geospatial parsing skipped.")
+        logger.info("Step 4/5  Geospatial parsing skipped (no geo_loc_name column).")
 
-    if not args.skip_one_health:
-        classifier = OneHealthClassifier()
-        if "isolation_source" in df.columns and "host" in df.columns:
-            logger.info("Step 5/5  One Health classification (joint mode)")
-            df["one_health_category"] = classifier.classify_joint(df["isolation_source"], df["host"])
-        elif "isolation_source" in df.columns:
-            logger.info("Step 5/5  One Health classification (isolation_source only)")
-            df["one_health_category"] = classifier.classify(df["isolation_source"])
-        else:
-            logger.info("Step 5/5  One Health skipped (no isolation_source column).")
-        if "one_health_category" in df.columns:
-            classified = df["one_health_category"].notna().sum()
-            logger.info("         %d / %d records classified.", classified, len(df))
+    classifier = OneHealthClassifier()
+    if "isolation_source" in df.columns and "host" in df.columns:
+        logger.info("Step 5/5  One Health classification (joint mode)")
+        df["one_health_category"] = classifier.classify_joint(df["isolation_source"], df["host"])
+    elif "isolation_source" in df.columns:
+        logger.info("Step 5/5  One Health classification (isolation_source only)")
+        df["one_health_category"] = classifier.classify(df["isolation_source"])
     else:
-        logger.info("Step 5/5  One Health skipped (--skip-one-health).")
+        logger.info("Step 5/5  One Health skipped (no isolation_source column).")
+    if "one_health_category" in df.columns:
+        classified = df["one_health_category"].notna().sum()
+        logger.info("         %d / %d records classified.", classified, len(df))
 
     logger.info("Writing output to %s (format=%s)", output_path, fmt)
     try:
