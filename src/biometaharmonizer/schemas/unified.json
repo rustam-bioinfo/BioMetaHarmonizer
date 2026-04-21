@@ -38,7 +38,7 @@
     {
       "standard_key": "isolation_source",
       "parser": "one_health_engine",
-      "synonyms": ["source", "source_material", "sample_type", "specimen_source",
+      "synonyms": ["source", "source_material", "specimen_source",
                    "tissue", "clinical_sample", "source_name", "analyte_type",
                    "body_site", "environmental_source", "substrate", "matrix",
                    "environmental source"]
@@ -58,7 +58,8 @@
       "standard_key": "collected_by",
       "parser": "string_cleaner",
       "synonyms": ["collecting_institution", "collector", "collected by",
-                   "specimen collector"]
+                   "specimen collector", "owner", "owner name", "submitter",
+                   "submitting institution"]
     },
     {
       "standard_key": "host_disease",

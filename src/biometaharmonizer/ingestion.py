@@ -629,6 +629,12 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             record["status"] = status_el.get("status")
             record["status_date"] = status_el.get("when")
 
+        owner_el = sample.find(".//Owner/Name")
+        if owner_el is not None and owner_el.text:
+            owner_name = owner_el.text.strip()
+            if owner_name and record.get("collected_by") is None:
+                record["collected_by"] = owner_name
+
         extras = {}
         for attr in sample.findall(".//Attribute"):
             hn = (attr.get("harmonized_name") or "").strip()
