@@ -93,6 +93,7 @@ def _load_final_schema() -> list:
         "host_sex",
         "host_tissue_sampled",
         "isolation_source",
+        "sample_type",
         "one_health_category",
         "isolate",
         "sub_strain",
