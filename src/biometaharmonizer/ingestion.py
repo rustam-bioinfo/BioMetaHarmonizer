@@ -23,7 +23,6 @@ Working directory note (Colab):
 """
 
 import importlib.resources
-import json
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -66,36 +65,58 @@ def _schemas_dir() -> Path:
 
 
 def _load_final_schema() -> list:
-    structural = [
-        "biosample_accession", "biosample_id", "sra_accession",
-        "bioproject_accession", "sample_name_id", "submission_date",
-        "last_update", "publication_date", "access", "status",
-        "status_date", "title", "description_comment", "ncbi_package",
-        "taxonomy_id", "taxonomy_name", "organism_name",
-    ]
-
-    schemas_dir = _schemas_dir()
-    unified_path = schemas_dir / "unified.json"
-    standard_keys = []
-    if unified_path.exists():
-        with open(unified_path, "r", encoding="utf-8") as fh:
-            schema = json.load(fh)
-        standard_keys = [field["standard_key"] for field in schema.get("fields", [])]
-
-    downstream = [
-        "collection_date_range",
-        "geo_country", "geo_region", "geo_locality",
-        "geo_iso3166", "geo_sea_ocean", "geo_loc_raw",
-        "one_health_category",
+    return [
+        "biosample_accession",
+        "biosample_id",
+        "sra_accession",
+        "bioproject_accession",
         "assembly_accession_refseq",
         "assembly_accession_genbank",
+        "sample_name_id",
+        "taxonomy_id",
+        "taxonomy_name",
+        "organism_name",
+        "collection_date",
+        "collection_date_range",
+        "geo_loc_name",
+        "lat_lon",
+        "geo_country",
+        "geo_region",
+        "geo_locality",
+        "geo_iso3166",
+        "geo_sea_ocean",
+        "geo_loc_raw",
+        "host",
+        "host_disease",
+        "host_age",
+        "host_sex",
+        "host_tissue_sampled",
+        "isolation_source",
+        "one_health_category",
+        "isolate",
+        "sub_strain",
+        "serotype",
+        "serovar",
+        "genotype",
+        "culture_collection",
+        "outbreak",
+        "env_broad_scale",
+        "env_local_scale",
+        "env_medium",
+        "sequencing_method",
+        "assembly_method",
+        "collected_by",
+        "ncbi_package",
+        "submission_date",
+        "last_update",
+        "publication_date",
+        "access",
+        "status",
+        "status_date",
+        "title",
+        "description_comment",
+        "_extra_attributes",
     ]
-
-    final = []
-    for col in structural + standard_keys + downstream + ["_extra_attributes"]:
-        if col not in final:
-            final.append(col)
-    return final
 
 
 BIOSAMPLE_SCHEMA = _load_final_schema()
@@ -130,7 +151,7 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
 
     Pandas reads line 2 as the header (skiprows=1), so the first column
     name will be exactly '# assembly_accession' including the hash and
-    the space.  However, the precise string has varied across NCBI
+    the space. However, the precise string has varied across NCBI
     releases -- it has been seen as:
       '# assembly_accession'   (current canonical form)
       '#assembly_accession'    (no space after hash)
@@ -143,8 +164,6 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
     """
     needed = ["assembly_accession", "biosample", "bioproject"] + (extra_cols or [])
 
-    # Peek at line 2 (index 1 after skipping the comment) to find the
-    # actual first column name as pandas will see it.
     with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
         for i, line in enumerate(fh):
             if i == 1:
@@ -161,10 +180,7 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
         dtype=str,
     )
 
-    # Normalise the first column name regardless of '#' / whitespace variants.
     df = df.rename(columns={raw_first_col: "assembly_accession"})
-
-    # Keep only the columns we need; ignore any that are absent.
     available = [c for c in needed if c in df.columns]
     return df[available]
 
@@ -629,26 +645,26 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 candidate = synonym_lookup[hn.lower()]
                 if candidate in BIOSAMPLE_SCHEMA_SET:
                     resolved = candidate
+                else:
+                    raw_key = candidate
             elif synonym_lookup is not None and an and an.lower() in synonym_lookup:
                 candidate = synonym_lookup[an.lower()]
                 if candidate in BIOSAMPLE_SCHEMA_SET:
                     resolved = candidate
+                else:
+                    raw_key = candidate
 
             if resolved is not None:
                 if record.get(resolved) is None:
                     record[resolved] = val
                 else:
-                    # Primary column already filled: preserve duplicate in extras
-                    # so no value is silently lost.
                     existing = extras.get(raw_key)
                     extras[raw_key] = f"{existing}|{val}" if existing else val
                     logger.debug(
-                        "Attribute collision on '%s' (biosample=%s): "
-                        "primary value kept, duplicate stored in _extra_attributes.",
+                        "Attribute collision on '%s' (biosample=%s): primary value kept, duplicate stored in _extra_attributes.",
                         resolved, record.get("biosample_accession"),
                     )
             else:
-                # Unmapped attribute: pipe-join if the same raw_key appears twice.
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
 
