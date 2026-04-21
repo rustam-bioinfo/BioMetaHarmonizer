@@ -64,9 +64,13 @@ class GeoEngine:
         "arabian sea", "coral sea", "tasman sea",
     }
 
+    # Matches coordinate-only strings in all common NCBI formats:
+    #   '40.71 N, 74.00 W'   (compass letters)
+    #   '40.7128, -74.0060'  (signed decimals, no compass)
+    #   '-33.87, 151.21'     (both signed)
+    #   '40.71N 74.00W'      (no comma separator)
     _COORD_RE = re.compile(
-        r"^[+-]?\d+\.?\d*\s*[NSEW]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[NSEW]?$",
-        re.IGNORECASE,
+        r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
     )
 
     def parse(self, series):
