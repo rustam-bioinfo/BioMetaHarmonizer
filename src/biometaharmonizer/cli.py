@@ -43,19 +43,6 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--output", "-o", required=True, metavar="FILE")
     run_p.add_argument("--api-key", metavar="KEY", default=None)
     run_p.add_argument("--cache-dir", metavar="DIR", default=None)
-    run_p.add_argument(
-        "--drop-sparse",
-        type=float,
-        metavar="N",
-        default=0,
-        help="Deprecated in fixed-schema mode. Ignored; columns are preserved."
-    )
-    run_p.add_argument(
-        "--no-drop-junk",
-        action="store_true",
-        default=True,
-        help="Deprecated in fixed-schema mode. Ignored; columns are preserved."
-    )
     run_p.add_argument("--format", "-f", choices=["csv", "tsv", "excel", "parquet"], default=None, metavar="FORMAT")
     run_p.add_argument("--summary", metavar="FILE", default=None)
     run_p.add_argument("--skip-dates", action="store_true", default=False)
@@ -157,8 +144,8 @@ def _run(args: argparse.Namespace) -> int:
     logger.info("Step 2/5  Key harmonization")
     try:
         mapper = KeyMapper()
-        df = mapper.map_columns(df, drop_sparse=0, drop_junk=False)
-    except RuntimeError as exc:
+        df = mapper.map_columns(df)
+    except Exception as exc:
         print(f"ERROR during key harmonization: {exc}", file=sys.stderr)
         logger.debug("", exc_info=True)
         return 2

@@ -58,7 +58,7 @@ class KeyMapper:
         else:
             self.mandatory = {"default": ["collection_date", "geo_loc_name", "isolate"]}
 
-    def map_columns(self, df, drop_sparse=0, drop_junk=False):
+    def map_columns(self, df):
         """
         Harmonize column names for custom/non-ingestion workflows and report
         per-package mandatory field fill rates.
