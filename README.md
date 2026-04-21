@@ -15,6 +15,7 @@ The NCBI BioSample database is the central repository for genomic metadata. Beca
 - Produces a **fixed, deterministic output schema** — every run on any dataset outputs the same columns in the same order, regardless of what attributes individual submitters included
 - Maps raw free-text attribute variants to standard keys using the **official NCBI BioSample `harmonized_name` XML attribute** as the primary signal, with a two-layer synonym lookup (unified.json + NCBI attribute table) as fallback
 - Any attribute that does not resolve to a known final output column is preserved losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
+- Normalizes common null-like submitter values (`missing`, `not applicable`, `unknown`, `N/A`, `missing: ...`, etc.) to true missing values during ingestion so downstream parsing operates on clean metadata
 - Parses dates (40+ formats → ISO 8601), resolves ISO-3166 country/region geography, and classifies isolation source into One Health categories (Human / Animal / Food / Environmental / Lab) — all in-place into the fixed schema columns
 - Writes harmonized output to CSV, TSV, Excel, or Parquet
 
@@ -110,11 +111,11 @@ string — including low-frequency NCBI attributes such as `antimicrobial_resist
 | 11 | `collection_date` | BioSample attribute → DateEngine | Normalized collection date in ISO 8601 format (YYYY, YYYY-MM, or YYYY-MM-DD) |
 | 12 | `collection_date_range` | DateEngine output | Inferred date range when the submitter provided a year or year-month (e.g. `2014-01-01/2014-12-31` for `2014`) |
 | 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted (e.g. `USA: IA`) |
-| 14 | `lat_lon` | BioSample attribute | Decimal latitude/longitude as submitted (e.g. `41.87 N 93.10 W`) |
-| 15 | `geo_country` | GeoEngine output | Standardized country name resolved from `geo_loc_name` |
+| 14 | `lat_lon` | BioSample attribute | Decimal latitude/longitude as submitted after null normalization; null-like values such as `missing`, `unknown`, and `not applicable` are converted to missing |
+| 15 | `geo_country` | GeoEngine output | Standardized country name resolved from `geo_loc_name`; historical names are preserved as submitted |
 | 16 | `geo_region` | GeoEngine output | Sub-national region (state, province, oblast) resolved from `geo_loc_name` |
-| 17 | `geo_locality` | GeoEngine output | City or locality name resolved from `geo_loc_name` |
-| 18 | `geo_iso3166` | GeoEngine output | ISO 3166-1 alpha-2 country code (e.g. `US`, `DE`, `GB`) |
+| 17 | `geo_locality` | GeoEngine output | City, locality, or marine sub-location resolved from `geo_loc_name` |
+| 18 | `geo_iso3166` | GeoEngine output | ISO 3166-1 alpha-2 country code (e.g. `US`, `DE`, `GB`); historical/defunct country names are tagged as `HISTORICAL` |
 | 19 | `geo_sea_ocean` | GeoEngine output | Sea or ocean name if `geo_loc_name` refers to a marine location (e.g. `Pacific Ocean`) |
 | 20 | `geo_loc_raw` | GeoEngine output | Preserved raw value when `geo_loc_name` contains coordinates only and no named place could be resolved |
 | 21 | `host` | BioSample attribute → OneHealthClassifier | Host organism name as submitted (e.g. `Homo sapiens`, `Zea mays`, `Gallus gallus`) |
@@ -152,7 +153,7 @@ Columns that have no data for a given dataset are present but filled with `NaN`.
 
 ## Architecture
 
-```
+```text
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
 │   ├── __init__.py             # version 0.5.0, full public API
@@ -187,11 +188,11 @@ BioMetaHarmonizer/
 
 | Module | File | Status | Notes |
 |---|---|---|---|
-| 1. Ingestion | `ingestion.py` | Complete | Fixed schema defined here; BioProject and assembly accessions resolved via assembly index |
+| 1. Ingestion | `ingestion.py` | Complete | Fixed schema defined here; BioProject and assembly accessions resolved via assembly index; shared null normalization applied across all attributes |
 | Synonym Lookup | `synonyms.py` | Complete | Single shared two-layer lookup used by ingestion + key_mapper; result cached per process |
 | 2. Key Harmonization | `key_mapper.py` | Complete | Rename raw columns to standard keys, coalesce duplicates, reindex to fixed schema |
 | 3. Temporal Parsing | `date_engine.py` | Complete | 40+ date formats, ISO 8601 output |
-| 4. Geospatial Resolution | `geo_engine.py` | Complete | ISO-3166 country, region, locality; assigned in-place |
+| 4. Geospatial Resolution | `geo_engine.py` | Complete | ISO-3166 country, region, locality, oceans; historical names tagged as `HISTORICAL` |
 | 5. One Health Categorization | `one_health.py` | Complete | Human / Animal / Food / Environmental / Lab |
 | 6. Output | `output.py` | Complete | CSV, TSV, Excel, Parquet; fill-rate summary |
 
@@ -211,6 +212,19 @@ The synonym table (`synonyms.py`) is built from two layers on startup and cached
 
 Both `ingestion.py` and `key_mapper.py` import the same `build_synonym_lookup()` function, so the mapping is always identical across both modules.
 
+## Null Normalization
+
+During ingestion, common submitter placeholders for missing values are converted to true missing values (`None` / `NaN`) before any downstream parsing. This applies across structural fields, BioSample attributes, owner/contact provenance, and `lat_lon`.
+
+Examples of values normalized to missing include:
+
+- `missing`, `Missing`, `misssing`
+- `N/A`, `na`, `null`, `none`, `-`
+- `unknown`, `not provided`, `not collected`, `not applicable`, `not available`, `not determined`
+- prefixed forms such as `missing: lab stock` and `missing: data agreement established pre-2023`
+
+This prevents placeholder text from leaking into harmonized columns such as `geo_country`, `host`, `isolation_source`, or `lat_lon`.
+
 ## `collected_by` Priority and Submission Provenance
 
 The `collected_by` column is populated with strict priority:
@@ -229,22 +243,29 @@ This ensures that `collected_by` always reflects who physically collected the sa
 
 ## Geospatial Parsing
 
-`GeoEngine` accepts the standard NCBI `geo_loc_name` field and fills four in-schema columns:
-`geo_country`, `geo_region`, `geo_locality`, and `geo_iso3166` (ISO 3166-1 alpha-2 code).
-For coordinate-only inputs, the raw value is preserved in `geo_loc_raw`.
+`GeoEngine` accepts the standard NCBI `geo_loc_name` field and fills six in-schema columns:
+`geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, and `geo_loc_raw`.
 
-Supported input formats:
+Parsing behavior:
 
 | Input | Parsed as |
 |---|---|
-| `"USA: California, Los Angeles"` | country=USA, region=California, locality=Los Angeles |
-| `"USA: California"` | country=USA, region=California |
-| `"Germany, Bavaria"` | country=Germany, locality=Bavaria |
-| `"France"` | country=France |
-| `"Pacific Ocean"` | geo_sea_ocean=Pacific Ocean, country columns left empty |
-| `"40.71 N, 74.00 W"` or `"40.7128, -74.0060"` | preserved in `geo_loc_raw`, country columns left empty |
+| `"USA: California, Los Angeles"` | `geo_country=USA`, `geo_region=California`, `geo_locality=Los Angeles`, `geo_iso3166=US` |
+| `"USA: California"` | `geo_country=USA`, `geo_region=California`, `geo_iso3166=US` |
+| `"Germany, Bavaria"` | `geo_country=Germany`, `geo_locality=Bavaria`, `geo_iso3166=DE` |
+| `"France"` | `geo_country=France`, `geo_iso3166=FR` |
+| `"Pacific Ocean"` | `geo_sea_ocean=Pacific Ocean`; country/region/locality left empty |
+| `"Pacific Ocean: Mariana Trench"` | `geo_sea_ocean=Pacific Ocean`, `geo_locality=Mariana Trench` |
+| `"40.71 N, 74.00 W"` or `"40.7128, -74.0060"` | preserved in `geo_loc_raw`; country/region/locality left empty |
+| `"missing: lab stock"` or `"not applicable"` | treated as missing; all geo output columns left empty |
 
-UK sub-country names (England, Scotland, Wales, Northern Ireland) are normalised to `"United Kingdom"` with ISO code `GB`. Ambiguous `"Korea"` defaults to South Korea (`KR`) with a warning logged.
+Special handling:
+
+- UK sub-country names (`England`, `Scotland`, `Wales`, `Northern Ireland`) are normalized to `geo_country="United Kingdom"` with `geo_iso3166="GB"`.
+- Ambiguous `"Korea"` defaults to South Korea (`KR`) with a warning logged.
+- Country aliases not handled reliably by `pycountry` are normalized explicitly, including `Turkey -> TR`, `Namibia -> NA`, `Democratic Republic of the Congo -> CD`, and `Burma -> MM`.
+- Historical or defunct country names (for example `USSR`, `Yugoslavia`, `Czechoslovakia`) are preserved in `geo_country` and assigned `geo_iso3166="HISTORICAL"` rather than forcing an incorrect modern country code.
+- Coordinate-only strings are not reverse-geocoded; they are preserved in `geo_loc_raw` for optional downstream processing.
 
 ## Input Formats
 
