@@ -637,8 +637,20 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             if resolved is not None:
                 if record.get(resolved) is None:
                     record[resolved] = val
+                else:
+                    # Primary column already filled: preserve duplicate in extras
+                    # so no value is silently lost.
+                    existing = extras.get(raw_key)
+                    extras[raw_key] = f"{existing}|{val}" if existing else val
+                    logger.debug(
+                        "Attribute collision on '%s' (biosample=%s): "
+                        "primary value kept, duplicate stored in _extra_attributes.",
+                        resolved, record.get("biosample_accession"),
+                    )
             else:
-                extras[raw_key] = val
+                # Unmapped attribute: pipe-join if the same raw_key appears twice.
+                existing = extras.get(raw_key)
+                extras[raw_key] = f"{existing}|{val}" if existing else val
 
         record["_extra_attributes"] = json.dumps(extras) if extras else None
         records.append(record)
