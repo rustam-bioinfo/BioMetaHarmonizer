@@ -14,8 +14,11 @@ Resolution layers (applied in order, later layers win):
      build_ncbi_attribute_cache.py pre-build step; gracefully absent otherwise.
 
 The returned dict maps every lowercased synonym to its canonical standard key.
+The result is cached for the lifetime of the process via lru_cache so that
+unified.json and ncbi_attributes.xml are read from disk only once.
 """
 
+import functools
 import importlib.resources
 import json
 import logging
@@ -35,12 +38,16 @@ def _schemas_dir() -> Path:
         return Path(__file__).parent / "schemas"
 
 
+@functools.lru_cache(maxsize=1)
 def build_synonym_lookup() -> dict:
     """
     Build and return a {lowercased_synonym: standard_key} dict.
 
     Layer 1 (unified.json) is loaded first so that NCBI XML layer 2 can
     overwrite any conflicts with the authoritative NCBI mapping.
+
+    The result is cached after the first call; subsequent calls return the
+    same dict without re-reading disk.
 
     Returns
     -------
