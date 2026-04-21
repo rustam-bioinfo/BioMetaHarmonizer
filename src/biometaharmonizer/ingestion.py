@@ -25,6 +25,7 @@ Working directory note (Colab):
 import importlib.resources
 import json
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -38,8 +39,6 @@ from biometaharmonizer.synonyms import build_synonym_lookup
 
 logger = logging.getLogger(__name__)
 
-
-# --- Module-level configuration -------------------------------------------
 
 _DEFAULT_EMAIL = "your@email.com"
 ENTREZ_EMAIL = _DEFAULT_EMAIL
@@ -55,6 +54,34 @@ _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
+
+_NULL_PATTERNS = re.compile(
+    r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
+    r"missing|misssing|missng|mising|"
+    r"unknown|unkown|unknwon|unknow|"
+    r"not\s+provided|not\s+collected|not\s+applicable|not\s+available|"
+    r"not\s+determined|not\s+recorded|not\s+reported|not\s+known|"
+    r"not\s+given|not\s+stated|not\s+specified|"
+    r"not\s+done|not\s+tested|not\s+sequenced|not\s+typed|"
+    r"unavailable|unspecified|undetermined|unidentified|"
+    r"restricted|restricted\s+access|withheld|confidential|"
+    r"tbd|tba|"
+    r"missing\s*:.*|not\s+applicable\s*:.*|data\s+agreement\s+established\s+pre-?2023)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_null(value):
+    if value is None:
+        return None
+    if pd.isna(value):
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    if _NULL_PATTERNS.match(value):
+        return None
+    return value
 
 
 def _schemas_dir() -> Path:
@@ -143,27 +170,6 @@ def set_cache_dir(path) -> None:
 
 
 def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
-    """
-    Read an NCBI assembly summary flat file robustly.
-
-    NCBI's format has two header lines:
-      Line 1: a free-text comment starting with '#'
-      Line 2: the actual column names, where the first column is
-              '# assembly_accession' (with a leading '# ').
-
-    Pandas reads line 2 as the header (skiprows=1), so the first column
-    name will be exactly '# assembly_accession' including the hash and
-    the space. However, the precise string has varied across NCBI
-    releases -- it has been seen as:
-      '# assembly_accession'   (current canonical form)
-      '#assembly_accession'    (no space after hash)
-      'assembly_accession'     (hash stripped by some FTP clients / mirrors)
-
-    Rather than hard-coding any of those variants, this function reads
-    the raw header line, detects the actual first-column name, renames
-    it to the stable internal name 'assembly_accession', and then
-    filters to the requested columns.
-    """
     needed = ["assembly_accession", "biosample", "bioproject"] + (extra_cols or [])
 
     with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -386,13 +392,6 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
 
 
 def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
-    """
-    For each BioSample accession, collect bioproject, GCF_ (refseq), and GCA_ (genbank)
-    accessions from the NCBI assembly flat files.
-
-    Both flat files are always checked independently so that a BioSample present
-    in only one source still gets all available accessions populated.
-    """
     lookup: dict = {}
 
     for label in ["refseq", "genbank"]:
@@ -586,17 +585,17 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
     for sample in root.findall(".//BioSample"):
         record = dict.fromkeys(BIOSAMPLE_SCHEMA, None)
 
-        record["biosample_accession"] = sample.get("accession")
-        record["biosample_id"] = sample.get("id")
-        record["submission_date"] = sample.get("submission_date")
-        record["last_update"] = sample.get("last_update")
-        record["publication_date"] = sample.get("publication_date")
-        record["access"] = sample.get("access")
+        record["biosample_accession"] = _normalize_null(sample.get("accession"))
+        record["biosample_id"] = _normalize_null(sample.get("id"))
+        record["submission_date"] = _normalize_null(sample.get("submission_date"))
+        record["last_update"] = _normalize_null(sample.get("last_update"))
+        record["publication_date"] = _normalize_null(sample.get("publication_date"))
+        record["access"] = _normalize_null(sample.get("access"))
 
         for db_id in sample.findall(".//Id"):
-            db = db_id.get("db", "")
-            label = db_id.get("db_label", "")
-            val = (db_id.text or "").strip()
+            db = (db_id.get("db", "") or "").strip()
+            label = (db_id.get("db_label", "") or "").strip()
+            val = _normalize_null(db_id.text)
             if db == "SRA":
                 record["sra_accession"] = val
             elif db == "BioProject" and val:
@@ -605,37 +604,37 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 record["sample_name_id"] = val
 
         title_el = sample.find(".//Description/Title")
-        record["title"] = title_el.text.strip() if title_el is not None and title_el.text else None
+        record["title"] = _normalize_null(title_el.text if title_el is not None else None)
 
         comment_el = sample.find(".//Description/Comment/Paragraph")
-        record["description_comment"] = (
-            comment_el.text.strip() if comment_el is not None and comment_el.text else None
+        record["description_comment"] = _normalize_null(
+            comment_el.text if comment_el is not None else None
         )
 
         organism = sample.find(".//Organism")
         if organism is not None:
-            record["taxonomy_id"] = organism.get("taxonomy_id")
-            record["taxonomy_name"] = organism.get("taxonomy_name")
+            record["taxonomy_id"] = _normalize_null(organism.get("taxonomy_id"))
+            record["taxonomy_name"] = _normalize_null(organism.get("taxonomy_name"))
             org_name_el = organism.find(".//OrganismName")
             if org_name_el is not None and org_name_el.text:
-                record["organism_name"] = org_name_el.text.strip()
+                record["organism_name"] = _normalize_null(org_name_el.text)
             else:
-                record["organism_name"] = organism.get("taxonomy_name")
+                record["organism_name"] = _normalize_null(organism.get("taxonomy_name"))
 
         package_el = sample.find(".//Package")
-        record["ncbi_package"] = package_el.text.strip() if package_el is not None and package_el.text else None
+        record["ncbi_package"] = _normalize_null(package_el.text if package_el is not None else None)
 
         status_el = sample.find(".//Status")
         if status_el is not None:
-            record["status"] = status_el.get("status")
-            record["status_date"] = status_el.get("when")
+            record["status"] = _normalize_null(status_el.get("status"))
+            record["status_date"] = _normalize_null(status_el.get("when"))
 
         extras = {}
         for attr in sample.findall(".//Attribute"):
             hn = (attr.get("harmonized_name") or "").strip()
             an = (attr.get("attribute_name") or "").strip()
             raw_key = hn or an or "unknown"
-            val = (attr.text or "").strip() or None
+            val = _normalize_null(attr.text)
 
             if val is None:
                 continue
@@ -671,24 +670,24 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 extras[raw_key] = f"{existing}|{val}" if existing else val
 
         owner_el = sample.find(".//Owner/Name")
-        if owner_el is not None and owner_el.text:
-            owner_name = owner_el.text.strip()
-            if owner_name:
-                if record.get("collected_by") is None:
-                    record["collected_by"] = owner_name
-                else:
-                    existing = extras.get("submission_owner")
-                    extras["submission_owner"] = (
-                        f"{existing}|{owner_name}" if existing else owner_name
-                    )
+        owner_name = _normalize_null(owner_el.text if owner_el is not None else None)
+        if owner_name:
+            if record.get("collected_by") is None:
+                record["collected_by"] = owner_name
+            else:
+                existing = extras.get("submission_owner")
+                extras["submission_owner"] = (
+                    f"{existing}|{owner_name}" if existing else owner_name
+                )
 
         contact_el = sample.find(".//Owner/Contacts/Contact")
         if contact_el is not None:
             name_parts = []
             for tag in ["First", "Middle", "Last"]:
                 part_el = contact_el.find(tag)
-                if part_el is not None and part_el.text and part_el.text.strip():
-                    name_parts.append(part_el.text.strip())
+                part_val = _normalize_null(part_el.text if part_el is not None else None)
+                if part_val:
+                    name_parts.append(part_val)
             if name_parts:
                 contact_name = " ".join(name_parts)
                 existing = extras.get("submission_contact")
