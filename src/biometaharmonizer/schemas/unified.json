@@ -44,6 +44,12 @@
                    "environmental source"]
     },
     {
+      "standard_key": "sample_type",
+      "parser": "string_cleaner",
+      "synonyms": ["sample type", "sample_type", "sampletype", "specimen type",
+                   "specimen_type", "analyte type", "material type", "sample classification"]
+    },
+    {
       "standard_key": "isolate",
       "parser": "string_cleaner",
       "synonyms": ["isolate_name", "sample_name", "submitted_sample_id",
