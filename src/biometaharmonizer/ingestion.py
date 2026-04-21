@@ -630,12 +630,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             record["status"] = status_el.get("status")
             record["status_date"] = status_el.get("when")
 
-        owner_el = sample.find(".//Owner/Name")
-        if owner_el is not None and owner_el.text:
-            owner_name = owner_el.text.strip()
-            if owner_name and record.get("collected_by") is None:
-                record["collected_by"] = owner_name
-
         extras = {}
         for attr in sample.findall(".//Attribute"):
             hn = (attr.get("harmonized_name") or "").strip()
@@ -675,6 +669,32 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             else:
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
+
+        owner_el = sample.find(".//Owner/Name")
+        if owner_el is not None and owner_el.text:
+            owner_name = owner_el.text.strip()
+            if owner_name:
+                if record.get("collected_by") is None:
+                    record["collected_by"] = owner_name
+                else:
+                    existing = extras.get("submission_owner")
+                    extras["submission_owner"] = (
+                        f"{existing}|{owner_name}" if existing else owner_name
+                    )
+
+        contact_el = sample.find(".//Owner/Contacts/Contact")
+        if contact_el is not None:
+            name_parts = []
+            for tag in ["First", "Middle", "Last"]:
+                part_el = contact_el.find(tag)
+                if part_el is not None and part_el.text and part_el.text.strip():
+                    name_parts.append(part_el.text.strip())
+            if name_parts:
+                contact_name = " ".join(name_parts)
+                existing = extras.get("submission_contact")
+                extras["submission_contact"] = (
+                    f"{existing}|{contact_name}" if existing else contact_name
+                )
 
         record["_extra_attributes"] = json.dumps(extras) if extras else None
         records.append(record)
