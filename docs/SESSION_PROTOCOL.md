@@ -9,7 +9,7 @@ Copy and paste the block below at the start of any new AI-assisted session to re
 ### 1. Project Identity & Goal
 - **Project Name:** BioMetaHarmonizer
 - **Repository:** https://github.com/rustam-bioinfo/BioMetaHarmonizer
-- **Active branch:** `biometaharmonizer_v1`
+- **Active branch:** `main`
 - **Version:** 0.5.0
 - **Objective:** Develop a Python 3.9+ pip-installable package to dynamically harmonize, parse, and categorize messy NCBI BioSample metadata (parsing dates, resolving ISO-3166 geographies, standardizing categorical variables, lossless preservation of all unresolved attributes).
 
@@ -27,6 +27,7 @@ Copy and paste the block below at the start of any new AI-assisted session to re
 - **BioProject resolution:** BioProject accession is absent from BioSample XML. Resolved via NCBI assembly summary flat files (RefSeq + GenBank) downloaded once to disk (~100 MB each). `_ensure_assembly_summaries()` is called unconditionally in `ingest()` regardless of input ID type.
 - **Working directory:** Assembly summary flat files are cached in `~/.biometaharmonizer/cache/` by default. Override with `set_cache_dir("/content")` in Colab.
 - **Lossless attribute preservation:** Any BioSample attribute that does not resolve to a known schema column is stored as JSON in `_extra_attributes`. No data is ever discarded.
+- **Null normalization:** A shared `_normalize_null(value)` function in `ingestion.py` converts common submitter placeholder strings to `None` before any attribute is written to the record. Applied to structural fields, all BioSample attributes, `lat_lon`, owner/contact provenance.
 
 ### 3. Module Tracking
 
@@ -35,7 +36,8 @@ Copy and paste the block below at the start of any new AI-assisted session to re
   - Resolves BioProject accession from assembly summary flat files.
   - Full XML extraction: Ids, Organism, Description, Package, Status, all Attributes.
   - `organism_name` prefers `<OrganismName>` child element; falls back to `taxonomy_name` XML attribute if absent. Note: `taxonomy_name` is the NCBI name for the assigned taxid and may include strain designators for strain-level taxids (e.g. `Bacillus cereus NC7401`); use `taxonomy_id` for reliable grouping.
-  - **`collected_by` priority (v0.5.0):** Explicit BioSample `collected_by` attribute is always preferred. `<Owner/Name>` is applied only as a fallback when no explicit collector attribute was found. If both are present, `<Owner/Name>` is stored as `submission_owner` in `_extra_attributes` and the contact name (`<Owner/Contacts/Contact>` First/Middle/Last) is stored as `submission_contact` in `_extra_attributes`.
+  - **`collected_by` priority:** Explicit BioSample `collected_by` attribute is always preferred. `<Owner/Name>` is applied only as a fallback when no explicit collector attribute was found. If both are present, `<Owner/Name>` is stored as `submission_owner` in `_extra_attributes` and the contact name is stored as `submission_contact`.
+  - **Shared null normalization (`_normalize_null`):** Applied to every field written from XML. Comprehensive regex `_NULL_PATTERNS` covers: `-`, `missing`, `misssing`, `N/A`, `na`, `unknown`, `not provided`, `not collected`, `not applicable`, `not available`, `not determined`, `not recorded`, `not reported`, `not given`, `not stated`, `not specified`, `not done`, `not tested`, `restricted`, `restricted access`, `withheld`, `confidential`, `tbd`, `tba`, `unavailable`, `unspecified`, `undetermined`, `unidentified`, and all prefixed forms such as `missing: lab stock` and `missing: data agreement established pre-2023`. Ensures `lat_lon` and all other attribute columns never contain placeholder text.
   - Retry/backoff for failed batches (up to 3 retries with exponential backoff).
   - Configurable API key via `set_api_key()` or `ingest(api_key=...)` for 10 req/s rate limit.
   - Configurable cache directory via `set_cache_dir()` or `ingest(cache_dir=...)`.
@@ -54,11 +56,17 @@ Copy and paste the block below at the start of any new AI-assisted session to re
   - INSDC date range parsing: `2019/2020` or `2019-01/2020-03` -> start date in `collection_date`, full range in `collection_date_range`.
   - `parse_with_range()` returns a DataFrame with `collection_date` and `collection_date_range` columns.
 
-- [x] **Module 4 (Geo Engine):** `src/biometaharmonizer/geo_engine.py` -- COMPLETE.
+- [x] **Module 4 (Geo Engine):** `src/biometaharmonizer/geo_engine.py` -- COMPLETE. Updated post v0.5.0.
   - Output columns: `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, `geo_loc_raw`.
+  - **Null normalization runs before colon-split** so `missing: lab stock`, `not applicable: control sample` etc. never leak into `geo_country` or `geo_region`.
+  - **NULL_PATTERNS** in GeoEngine mirrors ingestion `_NULL_PATTERNS` and is the gate for all `geo_loc_name` values.
+  - **Explicit ISO aliases** for countries that `pycountry` does not resolve reliably from NCBI-style names:
+    - `Turkey` -> `TR`, `Namibia` -> `NA`, `Democratic Republic of the Congo` -> `CD`, `Burma` -> `MM`.
+  - **Historical/defunct countries** (`USSR`, `Yugoslavia`, `Czechoslovakia`, `East Germany`, `West Germany`, `Zaire`, `Netherlands Antilles`, `Serbia and Montenegro`, `Byelorussia`, `North/South Vietnam`, `North/South Yemen`, etc.) -> `geo_iso3166 = "HISTORICAL"`, `geo_country` preserved as submitted, warning logged. Extending the set requires one line in `_HISTORICAL_COUNTRIES`.
   - UK sub-country (England/Scotland/Wales/Northern Ireland) -> `United Kingdom` / `GB`.
   - Korea bare name defaults to `KR` with logged warning.
   - Taiwan explicit lookup -> `TW`.
+  - Ocean sub-locations after colon (e.g. `Pacific Ocean: Mariana Trench`) preserved in `geo_locality`.
   - Coordinate-only inputs preserved in `geo_loc_raw`.
 
 - [x] **Module 5 (One Health):** `src/biometaharmonizer/one_health.py` -- COMPLETE.
@@ -96,7 +104,13 @@ In addition to unresolved submitter attributes, the following keys may be writte
 - Run with coverage: `pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing`
 - Run without network tests: `pytest tests/ -v -m "not network"`
 - Current: **170/170 passing**. All tests are self-contained (no live NCBI calls unless `network` marker).
-- Known gap: no regression tests yet for `collected_by` priority fix or `submission_owner`/`submission_contact` extraction (added in v0.5.0).
+- Known gaps (regression tests not yet written):
+  - `collected_by` priority fix (explicit attribute wins over `<Owner/Name>`).
+  - `submission_owner` / `submission_contact` extraction in `_extra_attributes`.
+  - Null normalization: `missing: lab stock`, `misssing`, `not determined`, `-` etc. -> `None`.
+  - GeoEngine: Turkey -> `TR`, Namibia -> `NA`, DRC -> `CD`, Burma -> `MM`.
+  - GeoEngine: historical names -> `geo_iso3166 = "HISTORICAL"`.
+  - GeoEngine: ocean sub-location after colon preserved in `geo_locality`.
 
 ### 7. Colab Setup (every session)
 ```python
@@ -122,10 +136,13 @@ print(biometaharmonizer.__version__)  # should print 0.5.0
 
 ### 8. Next Steps (in priority order)
 
-1. **Regression tests for v0.5.0 ingestion fixes**
-   - Test that explicit `collected_by` attribute wins over `<Owner/Name>`.
-   - Test that `submission_owner` and `submission_contact` appear in `_extra_attributes` when both sources are present.
-   - Test fallback: when no `collected_by` attribute exists, `<Owner/Name>` populates `collected_by` cleanly.
+1. **Regression tests for all post-v0.5.0 fixes**
+   - Null normalization: verify `missing`, `misssing`, `not determined`, `missing: lab stock`, `-`, `N/A`, `not applicable: control sample` all resolve to `None` across ingestion attributes including `lat_lon`.
+   - `collected_by` priority: explicit attribute wins over `<Owner/Name>`; both present -> `submission_owner` + `submission_contact` in `_extra_attributes`.
+   - GeoEngine ISO aliases: Turkey -> `TR`, Namibia -> `NA`, DRC -> `CD`, Burma -> `MM`.
+   - GeoEngine HISTORICAL: `USSR`, `Yugoslavia`, `Czechoslovakia`, `Zaire` -> `geo_iso3166 = "HISTORICAL"`.
+   - GeoEngine null gate before colon-split: `missing: lab stock` returns all-NaN geo columns.
+   - GeoEngine ocean sub-location: `Pacific Ocean: Mariana Trench` -> `geo_sea_ocean=Pacific Ocean`, `geo_locality=Mariana Trench`.
 
 2. **Validate `_extra_attributes` JSON in downstream workflows**
    - Utility function or notebook snippet to flatten/expand `_extra_attributes` into separate columns for exploratory analysis.
@@ -150,7 +167,7 @@ print(biometaharmonizer.__version__)  # should print 0.5.0
    - Publish to PyPI as `biometaharmonizer==0.5.0`.
 
 7. **Manuscript**
-   - Methods section: describe fixed schema, two-layer synonym resolution, `collected_by` priority logic, lossless `_extra_attributes` design.
+   - Methods section: describe fixed schema, two-layer synonym resolution, `collected_by` priority logic, lossless `_extra_attributes` design, null normalization approach, `HISTORICAL` geo tagging.
    - Benchmarking figures: fill rate heatmaps per column and per package, before/after harmonization.
 
 ### 9. Initialization Command
