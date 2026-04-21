@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biometaharmonizer"
-version = "0.4.0"
+version = "0.5.0"
 description = "Harmonize messy NCBI BioSample metadata at scale"
 readme = "README.md"
 license = {text = "MIT"}

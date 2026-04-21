@@ -5,6 +5,11 @@ Fetches NCBI BioSample metadata for lists of BioSample IDs or assembly accession
 BioProject accession is resolved from NCBI assembly summary flat files, which are
 downloaded once to a configurable cache directory and refreshed every 7 days.
 
+This module now defines the canonical fixed output schema for the entire tool.
+Every record is initialized with all predefined columns, so downstream steps only
+fill values in-place and never create new columns. Any attribute that does not
+resolve to a known final output column is preserved in `_extra_attributes` as JSON.
+
 Entrez rate limits:
   Without API key: 3 requests/second (1 batch = 1 request)
   With API key:   10 requests/second
@@ -17,6 +22,7 @@ Working directory note (Colab):
   if you want them in the working directory.
 """
 
+import importlib.resources
 import json
 import logging
 import time
@@ -27,90 +33,161 @@ import pandas as pd
 import requests
 from Bio import Entrez
 
+from biometaharmonizer.synonyms import build_synonym_lookup
+
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Module-level configuration ──────────────────────────────────────────────
+# --- Module-level configuration -------------------------------------------
 
-_DEFAULT_EMAIL = "your@email.com"   # sentinel; must be overridden via set_email()
-ENTREZ_EMAIL   = _DEFAULT_EMAIL
-ENTREZ_API_KEY = None               # Override via set_api_key()
-CACHE_DIR      = Path.home() / ".biometaharmonizer" / "cache"
+_DEFAULT_EMAIL = "your@email.com"
+ENTREZ_EMAIL = _DEFAULT_EMAIL
+ENTREZ_API_KEY = None
+CACHE_DIR = Path.home() / ".biometaharmonizer" / "cache"
 
-ASSEMBLY_SUMMARY_REFSEQ  = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_refseq.txt"
+ASSEMBLY_SUMMARY_REFSEQ = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_refseq.txt"
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
-_BATCH_SIZE     = 200   # UIDs per efetch call; kept moderate for reliability
-_ESEARCH_BATCH  = 200   # accessions per esearch OR query
-_MAX_RETRIES    = 3
-_RETRY_BASE_S   = 2     # seconds; exponential backoff base: min(base**attempt, 30)
-_RETRY_MAX_S    = 30    # ceiling for exponential backoff
-_CACHE_TTL_DAYS = 7     # refresh cache if older than this many days
+_BATCH_SIZE = 200
+_ESEARCH_BATCH = 100
+_MAX_RETRIES = 3
+_RETRY_BASE_S = 2
+_RETRY_MAX_S = 30
+_CACHE_TTL_DAYS = 7
+
+
+def _schemas_dir() -> Path:
+    try:
+        ref = importlib.resources.files("biometaharmonizer") / "schemas"
+        return Path(str(ref))
+    except (TypeError, ModuleNotFoundError):
+        return Path(__file__).parent / "schemas"
+
+
+def _load_final_schema() -> list:
+    return [
+        "biosample_accession",
+        "biosample_id",
+        "sra_accession",
+        "bioproject_accession",
+        "assembly_accession_refseq",
+        "assembly_accession_genbank",
+        "sample_name_id",
+        "taxonomy_id",
+        "taxonomy_name",
+        "organism_name",
+        "collection_date",
+        "collection_date_range",
+        "geo_loc_name",
+        "lat_lon",
+        "geo_country",
+        "geo_region",
+        "geo_locality",
+        "geo_iso3166",
+        "geo_sea_ocean",
+        "geo_loc_raw",
+        "host",
+        "host_disease",
+        "host_age",
+        "host_sex",
+        "host_tissue_sampled",
+        "isolation_source",
+        "sample_type",
+        "one_health_category",
+        "isolate",
+        "sub_strain",
+        "serotype",
+        "serovar",
+        "genotype",
+        "culture_collection",
+        "outbreak",
+        "env_broad_scale",
+        "env_local_scale",
+        "env_medium",
+        "sequencing_method",
+        "assembly_method",
+        "collected_by",
+        "ncbi_package",
+        "submission_date",
+        "last_update",
+        "publication_date",
+        "access",
+        "status",
+        "status_date",
+        "title",
+        "description_comment",
+        "_extra_attributes",
+    ]
+
+
+BIOSAMPLE_SCHEMA = _load_final_schema()
+BIOSAMPLE_SCHEMA_SET = set(BIOSAMPLE_SCHEMA)
 
 
 def set_email(email: str) -> None:
-    """Set the Entrez email address required by NCBI for all API calls."""
     global ENTREZ_EMAIL
     ENTREZ_EMAIL = email
     Entrez.email = email
 
 
 def set_api_key(key: str) -> None:
-    """
-    Set the NCBI Entrez API key.
-    With a key, the rate limit rises from 3 to 10 requests/second.
-    Register at https://www.ncbi.nlm.nih.gov/account/
-    """
     global ENTREZ_API_KEY
     ENTREZ_API_KEY = key
     Entrez.api_key = key
 
 
 def set_cache_dir(path) -> None:
-    """Override the directory used for assembly summary flat-file caches."""
     global CACHE_DIR
     CACHE_DIR = Path(path)
 
 
-# ─── Public API ────────────────────────────────────────────────────────────────
+def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
+    """
+    Read an NCBI assembly summary flat file robustly.
+
+    NCBI's format has two header lines:
+      Line 1: a free-text comment starting with '#'
+      Line 2: the actual column names, where the first column is
+              '# assembly_accession' (with a leading '# ').
+
+    Pandas reads line 2 as the header (skiprows=1), so the first column
+    name will be exactly '# assembly_accession' including the hash and
+    the space. However, the precise string has varied across NCBI
+    releases -- it has been seen as:
+      '# assembly_accession'   (current canonical form)
+      '#assembly_accession'    (no space after hash)
+      'assembly_accession'     (hash stripped by some FTP clients / mirrors)
+
+    Rather than hard-coding any of those variants, this function reads
+    the raw header line, detects the actual first-column name, renames
+    it to the stable internal name 'assembly_accession', and then
+    filters to the requested columns.
+    """
+    needed = ["assembly_accession", "biosample", "bioproject"] + (extra_cols or [])
+
+    with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if i == 1:
+                raw_first_col = line.split("\t")[0].strip()
+                break
+        else:
+            raise ValueError(f"Assembly summary file appears to be empty: {cache_path}")
+
+    df = pd.read_csv(
+        cache_path,
+        sep="\t",
+        skiprows=1,
+        low_memory=False,
+        dtype=str,
+    )
+
+    df = df.rename(columns={raw_first_col: "assembly_accession"})
+    available = [c for c in needed if c in df.columns]
+    return df[available]
+
 
 def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
-    """
-    Module 1: Universal Data Ingestion.
-
-    Accepts either:
-      - A path to a plain .txt file with one accession per line.
-        Accessions may be BioSample IDs (SAMN/SAME/SAMD) or
-        assembly accessions (GCF_/GCA_). Mixed files are handled.
-      - A Python list of accession strings.
-
-    Parameters
-    ----------
-    source : str, Path, or list
-        Input accessions.
-    api_key : str, optional
-        NCBI API key for 10 req/s rate limit. Overrides set_api_key().
-    cache_dir : str or Path, optional
-        Directory for assembly summary flat-file caches. Overrides set_cache_dir().
-
-    Returns
-    -------
-    pd.DataFrame
-        Raw BioSample metadata. Structural fields are always present.
-        Records that could not be fetched after all retries are logged and skipped.
-
-    Note on bioproject_accession:
-      BioProject is not stored in BioSample XML. It is resolved from the NCBI
-      assembly summary flat files (RefSeq + GenBank) which contain a
-      biosample -> bioproject mapping. Records with no assembly submission will
-      have bioproject_accession = None after resolution.
-
-    Raises
-    ------
-    ValueError
-        If set_email() has not been called with a real address before ingesting.
-    """
     if api_key is not None:
         set_api_key(api_key)
     if cache_dir is not None:
@@ -123,7 +200,7 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
             "or pass email via the CLI --email flag."
         )
 
-    Entrez.email   = ENTREZ_EMAIL
+    Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
 
     ids = _load_ids(source)
@@ -135,36 +212,78 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
 
     _ensure_assembly_summaries()
 
+    n_gcx_input = len(gcx)
+    unresolved_gcx = []
+
     if gcx:
         logger.info("Resolving %d assembly accessions to BioSample IDs...", len(gcx))
-        resolved = _resolve_assembly_to_biosample(gcx)
+        resolved, unresolved_gcx = _resolve_assembly_to_biosample(gcx)
         samn = list(set(samn + resolved))
 
     if not samn:
         raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
 
-    synonym_lookup = _load_synonym_lookup()
+    synonym_lookup = build_synonym_lookup()
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
     df = _fetch_biosample_metadata(samn, synonym_lookup=synonym_lookup)
 
-    logger.info("Resolving BioProject accessions from assembly index...")
-    bioproject_map = _resolve_biosample_to_bioproject(set(df["biosample_accession"].dropna()))
-    if bioproject_map:
-        df["bioproject_accession"] = df["biosample_accession"].map(bioproject_map).fillna(
-            df["bioproject_accession"]
+    biosample_set = set(df["biosample_accession"].dropna())
+
+    logger.info("Resolving BioProject and assembly accessions from assembly index...")
+    assembly_map = _resolve_biosample_to_assembly(biosample_set)
+
+    if assembly_map:
+        df["bioproject_accession"] = df["biosample_accession"].map(
+            lambda x: assembly_map.get(x, {}).get("bioproject")
+        ).fillna(df["bioproject_accession"])
+
+        df["assembly_accession_refseq"] = df["biosample_accession"].map(
+            lambda x: assembly_map.get(x, {}).get("refseq")
         )
-        filled = df["bioproject_accession"].notna().sum()
-        logger.info("BioProject accession resolved for %d / %d records.", filled, len(df))
+        df["assembly_accession_genbank"] = df["biosample_accession"].map(
+            lambda x: assembly_map.get(x, {}).get("genbank")
+        )
+
+        filled_bp = df["bioproject_accession"].notna().sum()
+        filled_rs = df["assembly_accession_refseq"].notna().sum()
+        filled_gb = df["assembly_accession_genbank"].notna().sum()
+        logger.info(
+            "Resolved: bioproject=%d  refseq=%d  genbank=%d  (of %d records)",
+            filled_bp, filled_rs, filled_gb, len(df),
+        )
     else:
-        logger.warning("No BioProject accessions found in assembly index for this dataset.")
+        logger.warning("No assembly index hits found for this dataset.")
 
-    return df
+    logger.info("=" * 60)
+    logger.info("INGEST SUMMARY")
+    logger.info("  Input IDs provided  : %d", len(ids))
+    if n_gcx_input:
+        logger.info("  Assembly accessions : %d", n_gcx_input)
+        logger.info(
+            "    Resolved to BioSample : %d", n_gcx_input - len(unresolved_gcx)
+        )
+        if unresolved_gcx:
+            logger.warning(
+                "    NOT resolved (absent from assembly index or suppressed): %d",
+                len(unresolved_gcx),
+            )
+            logger.warning("    Unresolved: %s", unresolved_gcx)
+    logger.info("  Records in output   : %d", len(df))
+    logger.info("  bioproject_accession filled : %d / %d",
+                df["bioproject_accession"].notna().sum(), len(df))
+    logger.info("  assembly_accession_refseq   filled : %d / %d",
+                df["assembly_accession_refseq"].notna().sum(), len(df))
+    logger.info("  assembly_accession_genbank  filled : %d / %d",
+                df["assembly_accession_genbank"].notna().sum(), len(df))
+    if unrecognized:
+        logger.warning("  Unrecognized input IDs skipped: %d -- %s",
+                       len(unrecognized), unrecognized[:10])
+    logger.info("=" * 60)
 
+    return df.reindex(columns=BIOSAMPLE_SCHEMA)
 
-# ─── Internal helpers ───────────────────────────────────────────────────────────
 
 def _load_ids(source) -> list:
-    """Load IDs from a file path, Path object, or a Python list."""
     if isinstance(source, list):
         return [s.strip() for s in source if s.strip()]
     path = Path(source)
@@ -175,7 +294,6 @@ def _load_ids(source) -> list:
 
 
 def _deduplicate(ids: list) -> list:
-    """Remove duplicate IDs while preserving order."""
     seen = set()
     unique = []
     for i in ids:
@@ -189,7 +307,6 @@ def _deduplicate(ids: list) -> list:
 
 
 def _classify_ids(ids: list) -> tuple:
-    """Separate a mixed list of IDs into assembly, BioSample, and unrecognized."""
     gcx, samn, unrecognized = [], [], []
     for i in ids:
         i_upper = i.upper()
@@ -203,14 +320,9 @@ def _classify_ids(ids: list) -> tuple:
 
 
 def _ensure_assembly_summaries() -> None:
-    """
-    Ensure NCBI assembly summary flat files are present in CACHE_DIR.
-    Files are downloaded on first use and refreshed when older than
-    _CACHE_TTL_DAYS days.
-    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for url, label in [
-        (ASSEMBLY_SUMMARY_REFSEQ,  "refseq"),
+        (ASSEMBLY_SUMMARY_REFSEQ, "refseq"),
         (ASSEMBLY_SUMMARY_GENBANK, "genbank"),
     ]:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
@@ -238,15 +350,9 @@ def _ensure_assembly_summaries() -> None:
             logger.info("Assembly index (%s) ready.", label)
 
 
-def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
-    """
-    Resolve GCF_/GCA_ accessions to BioSample IDs using cached flat files.
-    RefSeq is checked first; unresolved IDs fall through to GenBank.
-    Uses vectorized pandas operations instead of iterrows for performance on
-    large (~1M row) assembly summary files.
-    """
+def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
     resolved = []
-    gcx_set  = set(gcx_ids)
+    gcx_set = set(gcx_ids)
 
     for label in ["refseq", "genbank"]:
         if not gcx_set:
@@ -254,75 +360,87 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> list:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
         if not cache_path.exists():
             continue
-        df = pd.read_csv(
-            cache_path, sep="\t", skiprows=1,
-            usecols=["# assembly_accession", "biosample"],
-            low_memory=False,
-        ).rename(columns={"# assembly_accession": "accession"})
+        try:
+            df = _read_assembly_summary(cache_path)
+            hits = df[
+                df["assembly_accession"].isin(gcx_set)
+                & df["biosample"].notna()
+            ]
+            for acc, biosample in zip(hits["assembly_accession"], hits["biosample"]):
+                if acc in gcx_set:
+                    resolved.append(biosample)
+                    gcx_set.discard(acc)
+        except Exception as exc:
+            logger.warning(
+                "Could not read assembly index (%s) during accession resolution: %s",
+                label, exc,
+            )
 
-        hits = df[df["accession"].isin(gcx_set) & df["biosample"].notna()]
-        for acc, biosample in zip(hits["accession"], hits["biosample"]):
-            if acc in gcx_set:
-                resolved.append(biosample)
-                gcx_set.discard(acc)
-
-    if gcx_set:
+    unresolved = list(gcx_set)
+    if unresolved:
         logger.warning(
-            "%d assembly accessions could not be resolved: %s",
-            len(gcx_set), list(gcx_set)[:5],
+            "%d assembly accessions not found in either index (suppressed or absent): %s",
+            len(unresolved), unresolved[:5],
         )
-    return resolved
+    return resolved, unresolved
 
 
-def _resolve_biosample_to_bioproject(biosample_ids: set) -> dict:
+def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
     """
-    Build a {biosample_accession: bioproject_accession} lookup from cached flat files.
-    Uses vectorized pandas operations for performance on large assembly summary files.
+    For each BioSample accession, collect bioproject, GCF_ (refseq), and GCA_ (genbank)
+    accessions from the NCBI assembly flat files.
+
+    Both flat files are always checked independently so that a BioSample present
+    in only one source still gets all available accessions populated.
     """
-    lookup = {}
+    lookup: dict = {}
+
     for label in ["refseq", "genbank"]:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
         if not cache_path.exists():
             continue
         try:
-            df = pd.read_csv(
-                cache_path, sep="\t", skiprows=1,
-                usecols=["biosample", "bioproject"],
-                low_memory=False,
-            )
-            hits = df[df["biosample"].isin(biosample_ids) & df["bioproject"].notna()]
-            for biosample, bioproject in zip(hits["biosample"], hits["bioproject"]):
-                if biosample not in lookup:
-                    lookup[biosample] = bioproject
+            df = _read_assembly_summary(cache_path)
+            hits = df[
+                df["biosample"].isin(biosample_ids)
+                & df["assembly_accession"].notna()
+            ]
+
+            for _, row in hits.iterrows():
+                bs = row["biosample"]
+                asm = row["assembly_accession"]
+                bp = row.get("bioproject")
+                if pd.isna(bp):
+                    bp = None
+
+                if bs not in lookup:
+                    lookup[bs] = {"bioproject": None, "refseq": None, "genbank": None}
+
+                if lookup[bs]["bioproject"] is None and bp:
+                    lookup[bs]["bioproject"] = bp
+
+                if asm.startswith("GCF_"):
+                    if lookup[bs]["refseq"] is None:
+                        lookup[bs]["refseq"] = asm
+                elif asm.startswith("GCA_"):
+                    if lookup[bs]["genbank"] is None:
+                        lookup[bs]["genbank"] = asm
+
         except Exception as exc:
             logger.warning(
-                "Could not read assembly index (%s) for BioProject resolution: %s",
-                label, exc,
+                "Could not read assembly index (%s) for resolution: %s", label, exc
             )
+
     return lookup
 
 
 def _resolve_accessions_to_uids(accessions: list) -> dict:
-    """
-    Resolve a list of BioSample accessions (SAMN/SAME/SAMD) to NCBI
-    integer UIDs via Entrez esearch, using batched OR queries.
-
-    Returns a dict mapping accession (str) -> uid (str).
-    Accessions that esearch cannot resolve are absent from the result
-    and will be logged as warnings by the caller.
-
-    Using esearch([Accession] field) is the only reliable way to obtain
-    the canonical UID for a BioSample accession. Passing accession strings
-    directly to efetch(db=biosample) is unreliable: NCBI interprets the
-    id parameter as a numeric UID list, so non-numeric accession strings
-    can match arbitrary unrelated records.
-    """
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
 
     for start in range(0, len(accessions), _ESEARCH_BATCH):
         batch = accessions[start:start + _ESEARCH_BATCH]
-        term  = " OR ".join(f"{acc}[Accession]" for acc in batch)
+        term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -344,8 +462,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 time.sleep(wait)
         else:
             logger.warning(
-                "esearch failed for batch starting at index %d. "
-                "These accessions will be skipped.",
+                "esearch failed for batch starting at index %d. These accessions will be skipped.",
                 start,
             )
             continue
@@ -354,13 +471,12 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
-        # Fetch summaries to map uid -> accession
         for uid_start in range(0, len(uids), _ESEARCH_BATCH):
             uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     sum_handle = Entrez.esummary(db="biosample", id=",".join(uid_batch))
-                    summaries  = Entrez.read(sum_handle)
+                    summaries = Entrez.read(sum_handle)
                     sum_handle.close()
                     break
                 except Exception as exc:
@@ -385,24 +501,9 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
 
 
 def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
-    """
-    Fetch raw BioSample attribute metadata via a two-step process:
-
-    Step 1 -- esearch: resolve every BioSample accession to its canonical
-    NCBI integer UID. This is necessary because efetch(db=biosample)
-    treats the id parameter as a numeric UID list; passing accession
-    strings directly causes NCBI to interpret them as numeric IDs and
-    can return completely unrelated records.
-
-    Step 2 -- efetch by UID: fetch full XML for resolved UIDs in batches.
-    After parsing, every record is validated: if its biosample_accession
-    attribute is not in the requested input set, the record is dropped and
-    logged as a warning. This makes silent cross-contamination impossible.
-    """
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     requested_set = set(samn_ids)
 
-    # ─── Step 1: resolve accessions to UIDs ────────────────────────────────
     logger.info("Resolving %d accessions to NCBI UIDs...", len(samn_ids))
     acc_to_uid = _resolve_accessions_to_uids(samn_ids)
 
@@ -419,11 +520,10 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
 
     logger.info("Fetching metadata for %d resolved UIDs...", len(uid_list))
 
-    # ─── Step 2: efetch by UID in batches ────────────────────────────────
-    records    = []
+    records = []
     failed_ids = []
-    total      = len(uid_list)
-    n_batches  = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
+    total = len(uid_list)
+    n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
 
     for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
         uid_batch = uid_list[start:start + _BATCH_SIZE]
@@ -436,9 +536,8 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
             )
             failed_ids.extend(uid_batch)
         else:
-            # Validate: drop any record whose accession is not in the requested set
             for rec in batch_records:
-                acc = rec.get("biosample_accession", "")
+                acc = rec.get("biosample_accession") or ""
                 if acc in requested_set:
                     records.append(rec)
                 else:
@@ -455,14 +554,10 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
     if failed_ids:
         logger.warning("%d UIDs could not be fetched: %s", len(failed_ids), failed_ids[:10])
 
-    return pd.DataFrame(records)
+    return pd.DataFrame(records).reindex(columns=BIOSAMPLE_SCHEMA)
 
 
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
-    """
-    Fetch a single batch of integer UIDs via Entrez efetch.
-    Returns a list of record dicts on success, or None after all retries fail.
-    """
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -484,65 +579,24 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
     return None
 
 
-# ─── Attribute resolution at parse time ────────────────────────────────────────
-
-def _load_synonym_lookup() -> dict:
-    """
-    Build a {lowercased_name: standard_key} lookup from unified.json.
-    Called once per ingest() run; the result is passed into _parse_biosample_xml
-    so that attribute names are resolved to fixed target columns during parsing.
-    """
-    lookup: dict[str, str] = {}
-    try:
-        import importlib.resources
-        ref = importlib.resources.files("biometaharmonizer") / "schemas" / "unified.json"
-        schema_path = Path(str(ref))
-    except (TypeError, ModuleNotFoundError):
-        schema_path = Path(__file__).parent / "schemas" / "unified.json"
-
-    if not schema_path.exists():
-        return lookup
-
-    with open(schema_path, "r", encoding="utf-8") as fh:
-        schema = json.load(fh)
-    for field in schema.get("fields", []):
-        sk = field["standard_key"]
-        lookup[sk.lower()] = sk
-        for syn in field.get("synonyms", []):
-            syn_lower = syn.lower().strip()
-            if syn_lower:
-                lookup[syn_lower] = sk
-    return lookup
-
-
 def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
-    """
-    Parse raw BioSample XML bytes into a list of flat attribute dicts.
-
-    When synonym_lookup is provided, each <Attribute> is resolved at parse
-    time: harmonized_name from the XML is used first; if absent, the
-    attribute_name is looked up in the synonym dict.  Attributes that cannot
-    be resolved to any target column are collected into a JSON string stored
-    in the '_extra_attributes' field.
-    """
     records = []
-    root    = ET.fromstring(xml_bytes)
+    root = ET.fromstring(xml_bytes)
 
     for sample in root.findall(".//BioSample"):
-        record = {}
+        record = dict.fromkeys(BIOSAMPLE_SCHEMA, None)
 
         record["biosample_accession"] = sample.get("accession")
-        record["biosample_id"]        = sample.get("id")
-        record["submission_date"]     = sample.get("submission_date")
-        record["last_update"]         = sample.get("last_update")
-        record["publication_date"]    = sample.get("publication_date")
-        record["access"]              = sample.get("access")
+        record["biosample_id"] = sample.get("id")
+        record["submission_date"] = sample.get("submission_date")
+        record["last_update"] = sample.get("last_update")
+        record["publication_date"] = sample.get("publication_date")
+        record["access"] = sample.get("access")
 
-        record["bioproject_accession"] = None
         for db_id in sample.findall(".//Id"):
-            db    = db_id.get("db", "")
+            db = db_id.get("db", "")
             label = db_id.get("db_label", "")
-            val   = (db_id.text or "").strip()
+            val = (db_id.text or "").strip()
             if db == "SRA":
                 record["sra_accession"] = val
             elif db == "BioProject" and val:
@@ -551,95 +605,104 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 record["sample_name_id"] = val
 
         title_el = sample.find(".//Description/Title")
-        record["title"] = (
-            title_el.text.strip()
-            if title_el is not None and title_el.text
-            else None
-        )
+        record["title"] = title_el.text.strip() if title_el is not None and title_el.text else None
 
         comment_el = sample.find(".//Description/Comment/Paragraph")
         record["description_comment"] = (
-            comment_el.text.strip()
-            if comment_el is not None and comment_el.text
-            else None
+            comment_el.text.strip() if comment_el is not None and comment_el.text else None
         )
 
         organism = sample.find(".//Organism")
         if organism is not None:
-            record["taxonomy_id"]   = organism.get("taxonomy_id")
+            record["taxonomy_id"] = organism.get("taxonomy_id")
             record["taxonomy_name"] = organism.get("taxonomy_name")
             org_name_el = organism.find(".//OrganismName")
             if org_name_el is not None and org_name_el.text:
                 record["organism_name"] = org_name_el.text.strip()
             else:
                 record["organism_name"] = organism.get("taxonomy_name")
-        else:
-            record["taxonomy_id"]   = None
-            record["taxonomy_name"] = None
-            record["organism_name"] = None
 
         package_el = sample.find(".//Package")
-        record["ncbi_package"] = (
-            package_el.text.strip()
-            if package_el is not None and package_el.text
-            else None
-        )
+        record["ncbi_package"] = package_el.text.strip() if package_el is not None and package_el.text else None
 
         status_el = sample.find(".//Status")
         if status_el is not None:
-            record["status"]      = status_el.get("status")
+            record["status"] = status_el.get("status")
             record["status_date"] = status_el.get("when")
-        else:
-            record["status"]      = None
-            record["status_date"] = None
 
-        # --- Attribute resolution ---
         extras = {}
         for attr in sample.findall(".//Attribute"):
-            raw_key = attr.get("harmonized_name") or attr.get("attribute_name", "unknown")
-            val = (attr.text or "").strip()
-            val = val if val else None
+            hn = (attr.get("harmonized_name") or "").strip()
+            an = (attr.get("attribute_name") or "").strip()
+            raw_key = hn or an or "unknown"
+            val = (attr.text or "").strip() or None
 
-            if synonym_lookup is not None:
-                resolved = None
-                # Try harmonized_name from XML first, then attribute_name
-                hn = attr.get("harmonized_name", "").strip()
-                if hn and hn.lower() in synonym_lookup:
-                    resolved = synonym_lookup[hn.lower()]
-                elif raw_key.lower() in synonym_lookup:
-                    resolved = synonym_lookup[raw_key.lower()]
-                else:
-                    an = attr.get("attribute_name", "").strip()
-                    if an and an.lower() in synonym_lookup:
-                        resolved = synonym_lookup[an.lower()]
+            if val is None:
+                continue
 
-                if resolved is not None:
-                    # Only set if not already populated (first value wins)
-                    if resolved not in record or record[resolved] is None:
-                        record[resolved] = val
+            resolved = None
+            if hn and hn in BIOSAMPLE_SCHEMA_SET:
+                resolved = hn
+            elif synonym_lookup is not None and hn and hn.lower() in synonym_lookup:
+                candidate = synonym_lookup[hn.lower()]
+                if candidate in BIOSAMPLE_SCHEMA_SET:
+                    resolved = candidate
                 else:
-                    # Unmapped attribute -> extras
-                    if val is not None:
-                        extras[raw_key] = val
+                    raw_key = candidate
+            elif synonym_lookup is not None and an and an.lower() in synonym_lookup:
+                candidate = synonym_lookup[an.lower()]
+                if candidate in BIOSAMPLE_SCHEMA_SET:
+                    resolved = candidate
+                else:
+                    raw_key = candidate
+
+            if resolved is not None:
+                if record.get(resolved) is None:
+                    record[resolved] = val
+                else:
+                    existing = extras.get(raw_key)
+                    extras[raw_key] = f"{existing}|{val}" if existing else val
+                    logger.debug(
+                        "Attribute collision on '%s' (biosample=%s): primary value kept, duplicate stored in _extra_attributes.",
+                        resolved, record.get("biosample_accession"),
+                    )
             else:
-                # No synonym lookup: legacy behavior
-                record[raw_key] = val
+                existing = extras.get(raw_key)
+                extras[raw_key] = f"{existing}|{val}" if existing else val
 
-        if synonym_lookup is not None:
-            record["_extra_attributes"] = json.dumps(extras) if extras else None
+        owner_el = sample.find(".//Owner/Name")
+        if owner_el is not None and owner_el.text:
+            owner_name = owner_el.text.strip()
+            if owner_name:
+                if record.get("collected_by") is None:
+                    record["collected_by"] = owner_name
+                else:
+                    existing = extras.get("submission_owner")
+                    extras["submission_owner"] = (
+                        f"{existing}|{owner_name}" if existing else owner_name
+                    )
 
+        contact_el = sample.find(".//Owner/Contacts/Contact")
+        if contact_el is not None:
+            name_parts = []
+            for tag in ["First", "Middle", "Last"]:
+                part_el = contact_el.find(tag)
+                if part_el is not None and part_el.text and part_el.text.strip():
+                    name_parts.append(part_el.text.strip())
+            if name_parts:
+                contact_name = " ".join(name_parts)
+                existing = extras.get("submission_contact")
+                extras["submission_contact"] = (
+                    f"{existing}|{contact_name}" if existing else contact_name
+                )
+
+        record["_extra_attributes"] = json.dumps(extras) if extras else None
         records.append(record)
 
     return records
 
 
 def _download_file(url: str, dest_path: Path) -> None:
-    """
-    Stream-download a large file to disk.
-    Writes to a temporary sibling file first; renames atomically on success.
-    On failure the partial temporary file is removed so stale cache files
-    cannot accumulate.
-    """
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
     try:
         with requests.get(url, stream=True) as resp:

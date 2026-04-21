@@ -16,6 +16,32 @@ class GeoEngine:
     separate geo_country, geo_region, and geo_locality columns.
     Expected input format: 'Country: Region, Locality'
     Fallback format (no colon): 'Country, Locality'
+
+    Output columns
+    --------------
+    geo_country   : normalised country display name (str or NaN)
+    geo_region    : sub-national region as submitted (str or NaN)
+    geo_locality  : locality / sub-region as submitted (str or NaN)
+    geo_iso3166   : ISO 3166-1 alpha-2 country code (str or NaN)
+    geo_sea_ocean : ocean/sea name for marine samples (str or NaN)
+    geo_loc_raw   : original submitted string, present only when the value
+                    could not be fully parsed (coordinate-only entries).
+                    For all successfully parsed country entries this field
+                    is NaN; the original value is always available in the
+                    source geo_loc_name column.
+
+    Note on geo_loc_raw:
+      This column is intentionally restricted to coordinate-only and
+      genuinely unparseable entries.  For normal country/region/locality
+      strings the raw value is NOT duplicated here because geo_loc_name
+      already holds it.  Populating geo_loc_raw for every row would triple-
+      store the same string alongside geo_loc_name and this column.
+
+    Note on coordinate-only entries:
+      Records whose geo_loc_name contains only lat/lon coordinates (e.g.
+      '40.71 N, 74.00 W') cannot be split into country/region/locality.
+      They are stored in geo_loc_raw for downstream reverse-geocoding.
+      geo_country and related fields are left NaN for these rows.
     """
 
     NULL_PATTERNS = re.compile(
@@ -38,9 +64,13 @@ class GeoEngine:
         "arabian sea", "coral sea", "tasman sea",
     }
 
+    # Matches coordinate-only strings in all common NCBI formats:
+    #   '40.71 N, 74.00 W'   (compass letters)
+    #   '40.7128, -74.0060'  (signed decimals, no compass)
+    #   '-33.87, 151.21'     (both signed)
+    #   '40.71N 74.00W'      (no comma separator)
     _COORD_RE = re.compile(
-        r"^[+-]?\d+\.?\d*\s*[NSEW]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[NSEW]?$",
-        re.IGNORECASE,
+        r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
     )
 
     def parse(self, series):
@@ -59,7 +89,8 @@ class GeoEngine:
         if self.NULL_PATTERNS.match(value):
             return empty
 
-        # Coordinate detection
+        # Coordinate-only: store raw for downstream reverse-geocoding;
+        # do NOT populate country/region fields.
         if self._COORD_RE.match(value):
             result = dict(empty)
             result["geo_loc_raw"] = value
@@ -81,13 +112,16 @@ class GeoEngine:
             display_country = country_str
 
         iso_code = self._resolve_iso(country_str)
+
+        # geo_loc_raw is NaN for successfully parsed entries; the original
+        # value is preserved in the source geo_loc_name column.
         return {
             "geo_country": display_country if country_str else np.nan,
             "geo_region": region_str if region_str else np.nan,
             "geo_locality": locality_str if locality_str else np.nan,
             "geo_iso3166": iso_code,
             "geo_sea_ocean": np.nan,
-            "geo_loc_raw": value,
+            "geo_loc_raw": np.nan,
         }
 
     def _split_geo_string(self, value):
@@ -114,7 +148,6 @@ class GeoEngine:
             else:
                 region_str = remainder
         else:
-            # No colon: treat text before first comma as country, after as locality
             if "," in value:
                 parts = value.split(",", 1)
                 country_str = parts[0].strip()
@@ -129,11 +162,9 @@ class GeoEngine:
 
         lower = country_str.lower().strip()
 
-        # UK sub-country lookup
         if lower in self._UK_SUBCOUNTRY:
             return self._UK_SUBCOUNTRY[lower]
 
-        # Korea ambiguity
         if lower == "korea":
             logger.warning(
                 "Ambiguous 'Korea' -- defaulting to South Korea (KR). "
@@ -141,19 +172,17 @@ class GeoEngine:
             )
             return "KR"
 
-        # Taiwan explicit lookup
         if lower in ("taiwan", "taiwan, province of china"):
             return "TW"
 
-        # Guard against very short strings that produce false-positive fuzzy matches
         if len(lower) < 3:
-            logger.warning("Country string too short for reliable ISO lookup: '%s'", country_str)
+            logger.warning(
+                "Country string too short for reliable ISO lookup: '%s'", country_str
+            )
             return np.nan
 
         try:
             result = pycountry.countries.search_fuzzy(country_str)
             return result[0].alpha_2
         except Exception:
-            # pycountry raises LookupError for no match, but may also raise
-            # AttributeError or TypeError on unusual input in some versions.
             return np.nan

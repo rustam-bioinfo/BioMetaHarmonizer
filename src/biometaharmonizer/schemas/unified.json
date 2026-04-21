@@ -1,157 +1,255 @@
 {
   "schema_name": "unified",
-  "description": "Unified synonym lookup for all NCBI BioSample packages. Mandatory field validation is handled per-package via mandatory_fields.json.",
-  "version": "1.0",
-  "_note": "Structural fields (biosample_accession, biosample_id, sra_accession, bioproject_accession, taxonomy_id, taxonomy_name, organism_name, submission_date, last_update, publication_date, access, status, status_date, title, description_comment, ncbi_package) are extracted directly from XML and bypass this schema.",
+  "description": "Fixed target schema for BioMetaHarmonizer. Every attribute extracted from BioSample XML is resolved against this schema. Attributes that match a standard_key or one of its synonyms are placed into the corresponding fixed column. Unmatched attributes are collected into _extra_attributes (JSON). Structural fields (biosample_accession, etc.) are extracted from the XML envelope and bypass this schema.",
+  "version": "2.0",
   "fields": [
     {
       "standard_key": "collection_date",
       "parser": "date_engine",
-      "synonyms": ["date", "sampling_date", "collection date", "year", "collected_on",
-                   "sampling_time", "time_of_collection", "collected_by"]
+      "synonyms": ["colection date", "collection date", "collection year",
+                   "collectiondate", "date of collection", "date sample collected",
+                   "isolation year", "sample collection date", "sample date",
+                   "sampling_date", "sampling date", "time of sample collection",
+                   "year isolated", "date", "year", "collected_on",
+                   "sampling_time", "time_of_collection", "date collected",
+                   "collection date (yyyymmdd)"]
     },
     {
       "standard_key": "geo_loc_name",
       "parser": "geo_engine",
-      "synonyms": ["country", "location", "geographic location", "geo_loc", "region",
-                   "origin", "place_of_isolation", "sampling_location"]
+      "synonyms": ["geographic location", "country", "location", "geo_loc",
+                   "region", "origin", "place_of_isolation", "sampling_location",
+                   "geographic location (country and/or sea,region)",
+                   "geographic location (country and/or sea)"]
     },
     {
       "standard_key": "lat_lon",
       "parser": "string_cleaner",
-      "synonyms": ["latitude_longitude", "coordinates", "gps", "latitude", "longitude", "lat", "lon"]
+      "synonyms": ["latitude and longitude", "latitude_longitude", "coordinates",
+                   "gps", "geographic location (latitude and longitude)"]
     },
     {
       "standard_key": "host",
       "parser": "one_health_engine",
       "synonyms": ["host_species", "host animal", "isolated from", "source_host",
-                   "patient", "patient id", "host_organism"]
+                   "patient", "host_organism", "specific host", "specific_host",
+                   "host organism"]
     },
     {
       "standard_key": "isolation_source",
       "parser": "one_health_engine",
-      "synonyms": ["source", "source_material", "sample_type", "specimen_source",
+      "synonyms": ["source", "source_material", "specimen_source",
                    "tissue", "clinical_sample", "source_name", "analyte_type",
-                   "cell_type", "histological_type", "molecular_data_type", "body_site",
-                   "environmental_source", "substrate", "matrix"]
+                   "body_site", "environmental_source", "substrate", "matrix",
+                   "environmental source"]
     },
     {
-      "standard_key": "env_broad_scale",
+      "standard_key": "sample_type",
       "parser": "string_cleaner",
-      "synonyms": ["biome", "environment_type", "broad_environment", "ecosystem", "habitat", "env_biome"]
-    },
-    {
-      "standard_key": "env_local_scale",
-      "parser": "string_cleaner",
-      "synonyms": ["local_environment", "microhabitat", "env_feature", "local_scale", "environmental_feature"]
-    },
-    {
-      "standard_key": "env_medium",
-      "parser": "string_cleaner",
-      "synonyms": ["medium", "growth_medium", "substrate_type", "environmental_material", "material", "env_material"]
-    },
-    {
-      "standard_key": "host_disease",
-      "parser": "string_cleaner",
-      "synonyms": ["disease", "clinical_condition", "diagnosis", "illness", "symptom",
-                   "neoplastic", "is_tumor", "disease_name", "infection"]
+      "synonyms": ["sample type", "sample_type", "sampletype", "specimen type",
+                   "specimen_type", "analyte type", "material type", "sample classification"]
     },
     {
       "standard_key": "isolate",
       "parser": "string_cleaner",
-      "synonyms": ["strain", "isolate_name", "sample_name", "id", "submitted_sample_id",
-                   "biospecimen_repository_sample_id", "gap_sample_id", "submitted_subject_id",
-                   "gap_subject_id", "plate id", "well", "isolate_id"]
+      "synonyms": ["isolate_name", "sample_name", "submitted_sample_id",
+                   "isolate_id", "identification or description of the specific individual"]
     },
     {
-      "standard_key": "sub_strain",
+      "standard_key": "strain",
       "parser": "string_cleaner",
-      "synonyms": ["substrain", "sub-strain", "variant", "lineage", "sublineage", "clade", "sub_type"]
-    },
-    {
-      "standard_key": "serotype",
-      "parser": "string_cleaner",
-      "synonyms": ["serotype_name", "sero_type", "antigenic_formula", "antigen", "antigen_type"]
-    },
-    {
-      "standard_key": "serovar",
-      "parser": "string_cleaner",
-      "synonyms": ["serovar_name", "sero_var", "serovariante", "phage_type", "phagetype"]
-    },
-    {
-      "standard_key": "host_age",
-      "parser": "string_cleaner",
-      "synonyms": ["age", "patient_age", "age_at_collection", "host_age_bin", "age_group"]
-    },
-    {
-      "standard_key": "host_sex",
-      "parser": "string_cleaner",
-      "synonyms": ["sex", "gender", "biological_sex", "patient_sex"]
-    },
-    {
-      "standard_key": "host_tissue_sampled",
-      "parser": "string_cleaner",
-      "synonyms": ["tissue_sampled", "organ", "anatomical_site", "body_part", "specimen_site", "sampling_site"]
-    },
-    {
-      "standard_key": "genotype",
-      "parser": "string_cleaner",
-      "synonyms": ["genotype_name", "genetic_background", "cultivar", "selection", "study_design"]
-    },
-    {
-      "standard_key": "antimicrobial_resistance",
-      "parser": "string_cleaner",
-      "synonyms": ["amr", "antibiotic_resistance", "resistance_phenotype", "resistance",
-                   "susceptibility", "mic", "minimum_inhibitory_concentration",
-                   "drug_resistance", "resistant_to"]
-    },
-    {
-      "standard_key": "outbreak",
-      "parser": "string_cleaner",
-      "synonyms": ["outbreak_id", "cluster", "cluster_id", "epidemic", "transmission_cluster"]
+      "synonyms": ["microbial strain", "strain_name"]
     },
     {
       "standard_key": "collected_by",
       "parser": "string_cleaner",
-      "synonyms": ["collecting_institution", "collector", "submitter", "submitted_by", "laboratory", "lab_name"]
+      "synonyms": ["collecting_institution", "collector", "collected by",
+                   "specimen collector", "owner", "owner name", "submitter",
+                   "submitting institution"]
     },
     {
-      "standard_key": "sequencing_method",
+      "standard_key": "host_disease",
       "parser": "string_cleaner",
-      "synonyms": ["sequencing_technology", "platform", "seq_method", "instrument", "sequencer",
-                   "library_strategy", "library_source", "library_selection"]
+      "synonyms": ["disease", "clinical_condition", "diagnosis", "illness",
+                   "infection", "disease_name", "host disease"]
     },
     {
-      "standard_key": "assembly_method",
+      "standard_key": "host_age",
       "parser": "string_cleaner",
-      "synonyms": ["assembler", "assembly_software", "assembly_version", "genome_assembly_method"]
+      "synonyms": ["age", "patient_age", "age_at_collection", "host_age_bin",
+                   "age_group", "host age"]
+    },
+    {
+      "standard_key": "host_sex",
+      "parser": "string_cleaner",
+      "synonyms": ["sex", "gender", "biological_sex", "patient_sex", "host sex"]
+    },
+    {
+      "standard_key": "host_tissue_sampled",
+      "parser": "string_cleaner",
+      "synonyms": ["tissue_sampled", "organ", "anatomical_site", "body_part",
+                   "specimen_site", "sampling_site", "host tissue sampled"]
+    },
+    {
+      "standard_key": "host_health_state",
+      "parser": "string_cleaner",
+      "synonyms": ["health state", "health_state", "host health state",
+                   "health status"]
+    },
+    {
+      "standard_key": "host_subject_id",
+      "parser": "string_cleaner",
+      "synonyms": ["subject id", "host subject id", "patient_id", "patient id"]
+    },
+    {
+      "standard_key": "host_description",
+      "parser": "string_cleaner",
+      "synonyms": ["host description"]
+    },
+    {
+      "standard_key": "host_disease_outcome",
+      "parser": "string_cleaner",
+      "synonyms": ["disease outcome", "host disease outcome"]
+    },
+    {
+      "standard_key": "host_disease_stage",
+      "parser": "string_cleaner",
+      "synonyms": ["disease stage", "host disease stage"]
+    },
+    {
+      "standard_key": "env_broad_scale",
+      "parser": "string_cleaner",
+      "synonyms": ["biome", "environment_type", "broad_environment", "ecosystem",
+                   "habitat", "env_biome", "broad-scale environmental context",
+                   "env broad scale"]
+    },
+    {
+      "standard_key": "env_local_scale",
+      "parser": "string_cleaner",
+      "synonyms": ["local_environment", "microhabitat", "env_feature",
+                   "local_scale", "environmental_feature",
+                   "local-scale environmental context", "env local scale"]
+    },
+    {
+      "standard_key": "env_medium",
+      "parser": "string_cleaner",
+      "synonyms": ["medium", "growth_medium", "substrate_type",
+                   "environmental_material", "material", "env_material",
+                   "environmental medium", "env medium"]
+    },
+    {
+      "standard_key": "genotype",
+      "parser": "string_cleaner",
+      "synonyms": ["genotype_name", "genetic_background", "observed genotype"]
+    },
+    {
+      "standard_key": "serotype",
+      "parser": "string_cleaner",
+      "synonyms": ["serotype_name", "sero_type", "antigenic_formula",
+                   "serogroup"]
+    },
+    {
+      "standard_key": "serovar",
+      "parser": "string_cleaner",
+      "synonyms": ["serovar_name", "sero_var"]
+    },
+    {
+      "standard_key": "sub_strain",
+      "parser": "string_cleaner",
+      "synonyms": ["substrain", "sub-strain", "sub strain"]
+    },
+    {
+      "standard_key": "subtype",
+      "parser": "string_cleaner",
+      "synonyms": ["sub_type", "sub type"]
+    },
+    {
+      "standard_key": "subgroup",
+      "parser": "string_cleaner",
+      "synonyms": ["sub_group", "sub group"]
+    },
+    {
+      "standard_key": "pathotype",
+      "parser": "string_cleaner",
+      "synonyms": ["patho_type", "pathogenicity type"]
+    },
+    {
+      "standard_key": "passage_history",
+      "parser": "string_cleaner",
+      "synonyms": ["passage history", "passage_number", "passage number"]
     },
     {
       "standard_key": "culture_collection",
       "parser": "string_cleaner",
-      "synonyms": ["culture_id", "collection_id", "type_strain", "reference_strain", "atcc", "dsmz", "nctc", "ccug"]
+      "synonyms": ["culture_id", "collection_id", "type_strain",
+                   "reference_strain", "atcc", "dsmz", "nctc", "ccug",
+                   "culture collection"]
+    },
+    {
+      "standard_key": "specimen_voucher",
+      "parser": "string_cleaner",
+      "synonyms": ["specimen voucher"]
+    },
+    {
+      "standard_key": "biomaterial_provider",
+      "parser": "string_cleaner",
+      "synonyms": ["biomaterial provider"]
+    },
+    {
+      "standard_key": "antimicrobial_resistance",
+      "parser": "string_cleaner",
+      "synonyms": ["amr", "antibiotic_resistance", "resistance_phenotype",
+                   "resistance", "susceptibility", "mic",
+                   "minimum_inhibitory_concentration", "drug_resistance",
+                   "resistant_to", "antimicrobial resistance"]
+    },
+    {
+      "standard_key": "antimicrobial_resistance_phenotype",
+      "parser": "string_cleaner",
+      "synonyms": ["amr_phenotype", "antimicrobial resistance phenotype"]
+    },
+    {
+      "standard_key": "outbreak",
+      "parser": "string_cleaner",
+      "synonyms": ["outbreak_id", "cluster", "cluster_id", "epidemic",
+                   "transmission_cluster"]
+    },
+    {
+      "standard_key": "sequencing_method",
+      "parser": "string_cleaner",
+      "synonyms": ["sequencing_technology", "platform", "seq_method",
+                   "instrument", "sequencer"]
+    },
+    {
+      "standard_key": "assembly_method",
+      "parser": "string_cleaner",
+      "synonyms": ["assembler", "assembly_software", "assembly_version",
+                   "genome_assembly_method", "assembly method"]
     },
     {
       "standard_key": "samp_size",
       "parser": "string_cleaner",
-      "synonyms": ["sample_size", "sample_volume", "sample_weight", "amount", "volume", "weight"]
+      "synonyms": ["sample_size", "sample_volume", "sample_weight",
+                   "amount_or_size_of_sample_collected", "sample size"]
     },
     {
       "standard_key": "samp_mat_process",
       "parser": "string_cleaner",
-      "synonyms": ["sample_processing", "processing_method", "treatment", "filtration",
-                   "enrichment", "pre_treatment", "extraction_method"]
+      "synonyms": ["sample_processing", "processing_method", "treatment",
+                   "filtration", "enrichment", "pre_treatment",
+                   "extraction_method", "sample material processing"]
     },
     {
       "standard_key": "temp",
       "parser": "string_cleaner",
-      "synonyms": ["temperature", "incubation_temperature", "growth_temperature",
-                   "storage_temperature", "collection_temperature"]
+      "synonyms": ["temperature", "incubation_temperature",
+                   "growth_temperature", "storage_temperature",
+                   "collection_temperature"]
     },
     {
       "standard_key": "ph",
       "parser": "string_cleaner",
-      "synonyms": ["pH_value", "acidity", "soil_ph", "water_ph"]
+      "synonyms": ["ph_value", "acidity", "soil_ph", "water_ph"]
     },
     {
       "standard_key": "depth",
@@ -162,6 +260,53 @@
       "standard_key": "elev",
       "parser": "string_cleaner",
       "synonyms": ["elevation", "altitude", "elevation_m", "altitude_m"]
+    },
+    {
+      "standard_key": "num_replicons",
+      "parser": "string_cleaner",
+      "synonyms": ["number of replicons"]
+    },
+    {
+      "standard_key": "ref_biomaterial",
+      "parser": "string_cleaner",
+      "synonyms": ["reference for biomaterial", "reference biomaterial"]
+    },
+    {
+      "standard_key": "propagation",
+      "parser": "string_cleaner",
+      "synonyms": []
+    },
+    {
+      "standard_key": "samp_collect_device",
+      "parser": "string_cleaner",
+      "synonyms": ["sample collection device or method",
+                   "sample collection device", "collection device"]
+    },
+    {
+      "standard_key": "samp_store_temp",
+      "parser": "string_cleaner",
+      "synonyms": ["sample storage temperature", "storage temperature"]
+    },
+    {
+      "standard_key": "source_material_id",
+      "parser": "string_cleaner",
+      "synonyms": ["source material identifiers", "source material id"]
+    },
+    {
+      "standard_key": "description",
+      "parser": "string_cleaner",
+      "synonyms": ["sample description"]
+    },
+    {
+      "standard_key": "ifsac_category",
+      "parser": "string_cleaner",
+      "synonyms": ["interagency food safety analytics collaboration (ifsac) category",
+                   "ifsac+ category"]
+    },
+    {
+      "standard_key": "food_origin",
+      "parser": "string_cleaner",
+      "synonyms": ["food origin", "food_product_origin"]
     }
   ]
 }
