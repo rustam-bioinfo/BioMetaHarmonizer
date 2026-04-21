@@ -151,10 +151,6 @@ def _run(args: argparse.Namespace) -> int:
         return 2
 
     logger.info("         fixed schema retained: %d columns.", len(df.columns))
-    if hasattr(mapper, "compliance_report") and not mapper.compliance_report.empty:
-        fail_rows = mapper.compliance_report[mapper.compliance_report["status"] == "FAIL"]
-        if not fail_rows.empty:
-            logger.warning("Mandatory field compliance FAILs:\n%s", fail_rows.to_string(index=False))
 
     if not args.skip_dates and "collection_date" in df.columns:
         logger.info("Step 3/5  Date parsing")
