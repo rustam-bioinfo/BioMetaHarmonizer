@@ -16,7 +16,6 @@ The NCBI BioSample database is the central repository for genomic metadata. Beca
 - Maps raw free-text attribute variants to standard keys using the **official NCBI BioSample `harmonized_name` XML attribute** as the primary signal, with a two-layer synonym lookup (unified.json + NCBI attribute table) as fallback
 - Any attribute that does not resolve to a known schema column is preserved losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
 - Parses dates (40+ formats → ISO 8601), resolves ISO-3166 country/region geography, and classifies isolation source into One Health categories (Human / Animal / Food / Environmental / Lab) — all in-place into the fixed schema columns
-- Validates mandatory field completeness per NCBI submission package
 - Writes harmonized output to CSV, TSV, Excel, or Parquet
 
 ## Installation
@@ -63,8 +62,8 @@ set_email("your@email.com")
 df = ingest("accessions.txt")
 
 # 2. Harmonize column names (for non-ingestion/custom workflows)
-#    In the fixed-schema pipeline this step only coalesces any duplicate
-#    columns and runs per-package mandatory field compliance reporting.
+#    Renames raw columns to standard keys, coalesces any duplicates,
+#    and reindexes to the fixed schema.
 mapper = KeyMapper()
 df = mapper.map_columns(df)
 
@@ -165,17 +164,14 @@ BioMetaHarmonizer/
 │   ├── cli.py                  # CLI entrypoint: biometaharmonizer run
 │   ├── ingestion.py            # Module 1: fixed schema, XML parsing, BioProject resolution
 │   ├── synonyms.py             # Shared two-layer synonym lookup (unified.json + NCBI XML)
-│   ├── key_mapper.py           # Module 2: column rename/coalesce + compliance reporting
+│   ├── key_mapper.py           # Module 2: column rename, coalesce, reindex to fixed schema
 │   ├── date_engine.py          # Module 3: temporal parsing (40+ formats → ISO 8601)
 │   ├── geo_engine.py           # Module 4: ISO-3166 geospatial resolution
 │   ├── one_health.py           # Module 5: One Health categorization (Tier 1 Regex)
 │   ├── output.py               # Module 6: write CSV / TSV / Excel / Parquet
 │   └── schemas/
-│       ├── ncbi_attributes.xml         # NCBI official harmonization table (Layer 2)
-│       ├── unified.json                # standard_key definitions + synonym lists (Layer 1)
-│       ├── mandatory_fields.json       # per-package required field lists (22 packages)
-│       ├── pathogen_cl_1.0.json        # legacy
-│       └── pathogen_env_1.0.json       # legacy
+│       ├── ncbi_attributes.xml         # NCBI official harmonization table (Layer 2, optional)
+│       └── unified.json                # standard_key definitions + synonym lists (Layer 1)
 ├── scripts/
 │   └── build_ncbi_attribute_cache.py   # optional: rebuild ncbi_attributes.xml from NCBI
 ├── tests/
@@ -197,8 +193,8 @@ BioMetaHarmonizer/
 | Module | File | Status | Notes |
 |---|---|---|---|
 | 1. Ingestion | `ingestion.py` | Complete | Fixed schema defined here; BioProject resolved via assembly index |
-| Synonym Lookup | `synonyms.py` | Complete | Single shared two-layer lookup used by ingestion + key_mapper |
-| 2. Key Harmonization | `key_mapper.py` | Complete | Rename/coalesce + compliance reporting; no columns dropped or added |
+| Synonym Lookup | `synonyms.py` | Complete | Single shared two-layer lookup used by ingestion + key_mapper; result cached per process |
+| 2. Key Harmonization | `key_mapper.py` | Complete | Rename raw columns to standard keys, coalesce duplicates, reindex to fixed schema |
 | 3. Temporal Parsing | `date_engine.py` | Complete | 40+ date formats, ISO 8601 output |
 | 4. Geospatial Resolution | `geo_engine.py` | Complete | ISO-3166 country, region, locality; assigned in-place |
 | 5. One Health Categorization | `one_health.py` | Complete | Human / Animal / Food / Environmental / Lab |
@@ -213,7 +209,7 @@ When parsing a live BioSample XML record, each `<Attribute>` element is resolved
 3. **Synonym lookup on `attribute_name`** — if `harmonized_name` is absent or unresolvable, the raw `attribute_name` is looked up in the synonym table.
 4. **`_extra_attributes`** — any attribute that cannot be resolved by any of the above is serialized as a JSON key-value pair into the `_extra_attributes` column. No data is discarded.
 
-The synonym table (`synonyms.py`) is built from two layers on startup:
+The synonym table (`synonyms.py`) is built from two layers on startup and cached for the lifetime of the process:
 
 - **Layer 1 — `unified.json`** — manually curated synonym lists for all standard keys
 - **Layer 2 — `ncbi_attributes.xml`** — the official NCBI BioSample harmonization table; loaded on top of Layer 1 and wins on any conflict
@@ -224,7 +220,7 @@ Both `ingestion.py` and `key_mapper.py` import the same `build_synonym_lookup()`
 
 `GeoEngine` accepts the standard NCBI `geo_loc_name` field and fills four in-schema columns:
 `geo_country`, `geo_region`, `geo_locality`, and `geo_iso3166` (ISO 3166-1 alpha-2 code).
-For coordinate-only inputs (e.g. `"40.71 N, 74.00 W"`), the raw value is preserved in `geo_loc_raw`.
+For coordinate-only inputs, the raw value is preserved in `geo_loc_raw`.
 
 Supported input formats:
 
@@ -234,8 +230,8 @@ Supported input formats:
 | `"USA: California"` | country=USA, region=California |
 | `"Germany, Bavaria"` | country=Germany, locality=Bavaria |
 | `"France"` | country=France |
-| `"Pacific Ocean"` | geo_sea_ocean=True, country columns left empty |
-| Decimal coordinates | preserved in `geo_loc_raw`, country columns left empty |
+| `"Pacific Ocean"` | geo_sea_ocean=Pacific Ocean, country columns left empty |
+| `"40.71 N, 74.00 W"` or `"40.7128, -74.0060"` | preserved in `geo_loc_raw`, country columns left empty |
 
 UK sub-country names (England, Scotland, Wales, Northern Ireland) are normalised to `"United Kingdom"` with ISO code `GB`. Ambiguous `"Korea"` defaults to South Korea (`KR`) with a warning logged.
 
