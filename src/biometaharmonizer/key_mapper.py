@@ -92,17 +92,15 @@ class KeyMapper:
         duped_keys = set(df.columns[df.columns.duplicated(keep=False)])
 
         for col in df.columns.unique():
-            if col in duped_keys:
-                block = df[col]
-                if isinstance(block, pd.Series):
-                    output_cols[col] = block
-                else:
-                    coalesced = block.iloc[:, 0].copy()
-                    for i in range(1, block.shape[1]):
-                        coalesced = coalesced.combine_first(block.iloc[:, i])
-                    output_cols[col] = coalesced
+            block = df[col]
+            if isinstance(block, pd.DataFrame):
+                # Multiple columns share this name: coalesce left-to-right.
+                coalesced = block.iloc[:, 0].copy()
+                for i in range(1, block.shape[1]):
+                    coalesced = coalesced.combine_first(block.iloc[:, i])
+                output_cols[col] = coalesced
             else:
-                output_cols[col] = df[col]
+                output_cols[col] = block
 
         logger.info("Coalesced duplicate columns: %s", sorted(duped_keys))
         return pd.DataFrame(output_cols, index=df.index)
