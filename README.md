@@ -95,58 +95,58 @@ Attributes that are not part of the fixed schema are preserved in `_extra_attrib
 string — including low-frequency NCBI attributes such as `antimicrobial_resistance`, `temp`, `ph`,
 `depth`, `elev`, `samp_size`, and `samp_mat_process`.
 
-| # | Column | Source |
-|---|--------|--------|
-| 1 | `biosample_accession` | BioSample XML structural field |
-| 2 | `biosample_id` | BioSample XML structural field |
-| 3 | `sra_accession` | BioSample XML structural field |
-| 4 | `bioproject_accession` | BioSample XML / assembly index |
-| 5 | `assembly_accession_refseq` | Assembly index (GCF_) |
-| 6 | `assembly_accession_genbank` | Assembly index (GCA_) |
-| 7 | `sample_name_id` | BioSample XML structural field |
-| 8 | `taxonomy_id` | BioSample XML structural field |
-| 9 | `taxonomy_name` | BioSample XML structural field |
-| 10 | `organism_name` | BioSample XML structural field |
-| 11 | `collection_date` | BioSample attribute → DateEngine |
-| 12 | `collection_date_range` | DateEngine output |
-| 13 | `geo_loc_name` | BioSample attribute |
-| 14 | `lat_lon` | BioSample attribute |
-| 15 | `geo_country` | GeoEngine output |
-| 16 | `geo_region` | GeoEngine output |
-| 17 | `geo_locality` | GeoEngine output |
-| 18 | `geo_iso3166` | GeoEngine output |
-| 19 | `geo_sea_ocean` | GeoEngine output |
-| 20 | `geo_loc_raw` | GeoEngine output (coordinate-only inputs) |
-| 21 | `host` | BioSample attribute → OneHealthClassifier |
-| 22 | `host_disease` | BioSample attribute |
-| 23 | `host_age` | BioSample attribute |
-| 24 | `host_sex` | BioSample attribute |
-| 25 | `host_tissue_sampled` | BioSample attribute |
-| 26 | `isolation_source` | BioSample attribute → OneHealthClassifier |
-| 27 | `one_health_category` | OneHealthClassifier output |
-| 28 | `isolate` | BioSample attribute |
-| 29 | `sub_strain` | BioSample attribute |
-| 30 | `serotype` | BioSample attribute |
-| 31 | `serovar` | BioSample attribute |
-| 32 | `genotype` | BioSample attribute |
-| 33 | `culture_collection` | BioSample attribute |
-| 34 | `outbreak` | BioSample attribute |
-| 35 | `env_broad_scale` | BioSample attribute |
-| 36 | `env_local_scale` | BioSample attribute |
-| 37 | `env_medium` | BioSample attribute |
-| 38 | `sequencing_method` | BioSample attribute |
-| 39 | `assembly_method` | BioSample attribute |
-| 40 | `collected_by` | BioSample attribute (explicit collector); falls back to `<Owner/Name>` only if absent |
-| 41 | `ncbi_package` | BioSample XML structural field |
-| 42 | `submission_date` | BioSample XML structural field |
-| 43 | `last_update` | BioSample XML structural field |
-| 44 | `publication_date` | BioSample XML structural field |
-| 45 | `access` | BioSample XML structural field |
-| 46 | `status` | BioSample XML structural field |
-| 47 | `status_date` | BioSample XML structural field |
-| 48 | `title` | BioSample XML structural field |
-| 49 | `description_comment` | BioSample XML structural field |
-| 50 | `_extra_attributes` | JSON dict of all unresolved submitter attributes |
+| # | Column | Source | Description |
+|---|--------|--------|-------------|
+| 1 | `biosample_accession` | BioSample XML structural field | NCBI BioSample accession (e.g. `SAMN07597573`) — primary record identifier |
+| 2 | `biosample_id` | BioSample XML structural field | NCBI internal numeric BioSample ID (e.g. `400804`) — differs from accession |
+| 3 | `sra_accession` | BioSample XML structural field | Linked SRA run/experiment accession (e.g. `SRS123456`), if deposited |
+| 4 | `bioproject_accession` | BioSample XML / assembly index | Parent BioProject accession (e.g. `PRJNA123456`); resolved from XML or assembly index |
+| 5 | `assembly_accession_refseq` | Assembly index (GCF_) | RefSeq assembly accession (e.g. `GCF_000001405.39`); resolved from NCBI assembly index |
+| 6 | `assembly_accession_genbank` | Assembly index (GCA_) | GenBank assembly accession (e.g. `GCA_000001405.29`); resolved from NCBI assembly index |
+| 7 | `sample_name_id` | BioSample XML structural field | Submitter-assigned sample name or lab ID (from `<Id db_label="Sample name">`) |
+| 8 | `taxonomy_id` | BioSample XML structural field | NCBI Taxonomy numeric ID (taxid) for the organism (e.g. `1396` for *Bacillus cereus*) |
+| 9 | `taxonomy_name` | BioSample XML structural field | Taxon name stored by NCBI for the assigned `taxonomy_id`; reflects the name of that specific taxid, which for strain-level entries may include strain designators (e.g. `Bacillus cereus NC7401`); use `taxonomy_id` for reliable grouping |
+| 10 | `organism_name` | BioSample XML structural field | Organism name as written by the submitter in `<OrganismName>`; may include strain designations or extra qualifiers; falls back to `taxonomy_name` if absent; generally noisier but sometimes more informative than `taxonomy_name` at species level |
+| 11 | `collection_date` | BioSample attribute → DateEngine | Normalized collection date in ISO 8601 format (YYYY, YYYY-MM, or YYYY-MM-DD) |
+| 12 | `collection_date_range` | DateEngine output | Inferred date range when the submitter provided a year or year-month (e.g. `2014-01-01/2014-12-31` for `2014`) |
+| 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted (e.g. `USA: IA`) |
+| 14 | `lat_lon` | BioSample attribute | Decimal latitude/longitude as submitted (e.g. `41.87 N 93.10 W`) |
+| 15 | `geo_country` | GeoEngine output | Standardized country name resolved from `geo_loc_name` |
+| 16 | `geo_region` | GeoEngine output | Sub-national region (state, province, oblast) resolved from `geo_loc_name` |
+| 17 | `geo_locality` | GeoEngine output | City or locality name resolved from `geo_loc_name` |
+| 18 | `geo_iso3166` | GeoEngine output | ISO 3166-1 alpha-2 country code (e.g. `US`, `DE`, `GB`) |
+| 19 | `geo_sea_ocean` | GeoEngine output | Sea or ocean name if `geo_loc_name` refers to a marine location (e.g. `Pacific Ocean`) |
+| 20 | `geo_loc_raw` | GeoEngine output | Preserved raw value when `geo_loc_name` contains coordinates only and no named place could be resolved |
+| 21 | `host` | BioSample attribute → OneHealthClassifier | Host organism name as submitted (e.g. `Homo sapiens`, `Zea mays`, `Gallus gallus`) |
+| 22 | `host_disease` | BioSample attribute | Disease associated with the host at time of sampling |
+| 23 | `host_age` | BioSample attribute | Age of the host at time of sampling |
+| 24 | `host_sex` | BioSample attribute | Biological sex of the host |
+| 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site from which the sample was taken |
+| 26 | `isolation_source` | BioSample attribute → OneHealthClassifier | Free-text description of the material or environment from which the isolate was obtained |
+| 27 | `one_health_category` | OneHealthClassifier output | One Health classification inferred from `isolation_source` and `host`: Human, Animal, Food, Environmental, or Lab |
+| 28 | `isolate` | BioSample attribute | Isolate identifier or name assigned by the submitter |
+| 29 | `sub_strain` | BioSample attribute | Sub-strain designation, if applicable |
+| 30 | `serotype` | BioSample attribute | Serotype designation (e.g. `O157:H7`) |
+| 31 | `serovar` | BioSample attribute | Serovar designation, used primarily for *Salmonella* and similar organisms |
+| 32 | `genotype` | BioSample attribute | Genotype or sequence type designation (e.g. ST11, cgST) |
+| 33 | `culture_collection` | BioSample attribute | Culture collection identifier (e.g. `ATCC 14579`) |
+| 34 | `outbreak` | BioSample attribute | Outbreak identifier or name associated with the isolate, if any |
+| 35 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO term), used mainly for environmental/metagenomics samples |
+| 36 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO term) |
+| 37 | `env_medium` | BioSample attribute | Environmental medium from which the sample was taken (ENVO term, e.g. soil, water) |
+| 38 | `sequencing_method` | BioSample attribute | Sequencing platform or technology (e.g. `Illumina HiSeq`, `Oxford Nanopore`) |
+| 39 | `assembly_method` | BioSample attribute | Genome assembly software and version (e.g. `SPAdes 3.15`) |
+| 40 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Person or organization that physically collected the sample; explicit BioSample attribute is always preferred over submission owner |
+| 41 | `ncbi_package` | BioSample XML structural field | NCBI BioSample package name defining the required attribute set (e.g. `Microbe.1.0`) |
+| 42 | `submission_date` | BioSample XML structural field | Date the BioSample record was first submitted to NCBI |
+| 43 | `last_update` | BioSample XML structural field | Date the BioSample record was last modified |
+| 44 | `publication_date` | BioSample XML structural field | Date the BioSample record was made publicly available |
+| 45 | `access` | BioSample XML structural field | Access level of the record (`public` or `controlled-access`) |
+| 46 | `status` | BioSample XML structural field | Current record status (e.g. `live`, `suppressed`) |
+| 47 | `status_date` | BioSample XML structural field | Date the current status was assigned |
+| 48 | `title` | BioSample XML structural field | Free-text title of the BioSample record as submitted |
+| 49 | `description_comment` | BioSample XML structural field | Free-text description or comment block from the BioSample record |
+| 50 | `_extra_attributes` | JSON dict of all unresolved submitter attributes | All attributes that could not be mapped to a schema column, serialized as JSON; also contains `submission_owner` and `submission_contact` when both an explicit collector and an `<Owner>` block are present |
 
 Columns that have no data for a given dataset are present but filled with `NaN`. No columns are ever added, dropped, or reordered at runtime.
 
