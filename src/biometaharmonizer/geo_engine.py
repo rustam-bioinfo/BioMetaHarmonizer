@@ -22,31 +22,28 @@ class GeoEngine:
     geo_country   : normalised country display name (str or NaN)
     geo_region    : sub-national region as submitted (str or NaN)
     geo_locality  : locality / sub-region as submitted (str or NaN)
-    geo_iso3166   : ISO 3166-1 alpha-2 country code (str or NaN)
+    geo_iso3166   : ISO 3166-1 alpha-2 country code (str or 'HISTORICAL' or NaN)
     geo_sea_ocean : ocean/sea name for marine samples (str or NaN)
     geo_loc_raw   : original submitted string, present only when the value
                     could not be fully parsed (coordinate-only entries).
                     For all successfully parsed country entries this field
                     is NaN; the original value is always available in the
                     source geo_loc_name column.
-
-    Note on geo_loc_raw:
-      This column is intentionally restricted to coordinate-only and
-      genuinely unparseable entries.  For normal country/region/locality
-      strings the raw value is NOT duplicated here because geo_loc_name
-      already holds it.  Populating geo_loc_raw for every row would triple-
-      store the same string alongside geo_loc_name and this column.
-
-    Note on coordinate-only entries:
-      Records whose geo_loc_name contains only lat/lon coordinates (e.g.
-      '40.71 N, 74.00 W') cannot be split into country/region/locality.
-      They are stored in geo_loc_raw for downstream reverse-geocoding.
-      geo_country and related fields are left NaN for these rows.
     """
 
     NULL_PATTERNS = re.compile(
-        r"^(missing|unknown|n/?a|not provided|not collected|not applicable|na|none|--)$",
-        re.IGNORECASE
+        r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
+        r"missing|misssing|missng|mising|"
+        r"unknown|unkown|unknwon|unknow|"
+        r"not\s+provided|not\s+collected|not\s+applicable|not\s+available|"
+        r"not\s+determined|not\s+recorded|not\s+reported|not\s+known|"
+        r"not\s+given|not\s+stated|not\s+specified|"
+        r"not\s+done|not\s+tested|not\s+sequenced|not\s+typed|"
+        r"unavailable|unspecified|undetermined|unidentified|"
+        r"restricted|restricted\s+access|withheld|confidential|"
+        r"tbd|tba|"
+        r"missing\s*:.*|not\s+applicable\s*:.*|data\s+agreement\s+established\s+pre-?2023)$",
+        re.IGNORECASE,
     )
 
     _UK_SUBCOUNTRY = {
@@ -54,6 +51,43 @@ class GeoEngine:
         "scotland": "GB",
         "wales": "GB",
         "northern ireland": "GB",
+    }
+
+    _COUNTRY_ALIASES = {
+        "turkey": "TR",
+        "türkiye": "TR",
+        "namibia": "NA",
+        "democratic republic of the congo": "CD",
+        "dr congo": "CD",
+        "drc": "CD",
+        "congo-kinshasa": "CD",
+        "burma": "MM",
+        "myanmar (burma)": "MM",
+    }
+
+    _HISTORICAL_COUNTRIES = {
+        "ussr",
+        "soviet union",
+        "union of soviet socialist republics",
+        "yugoslavia",
+        "sfr yugoslavia",
+        "socialist federal republic of yugoslavia",
+        "czechoslovakia",
+        "cssr",
+        "czechoslovakia",
+        "german democratic republic",
+        "east germany",
+        "west germany",
+        "federal republic of germany",
+        "north vietnam",
+        "south vietnam",
+        "north yemen",
+        "south yemen",
+        "zaire",
+        "byelorussia",
+        "byelorussian ssr",
+        "serbia and montenegro",
+        "netherlands antilles",
     }
 
     _OCEAN_SEA = {
@@ -64,11 +98,6 @@ class GeoEngine:
         "arabian sea", "coral sea", "tasman sea",
     }
 
-    # Matches coordinate-only strings in all common NCBI formats:
-    #   '40.71 N, 74.00 W'   (compass letters)
-    #   '40.7128, -74.0060'  (signed decimals, no compass)
-    #   '-33.87, 151.21'     (both signed)
-    #   '40.71N 74.00W'      (no comma separator)
     _COORD_RE = re.compile(
         r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
     )
@@ -85,12 +114,11 @@ class GeoEngine:
         }
         if pd.isna(value):
             return empty
+
         value = str(value).strip()
         if self.NULL_PATTERNS.match(value):
             return empty
 
-        # Coordinate-only: store raw for downstream reverse-geocoding;
-        # do NOT populate country/region fields.
         if self._COORD_RE.match(value):
             result = dict(empty)
             result["geo_loc_raw"] = value
@@ -98,13 +126,13 @@ class GeoEngine:
 
         country_str, region_str, locality_str = self._split_geo_string(value)
 
-        # Ocean/sea detection (check the country part)
         if country_str.lower() in self._OCEAN_SEA:
             result = dict(empty)
             result["geo_sea_ocean"] = country_str
+            if region_str:
+                result["geo_locality"] = region_str if not locality_str else f"{region_str}, {locality_str}"
             return result
 
-        # UK sub-country: normalise display name
         lower_country = country_str.lower().strip()
         if lower_country in self._UK_SUBCOUNTRY:
             display_country = "United Kingdom"
@@ -113,8 +141,6 @@ class GeoEngine:
 
         iso_code = self._resolve_iso(country_str)
 
-        # geo_loc_raw is NaN for successfully parsed entries; the original
-        # value is preserved in the source geo_loc_name column.
         return {
             "geo_country": display_country if country_str else np.nan,
             "geo_region": region_str if region_str else np.nan,
@@ -125,17 +151,6 @@ class GeoEngine:
         }
 
     def _split_geo_string(self, value):
-        """
-        Split an NCBI geo_loc_name string into (country, region, locality).
-
-        Parsing rules (in order):
-          1. 'Country: Region, Locality'  -> colon separates country; comma
-             separates region and locality within the remainder.
-          2. 'Country: Region'            -> colon present, no comma.
-          3. 'Country, Locality'          -> no colon; comma separates country
-             and locality (region left empty).
-          4. 'Country'                    -> no colon, no comma.
-        """
         country_str = region_str = locality_str = ""
         if ":" in value:
             parts = value.split(":", 1)
@@ -174,6 +189,16 @@ class GeoEngine:
 
         if lower in ("taiwan", "taiwan, province of china"):
             return "TW"
+
+        if lower in self._COUNTRY_ALIASES:
+            return self._COUNTRY_ALIASES[lower]
+
+        if lower in self._HISTORICAL_COUNTRIES:
+            logger.warning(
+                "Historical/defunct country name '%s' detected -- tagging geo_iso3166 as HISTORICAL.",
+                country_str,
+            )
+            return "HISTORICAL"
 
         if len(lower) < 3:
             logger.warning(
