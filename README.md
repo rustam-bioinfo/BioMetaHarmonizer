@@ -1,6 +1,6 @@
 # BioMetaHarmonizer
 
-[![version](https://img.shields.io/badge/version-0.4.0-blue)](#)
+[![version](https://img.shields.io/badge/version-0.5.0-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
 
@@ -14,7 +14,7 @@ The NCBI BioSample database is the central repository for genomic metadata. Beca
 - Resolves BioProject and assembly accessions (GCF_ / GCA_) from NCBI assembly summary flat files
 - Produces a **fixed, deterministic output schema** — every run on any dataset outputs the same columns in the same order, regardless of what attributes individual submitters included
 - Maps raw free-text attribute variants to standard keys using the **official NCBI BioSample `harmonized_name` XML attribute** as the primary signal, with a two-layer synonym lookup (unified.json + NCBI attribute table) as fallback
-- Any attribute that does not resolve to a known schema column is preserved losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
+- Any attribute that does not resolve to a known final output column is preserved losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
 - Parses dates (40+ formats → ISO 8601), resolves ISO-3166 country/region geography, and classifies isolation source into One Health categories (Human / Animal / Food / Environmental / Lab) — all in-place into the fixed schema columns
 - Writes harmonized output to CSV, TSV, Excel, or Parquet
 
@@ -136,7 +136,7 @@ string — including low-frequency NCBI attributes such as `antimicrobial_resist
 | 37 | `env_medium` | BioSample attribute |
 | 38 | `sequencing_method` | BioSample attribute |
 | 39 | `assembly_method` | BioSample attribute |
-| 40 | `collected_by` | BioSample attribute |
+| 40 | `collected_by` | BioSample attribute (explicit collector); falls back to `<Owner/Name>` only if absent |
 | 41 | `ncbi_package` | BioSample XML structural field |
 | 42 | `submission_date` | BioSample XML structural field |
 | 43 | `last_update` | BioSample XML structural field |
@@ -155,7 +155,7 @@ Columns that have no data for a given dataset are present but filled with `NaN`.
 ```
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
-│   ├── __init__.py             # version 0.4.0, full public API
+│   ├── __init__.py             # version 0.5.0, full public API
 │   ├── cli.py                  # CLI entrypoint: biometaharmonizer run
 │   ├── ingestion.py            # Module 1: fixed schema, XML parsing, BioProject resolution
 │   ├── synonyms.py             # Shared two-layer synonym lookup (unified.json + NCBI XML)
@@ -210,6 +210,22 @@ The synonym table (`synonyms.py`) is built from two layers on startup and cached
 - **Layer 2 — `ncbi_attributes.xml`** — the official NCBI BioSample harmonization table; loaded on top of Layer 1 and wins on any conflict
 
 Both `ingestion.py` and `key_mapper.py` import the same `build_synonym_lookup()` function, so the mapping is always identical across both modules.
+
+## `collected_by` Priority and Submission Provenance
+
+The `collected_by` column is populated with strict priority:
+
+1. **Explicit BioSample attribute** — any `<Attribute harmonized_name="collected_by">` or synonym thereof is the authoritative source and is always preferred.
+2. **`<Owner/Name>` fallback** — the submitting institution name from the XML `<Owner>` block is used **only** if no explicit collector attribute was found.
+
+When both are present (e.g. `collected_by = AgBiome` in attributes and `<Owner/Name> = UNC Chapel Hill` in the submission block), the submission-side provenance is preserved losslessly in `_extra_attributes` rather than overwriting the biological collector:
+
+| `_extra_attributes` key | Content |
+|---|---|
+| `submission_owner` | `<Owner/Name>` value (e.g. `UNC Chapel Hill`) |
+| `submission_contact` | Full name from `<Owner/Contacts/Contact>` (e.g. `Rachel Marie Bleich`) |
+
+This ensures that `collected_by` always reflects who physically collected the sample, while institutional and submitter provenance remains accessible without polluting the primary schema columns.
 
 ## Geospatial Parsing
 
