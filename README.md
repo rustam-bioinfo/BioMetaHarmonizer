@@ -11,7 +11,7 @@ A universal Python package for harmonizing, parsing, and standardizing NCBI BioS
 The NCBI BioSample database is the central repository for genomic metadata. Because submissions are predominantly free-text and crowd-sourced, the metadata is highly unstructured across thousands of submitters. **BioMetaHarmonizer** resolves this by providing a lightweight, pip-installable pipeline that:
 
 - Fetches BioSample XML records directly from NCBI Entrez for any list of BioSample or assembly accessions
-- Resolves BioProject accessions from NCBI assembly summary flat files
+- Resolves BioProject and assembly accessions (GCF_ / GCA_) from NCBI assembly summary flat files
 - Produces a **fixed, deterministic output schema** — every run on any dataset outputs the same columns in the same order, regardless of what attributes individual submitters included
 - Maps raw free-text attribute variants to standard keys using the **official NCBI BioSample `harmonized_name` XML attribute** as the primary signal, with a two-layer synonym lookup (unified.json + NCBI attribute table) as fallback
 - Any attribute that does not resolve to a known schema column is preserved losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
@@ -93,7 +93,10 @@ print(df.shape)   # (N_records, fixed number of columns — always identical)
 
 ## Output Schema
 
-Every output file contains exactly the following columns, in this order, regardless of dataset:
+Every output file contains exactly the following columns, in this order, regardless of dataset.
+Attributes that are not part of the fixed schema are preserved in `_extra_attributes` as a JSON
+string — including low-frequency NCBI attributes such as `antimicrobial_resistance`, `temp`, `ph`,
+`depth`, `elev`, `samp_size`, and `samp_mat_process`.
 
 | # | Column | Source |
 |---|--------|--------|
@@ -101,57 +104,52 @@ Every output file contains exactly the following columns, in this order, regardl
 | 2 | `biosample_id` | BioSample XML structural field |
 | 3 | `sra_accession` | BioSample XML structural field |
 | 4 | `bioproject_accession` | BioSample XML / assembly index |
-| 5 | `sample_name_id` | BioSample XML structural field |
-| 6 | `submission_date` | BioSample XML structural field |
-| 7 | `last_update` | BioSample XML structural field |
-| 8 | `publication_date` | BioSample XML structural field |
-| 9 | `access` | BioSample XML structural field |
-| 10 | `status` | BioSample XML structural field |
-| 11 | `status_date` | BioSample XML structural field |
-| 12 | `title` | BioSample XML structural field |
-| 13 | `description_comment` | BioSample XML structural field |
-| 14 | `ncbi_package` | BioSample XML structural field |
-| 15 | `taxonomy_id` | BioSample XML structural field |
-| 16 | `taxonomy_name` | BioSample XML structural field |
-| 17 | `organism_name` | BioSample XML structural field |
-| 18 | `collection_date` | BioSample attribute → DateEngine |
-| 19 | `geo_loc_name` | BioSample attribute |
-| 20 | `lat_lon` | BioSample attribute |
+| 5 | `assembly_accession_refseq` | Assembly index (GCF_) |
+| 6 | `assembly_accession_genbank` | Assembly index (GCA_) |
+| 7 | `sample_name_id` | BioSample XML structural field |
+| 8 | `taxonomy_id` | BioSample XML structural field |
+| 9 | `taxonomy_name` | BioSample XML structural field |
+| 10 | `organism_name` | BioSample XML structural field |
+| 11 | `collection_date` | BioSample attribute → DateEngine |
+| 12 | `collection_date_range` | DateEngine output |
+| 13 | `geo_loc_name` | BioSample attribute |
+| 14 | `lat_lon` | BioSample attribute |
+| 15 | `geo_country` | GeoEngine output |
+| 16 | `geo_region` | GeoEngine output |
+| 17 | `geo_locality` | GeoEngine output |
+| 18 | `geo_iso3166` | GeoEngine output |
+| 19 | `geo_sea_ocean` | GeoEngine output |
+| 20 | `geo_loc_raw` | GeoEngine output (coordinate-only inputs) |
 | 21 | `host` | BioSample attribute → OneHealthClassifier |
-| 22 | `isolation_source` | BioSample attribute → OneHealthClassifier |
-| 23 | `env_broad_scale` | BioSample attribute |
-| 24 | `env_local_scale` | BioSample attribute |
-| 25 | `env_medium` | BioSample attribute |
-| 26 | `host_disease` | BioSample attribute |
-| 27 | `isolate` | BioSample attribute |
-| 28 | `sub_strain` | BioSample attribute |
-| 29 | `serotype` | BioSample attribute |
-| 30 | `serovar` | BioSample attribute |
-| 31 | `host_age` | BioSample attribute |
-| 32 | `host_sex` | BioSample attribute |
-| 33 | `host_tissue_sampled` | BioSample attribute |
-| 34 | `genotype` | BioSample attribute |
-| 35 | `antimicrobial_resistance` | BioSample attribute |
-| 36 | `outbreak` | BioSample attribute |
-| 37 | `collected_by` | BioSample attribute |
+| 22 | `host_disease` | BioSample attribute |
+| 23 | `host_age` | BioSample attribute |
+| 24 | `host_sex` | BioSample attribute |
+| 25 | `host_tissue_sampled` | BioSample attribute |
+| 26 | `isolation_source` | BioSample attribute → OneHealthClassifier |
+| 27 | `one_health_category` | OneHealthClassifier output |
+| 28 | `isolate` | BioSample attribute |
+| 29 | `sub_strain` | BioSample attribute |
+| 30 | `serotype` | BioSample attribute |
+| 31 | `serovar` | BioSample attribute |
+| 32 | `genotype` | BioSample attribute |
+| 33 | `culture_collection` | BioSample attribute |
+| 34 | `outbreak` | BioSample attribute |
+| 35 | `env_broad_scale` | BioSample attribute |
+| 36 | `env_local_scale` | BioSample attribute |
+| 37 | `env_medium` | BioSample attribute |
 | 38 | `sequencing_method` | BioSample attribute |
 | 39 | `assembly_method` | BioSample attribute |
-| 40 | `culture_collection` | BioSample attribute |
-| 41 | `samp_size` | BioSample attribute |
-| 42 | `samp_mat_process` | BioSample attribute |
-| 43 | `temp` | BioSample attribute |
-| 44 | `ph` | BioSample attribute |
-| 45 | `depth` | BioSample attribute |
-| 46 | `elev` | BioSample attribute |
-| 47 | `collection_date_range` | DateEngine output |
-| 48 | `geo_country` | GeoEngine output |
-| 49 | `geo_region` | GeoEngine output |
-| 50 | `geo_locality` | GeoEngine output |
-| 51 | `geo_iso3166` | GeoEngine output |
-| 52 | `geo_sea_ocean` | GeoEngine output |
-| 53 | `geo_loc_raw` | GeoEngine output (coordinate-only inputs) |
-| 54 | `one_health_category` | OneHealthClassifier output |
-| 55 | `_extra_attributes` | JSON dict of all unresolved submitter attributes |
+| 40 | `collected_by` | BioSample attribute |
+| 41 | `ncbi_package` | BioSample XML structural field |
+| 42 | `submission_date` | BioSample XML structural field |
+| 43 | `last_update` | BioSample XML structural field |
+| 44 | `publication_date` | BioSample XML structural field |
+| 45 | `access` | BioSample XML structural field |
+| 46 | `status` | BioSample XML structural field |
+| 47 | `status_date` | BioSample XML structural field |
+| 48 | `title` | BioSample XML structural field |
+| 49 | `description_comment` | BioSample XML structural field |
+| 50 | `_extra_attributes` | JSON dict of all unresolved submitter attributes |
 
 Columns that have no data for a given dataset are present but filled with `NaN`. No columns are ever added, dropped, or reordered at runtime.
 
@@ -192,7 +190,7 @@ BioMetaHarmonizer/
 
 | Module | File | Status | Notes |
 |---|---|---|---|
-| 1. Ingestion | `ingestion.py` | Complete | Fixed schema defined here; BioProject resolved via assembly index |
+| 1. Ingestion | `ingestion.py` | Complete | Fixed schema defined here; BioProject and assembly accessions resolved via assembly index |
 | Synonym Lookup | `synonyms.py` | Complete | Single shared two-layer lookup used by ingestion + key_mapper; result cached per process |
 | 2. Key Harmonization | `key_mapper.py` | Complete | Rename raw columns to standard keys, coalesce duplicates, reindex to fixed schema |
 | 3. Temporal Parsing | `date_engine.py` | Complete | 40+ date formats, ISO 8601 output |
@@ -205,7 +203,7 @@ BioMetaHarmonizer/
 When parsing a live BioSample XML record, each `<Attribute>` element is resolved in the following priority order:
 
 1. **NCBI `harmonized_name` (authoritative)** — if the `harmonized_name` attribute in the XML element matches a known final output column directly, it is used without any synonym lookup. This is the signal NCBI itself assigns and is the most reliable mapping available.
-2. **Synonym lookup on `harmonized_name`** — if the `harmonized_name` is not a direct schema column but appears in the unified synonym table, the resolved standard key is used.
+2. **Synonym lookup on `harmonized_name`** — if the `harmonized_name` is not a direct schema column but appears in the unified synonym table, the resolved standard key is used. If the resolved key is not in the fixed schema, the normalized key name is stored in `_extra_attributes` (not the raw alias).
 3. **Synonym lookup on `attribute_name`** — if `harmonized_name` is absent or unresolvable, the raw `attribute_name` is looked up in the synonym table.
 4. **`_extra_attributes`** — any attribute that cannot be resolved by any of the above is serialized as a JSON key-value pair into the `_extra_attributes` column. No data is discarded.
 
