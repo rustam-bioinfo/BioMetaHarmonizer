@@ -124,30 +124,32 @@ string — including low-frequency NCBI attributes such as `antimicrobial_resist
 | 24 | `host_sex` | BioSample attribute | Biological sex of the host |
 | 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site from which the sample was taken |
 | 26 | `isolation_source` | BioSample attribute → OneHealthClassifier | Free-text description of the material or environment from which the isolate was obtained |
-| 27 | `one_health_category` | OneHealthClassifier output | One Health classification inferred from `isolation_source` and `host`: Human, Animal, Food, Environmental, or Lab |
-| 28 | `isolate` | BioSample attribute | Isolate identifier or name assigned by the submitter |
-| 29 | `sub_strain` | BioSample attribute | Sub-strain designation, if applicable |
-| 30 | `serotype` | BioSample attribute | Serotype designation (e.g. `O157:H7`) |
-| 31 | `serovar` | BioSample attribute | Serovar designation, used primarily for *Salmonella* and similar organisms |
-| 32 | `genotype` | BioSample attribute | Genotype or sequence type designation (e.g. ST11, cgST) |
-| 33 | `culture_collection` | BioSample attribute | Culture collection identifier (e.g. `ATCC 14579`) |
-| 34 | `outbreak` | BioSample attribute | Outbreak identifier or name associated with the isolate, if any |
-| 35 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO term), used mainly for environmental/metagenomics samples |
-| 36 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO term) |
-| 37 | `env_medium` | BioSample attribute | Environmental medium from which the sample was taken (ENVO term, e.g. soil, water) |
-| 38 | `sequencing_method` | BioSample attribute | Sequencing platform or technology (e.g. `Illumina HiSeq`, `Oxford Nanopore`) |
-| 39 | `assembly_method` | BioSample attribute | Genome assembly software and version (e.g. `SPAdes 3.15`) |
-| 40 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Person or organization that physically collected the sample; explicit BioSample attribute is always preferred over submission owner |
-| 41 | `ncbi_package` | BioSample XML structural field | NCBI BioSample package name defining the required attribute set (e.g. `Microbe.1.0`) |
-| 42 | `submission_date` | BioSample XML structural field | Date the BioSample record was first submitted to NCBI |
-| 43 | `last_update` | BioSample XML structural field | Date the BioSample record was last modified |
-| 44 | `publication_date` | BioSample XML structural field | Date the BioSample record was made publicly available |
-| 45 | `access` | BioSample XML structural field | Access level of the record (`public` or `controlled-access`) |
-| 46 | `status` | BioSample XML structural field | Current record status (e.g. `live`, `suppressed`) |
-| 47 | `status_date` | BioSample XML structural field | Date the current status was assigned |
-| 48 | `title` | BioSample XML structural field | Free-text title of the BioSample record as submitted |
-| 49 | `description_comment` | BioSample XML structural field | Free-text description or comment block from the BioSample record |
-| 50 | `_extra_attributes` | JSON dict of all unresolved submitter attributes | All attributes that could not be mapped to a schema column, serialized as JSON; also contains `submission_owner` and `submission_contact` when both an explicit collector and an `<Owner>` block are present |
+| 27 | `sample_type` | BioSample attribute | Sample type or specimen classification as submitted |
+| 28 | `one_health_category` | OneHealthClassifier output | One Health classification inferred from `isolation_source` and `host`: Human, Animal, Food, Environmental, or Lab |
+| 29 | `isolate` | BioSample attribute | Isolate identifier or name assigned by the submitter |
+| 30 | `strain` | BioSample attribute | Microbial strain designation as submitted (e.g. `ATCC 14579`, `H37Rv`) |
+| 31 | `sub_strain` | BioSample attribute | Sub-strain designation, if applicable |
+| 32 | `serotype` | BioSample attribute | Serotype designation (e.g. `O157:H7`) |
+| 33 | `serovar` | BioSample attribute | Serovar designation, used primarily for *Salmonella* and similar organisms |
+| 34 | `genotype` | BioSample attribute | Genotype or sequence type designation (e.g. ST11, cgST) |
+| 35 | `culture_collection` | BioSample attribute | Culture collection identifier (e.g. `ATCC 14579`) |
+| 36 | `outbreak` | BioSample attribute | Outbreak identifier or name associated with the isolate, if any |
+| 37 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO term), used mainly for environmental/metagenomics samples |
+| 38 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO term) |
+| 39 | `env_medium` | BioSample attribute | Environmental medium from which the sample was taken (ENVO term, e.g. soil, water) |
+| 40 | `sequencing_method` | BioSample attribute | Sequencing platform or technology (e.g. `Illumina HiSeq`, `Oxford Nanopore`) |
+| 41 | `assembly_method` | BioSample attribute | Genome assembly software and version (e.g. `SPAdes 3.15`) |
+| 42 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Person or organization that physically collected the sample; explicit BioSample attribute is always preferred over submission owner |
+| 43 | `ncbi_package` | BioSample XML structural field | NCBI BioSample package name defining the required attribute set (e.g. `Microbe.1.0`) |
+| 44 | `submission_date` | BioSample XML structural field | Date the BioSample record was first submitted to NCBI |
+| 45 | `last_update` | BioSample XML structural field | Date the BioSample record was last modified |
+| 46 | `publication_date` | BioSample XML structural field | Date the BioSample record was made publicly available |
+| 47 | `access` | BioSample XML structural field | Access level of the record (`public` or `controlled-access`) |
+| 48 | `status` | BioSample XML structural field | Current record status (e.g. `live`, `suppressed`) |
+| 49 | `status_date` | BioSample XML structural field | Date the current status was assigned |
+| 50 | `title` | BioSample XML structural field | Free-text title of the BioSample record as submitted |
+| 51 | `description_comment` | BioSample XML structural field | Free-text description or comment block from the BioSample record |
+| 52 | `_extra_attributes` | JSON dict of all unresolved submitter attributes | All attributes that could not be mapped to a schema column, serialized as JSON; also contains `submission_owner` and `submission_contact` when both an explicit collector and an `<Owner>` block are present |
 
 Columns that have no data for a given dataset are present but filled with `NaN`. No columns are ever added, dropped, or reordered at runtime.
 
