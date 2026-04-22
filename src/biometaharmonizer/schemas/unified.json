@@ -218,7 +218,7 @@
       "standard_key": "sequencing_method",
       "parser": "string_cleaner",
       "synonyms": ["sequencing_technology", "platform", "seq_method",
-                   "instrument", "sequencer"]
+                   "instrument", "sequencer", "sequencing method", "platform_model"]
     },
     {
       "standard_key": "assembly_method",

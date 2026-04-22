@@ -123,6 +123,7 @@ def _load_final_schema() -> list:
         "sample_type",
         "one_health_category",
         "isolate",
+        "strain",
         "sub_strain",
         "serotype",
         "serovar",
