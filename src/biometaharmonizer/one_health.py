@@ -56,7 +56,8 @@ class OneHealthClassifier:
                setting / processing <- all fields
       Pass 2 - resolve using term sets loaded from JSON:
                domain_category wins over specimen-only match
-               ambiguous terms without domain -> Unclassified
+               ambiguous terms checked against ambiguous_category_terms for
+               context-aware tiebreaking; without domain -> Unclassified
 
     Field priority:
       isolation_source > host > env_medium > env_local_scale > env_broad_scale > sample_type
@@ -67,7 +68,7 @@ class OneHealthClassifier:
     Public API
     ----------
     classify(series)                 -> pd.Series  (legacy)
-    classify_joint(iso, host)        -> pd.Series  (legacy)
+    classify_joint(iso, host)        -> pd.Series  (legacy, delegates to classify_multi_field)
     classify_with_confidence(series) -> pd.DataFrame 3 cols (legacy)
     classify_multi_field(**fields)   -> pd.DataFrame 6 cols (extended)
     """
@@ -118,6 +119,15 @@ class OneHealthClassifier:
         self._unambiguous_animal = {
             t.lower() for t in self._dicts.get("unambiguous_animal_terms", [])
         }
+
+        # ambiguous_category_terms: term -> [list of conflicting categories]
+        # produced by _resolve_collisions() in build_dictionaries.py
+        self._ambiguous_category_terms = {
+            k.lower(): v
+            for k, v in self._dicts.get("ambiguous_category_terms", {}).items()
+        }
+        # flat set for fast membership check
+        self._ambiguous_category_set = set(self._ambiguous_category_terms.keys())
 
         inst_patterns = self._dicts.get("institution_patterns", [])
         coll_prefixes = self._dicts.get("culture_collection_prefixes", [])
@@ -173,7 +183,11 @@ class OneHealthClassifier:
             self._fuzzy_labels = []
             for category, terms in ont_map.items():
                 for term in terms:
-                    self._fuzzy_corpus.append(term.lower())
+                    term_lower = term.lower()
+                    # exclude terms that are cross-category ambiguous
+                    if term_lower in self._ambiguous_category_set:
+                        continue
+                    self._fuzzy_corpus.append(term_lower)
                     self._fuzzy_labels.append(category)
         else:
             self._fuzzy_corpus = []
@@ -191,15 +205,16 @@ class OneHealthClassifier:
         return self._classify_text(value)["one_health_category"]
 
     def classify_joint(self, isolation_source_series, host_series):
+        """Legacy two-field classification. Delegates to classify_multi_field."""
         if not isolation_source_series.index.equals(host_series.index):
             raise ValueError(
                 "classify_joint: series must share the same index."
             )
-        result = self.classify(isolation_source_series).copy()
-        fallback_mask = result == "Unclassified"
-        if fallback_mask.any():
-            result.loc[fallback_mask] = self.classify(host_series.loc[fallback_mask])
-        return result
+        df = self.classify_multi_field(
+            isolation_source=isolation_source_series,
+            host=host_series,
+        )
+        return df["one_health_category"]
 
     def classify_with_confidence(self, series):
         rows = series.apply(self._classify_text).tolist()
@@ -262,6 +277,9 @@ class OneHealthClassifier:
         specimen_term = None
         specimen_field = None
         specimen_confidence = 0.0
+        # term that matched in isolation_source/specimen field — kept for
+        # evidence reporting even when domain drives the final category
+        evidence_term = None
 
         for field in self._FIELD_PRIORITY:
             val = getattr(row, field, None)
@@ -283,13 +301,23 @@ class OneHealthClassifier:
             if cat is None or cat == "Unclassified":
                 continue
 
+            term_lower = str(layer.get("one_health_term") or val_str).lower()
+
             if field == "host":
                 host_cat = self._host_to_category.get(val_str.lower())
                 if host_cat:
+                    # direct host lookup — unambiguous by definition
                     if domain_category is None:
                         domain_category = host_cat
                         domain_term = val_str
                         domain_field = field
+                    continue
+                # host string classified via text layers — check ambiguity
+                # before promoting to domain signal
+                if term_lower in self._ambiguous_category_set:
+                    # treat as ambiguous specimen, not a reliable domain signal
+                    if evidence_term is None:
+                        evidence_term = term_lower
                     continue
                 if domain_category is None:
                     domain_category = cat
@@ -298,17 +326,29 @@ class OneHealthClassifier:
                 continue
 
             if field in self._DOMAIN_FIELDS:
+                if term_lower in self._ambiguous_category_set:
+                    if evidence_term is None:
+                        evidence_term = term_lower
+                    continue
                 if domain_category is None:
                     domain_category = cat
                     domain_term = layer["one_health_term"]
                     domain_field = field
                 continue
 
-            term_lower = str(layer.get("one_health_term") or "").lower()
-            if term_lower in self._ambiguous_terms:
+            # specimen field
+            if term_lower in self._ambiguous_category_set:
+                # cross-category ambiguous term: record as evidence but do not
+                # assign a category — needs domain context to resolve
+                if evidence_term is None:
+                    evidence_term = term_lower
+                    specimen_field = field
+                    specimen_confidence = 0.3
+            elif term_lower in self._ambiguous_terms:
                 if specimen_term is None:
                     specimen_term = term_lower
                     specimen_field = field
+                    specimen_confidence = 0.3
             elif term_lower in self._unambiguous_human:
                 if specimen_category is None:
                     specimen_category = "Human"
@@ -324,25 +364,31 @@ class OneHealthClassifier:
             else:
                 if specimen_category is None:
                     specimen_category = cat
-                    specimen_term = layer["one_health_term"]
+                    specimen_term = term_lower
                     specimen_field = field
                     specimen_confidence = layer["one_health_confidence"]
 
+        # ------------------------------------------------------------------
         # Pass 2: resolve
+        # ------------------------------------------------------------------
         if domain_category is not None:
-            out["one_health_category"] = domain_category
-            out["one_health_term"] = specimen_term if specimen_term else domain_term
-            out["one_health_confidence"] = 1.0 if specimen_term else 0.8
-            out["one_health_source_field"] = specimen_field if specimen_term else domain_field
+            # domain wins; term reported is the domain term (what drove category)
+            # evidence_term or specimen_term kept as supporting evidence
+            supporting = specimen_term or evidence_term
+            out["one_health_category"]    = domain_category
+            out["one_health_term"]        = domain_term
+            out["one_health_confidence"]  = 1.0 if supporting else 0.8
+            out["one_health_source_field"] = domain_field
         elif specimen_category is not None:
-            out["one_health_category"] = specimen_category
-            out["one_health_term"] = specimen_term
-            out["one_health_confidence"] = specimen_confidence
+            out["one_health_category"]    = specimen_category
+            out["one_health_term"]        = specimen_term
+            out["one_health_confidence"]  = specimen_confidence
             out["one_health_source_field"] = specimen_field
-        elif specimen_term is not None:
-            out["one_health_category"] = "Unclassified"
-            out["one_health_term"] = specimen_term
-            out["one_health_confidence"] = 0.0
+        elif specimen_term is not None or evidence_term is not None:
+            # evidence found but category is ambiguous without domain context
+            out["one_health_category"]    = "Unclassified"
+            out["one_health_term"]        = specimen_term or evidence_term
+            out["one_health_confidence"]  = specimen_confidence
             out["one_health_source_field"] = specimen_field
         else:
             setting_val = out.get("one_health_setting")
@@ -350,13 +396,10 @@ class OneHealthClassifier:
                 setting_lower = str(setting_val).lower()
                 inferred = self._setting_to_category.get(setting_lower)
                 if inferred:
-                    out["one_health_category"] = inferred
-                    out["one_health_confidence"] = self._setting_confidence.get(inferred, 0.4)
-                    out["one_health_term"] = setting_lower
+                    out["one_health_category"]    = inferred
+                    out["one_health_confidence"]  = self._setting_confidence.get(inferred, 0.4)
+                    out["one_health_term"]        = setting_lower
                     out["one_health_source_field"] = "setting_inference"
-
-        # one_health_category is always a string — never NaN
-        # fallback already set to "Unclassified" at top; nothing to do here
 
         return out
 
@@ -474,7 +517,7 @@ class OneHealthClassifier:
                     "one_health_setting": setting,
                 }
 
-        # No match — always Unclassified, never NaN
+        # No match
         return {
             "one_health_category": "Unclassified",
             "one_health_term": np.nan,
