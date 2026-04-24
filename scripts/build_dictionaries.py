@@ -13,10 +13,14 @@ always wins over ontology-derived data (merge strategy: base_wins).
 Usage
 -----
   python scripts/build_dictionaries.py \\
-      --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \\
-      --output src/biometaharmonizer/schemas/one_health_dictionaries.json \\
-      --ncbi-key YOUR_NCBI_API_KEY           # optional, raises rate limit to 10 req/s
-      --umls-key YOUR_UMLS_API_KEY           # optional
+      --base        src/biometaharmonizer/schemas/one_health_dictionaries.json \\
+      --output      src/biometaharmonizer/schemas/one_health_dictionaries.json \\
+      --ncbi-email  your.email@institution.edu  \\
+      --ncbi-key    YOUR_NCBI_API_KEY           # optional, raises rate limit to 10 req/s
+      --umls-key    YOUR_UMLS_API_KEY           # optional
+
+NCBI Entrez etiquette requires a valid, reachable email address.
+Priority: --ncbi-email flag > NCBI_EMAIL environment variable > error at startup.
 
 Dependencies (all standard or already in requirements.txt):
   requests>=2.28
@@ -27,6 +31,7 @@ The script is intentionally standalone - no imports from biometaharmonizer.
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -51,8 +56,9 @@ OLS_BASE    = "https://www.ebi.ac.uk/ols4/api"
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 UMLS_BASE   = "https://uts-ws.nlm.nih.gov/rest"
 
-# Required by NCBI Entrez etiquette - set to something identifiable
-NCBI_EMAIL = "biometaharmonizer@github"
+# Resolved at startup from --ncbi-email / NCBI_EMAIL env var.
+# NCBI Entrez etiquette: must be a valid RFC-5321 address.
+NCBI_EMAIL: str = ""  # set by _resolve_ncbi_email()
 
 # NCBI efetch GET requests fail with HTTP 414 if too many IDs are sent.
 # Safe upper bound for numeric taxonomy IDs is ~200 per request.
@@ -167,6 +173,44 @@ def _get(url, params=None, retries=3, backoff=2.0, as_text=False):
                 return None
             time.sleep(backoff)
     return None
+
+
+# ---------------------------------------------------------------------------
+# NCBI email resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_ncbi_email(cli_value):
+    """
+    Resolve the NCBI contact email from (in priority order):
+      1. --ncbi-email CLI argument
+      2. NCBI_EMAIL environment variable
+
+    Exits with an informative error if neither is set or the value looks
+    like a placeholder (no '@' or no domain dot).
+    """
+    global NCBI_EMAIL
+
+    email = cli_value or os.environ.get("NCBI_EMAIL", "").strip()
+
+    if not email:
+        log.error(
+            "NCBI contact email is required. "
+            "Provide it via --ncbi-email your@email.com "
+            "or set the NCBI_EMAIL environment variable."
+        )
+        sys.exit(1)
+
+    local, _, domain = email.partition("@")
+    if not local or "." not in domain:
+        log.error(
+            "'%s' does not look like a valid email address (RFC-5321). "
+            "NCBI Entrez requires a real, reachable address.",
+            email,
+        )
+        sys.exit(1)
+
+    NCBI_EMAIL = email
+    log.info("NCBI contact email: %s", NCBI_EMAIL)
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +408,7 @@ def fetch_all_names_under_taxon(taxon_id, category, ncbi_key=None, max_ids=10000
 def fetch_ncbi_host_map(ncbi_key=None):
     """
     Build host_to_category map using esearch txid[Subtree] for each root
-    in NCBI_TAXON_ROOTS. Two API calls per taxon instead of N² elink calls.
+    in NCBI_TAXON_ROOTS. Two API calls per taxon instead of N^2 elink calls.
     Returns dict: name_lower -> category
     """
     log.info("Fetching NCBI Taxonomy host mappings (esearch subtree)...")
@@ -558,13 +602,21 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Build enriched one_health_dictionaries.json from ontology sources."
     )
-    p.add_argument("--base",      default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
-    p.add_argument("--output",    default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
-    p.add_argument("--ncbi-key",  default=None, help="NCBI API key (raises rate limit to 10 req/s)")
-    p.add_argument("--umls-key",  default=None, help="UMLS API key for synonym expansion")
-    p.add_argument("--skip-ols",  action="store_true")
-    p.add_argument("--skip-ncbi", action="store_true")
-    p.add_argument("--dry-run",   action="store_true")
+    p.add_argument("--base",       default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--output",     default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument(
+        "--ncbi-email",
+        default=None,
+        help=(
+            "Valid RFC-5321 email for NCBI Entrez etiquette (required). "
+            "Falls back to the NCBI_EMAIL environment variable."
+        ),
+    )
+    p.add_argument("--ncbi-key",   default=None, help="NCBI API key (raises rate limit to 10 req/s)")
+    p.add_argument("--umls-key",   default=None, help="UMLS API key for synonym expansion")
+    p.add_argument("--skip-ols",   action="store_true")
+    p.add_argument("--skip-ncbi",  action="store_true")
+    p.add_argument("--dry-run",    action="store_true")
     return p.parse_args()
 
 
@@ -573,6 +625,8 @@ def main():
 
     args      = parse_args()
     base_path = Path(args.base)
+
+    _resolve_ncbi_email(args.ncbi_email)
 
     if args.ncbi_key:
         _NCBI_SLEEP = 0.11
