@@ -54,6 +54,10 @@ UMLS_BASE   = "https://uts-ws.nlm.nih.gov/rest"
 # Required by NCBI Entrez etiquette - set to something identifiable
 NCBI_EMAIL = "biometaharmonizer@github"
 
+# NCBI efetch GET requests fail with HTTP 414 if too many IDs are sent.
+# Safe upper bound for numeric taxonomy IDs is ~200 per request.
+EFETCH_CHUNK_SIZE = 200
+
 # OLS4: map short IDs to full purl IRIs
 OLS_IRI_PREFIXES = {
     "ENVO":   "http://purl.obolibrary.org/obo/ENVO_",
@@ -278,15 +282,15 @@ def fetch_ols_terms():
 def entrez_fetch_names(tax_ids, ncbi_key=None):
     """
     Fetch scientific + common names for a list of tax_ids via efetch.
+    Chunks into EFETCH_CHUNK_SIZE batches to stay within GET URI length limits.
     Returns list of (tax_id, sci_name, common_name) tuples.
     """
     if not tax_ids:
         return []
 
     results = []
-    chunk_size = 500
-    for i in range(0, len(tax_ids), chunk_size):
-        chunk = tax_ids[i:i + chunk_size]
+    for i in range(0, len(tax_ids), EFETCH_CHUNK_SIZE):
+        chunk = tax_ids[i:i + EFETCH_CHUNK_SIZE]
         params = {
             "db":      "taxonomy",
             "id":      ",".join(str(t) for t in chunk),
