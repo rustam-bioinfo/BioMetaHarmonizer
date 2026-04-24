@@ -114,8 +114,15 @@ OLS_ONTOLOGY_MAP = {
 }
 
 # NCBI Taxonomy node IDs -> One Health category
+#
+# IMPORTANT - only clades that map cleanly to a SINGLE One Health category
+# belong here. Fungi (txid4751) are intentionally excluded: their category
+# is context-dependent (Environmental pathogen, Food spoilage, Animal/Human
+# mycosis) and cannot be resolved from taxonomy alone. "Lab" is a
+# text-signal category only, detected via ontology_map["Lab"] keywords
+# (e.g. "in vitro", "ATCC", "type strain") — never via taxon subtree.
 NCBI_TAXON_ROOTS = {
-    9606:  "Human",    # Homo sapiens (exact, no subtree walk)
+    9606:  "Human",    # Homo sapiens (exact match, no subtree walk)
     40674: "Animal",   # Mammalia
     8782:  "Animal",   # Aves
     8504:  "Animal",   # Reptilia
@@ -125,7 +132,6 @@ NCBI_TAXON_ROOTS = {
     6656:  "Animal",   # Arthropoda
     6447:  "Animal",   # Mollusca
     33090: "Plant",    # Viridiplantae
-    4751:  "Lab",      # Fungi
 }
 
 # Substring sets to classify UBERON anatomy terms
