@@ -35,22 +35,25 @@ class OneHealthClassifier:
     deterministic, multi-layer semantic decomposition across six
     metadata fields without any LLM dependency.
 
-    Layers (applied in order):
-      1. Null / empty detection -> NaN
-      2. Processing-term extraction (culture, DNA, isolate) -> decouples from source
-      3. Setting-term extraction (hospital, farm, wwtp) -> stored separately
-      4. Compiled Tier-1 regex patterns -> domain category
-      5. Optional rapidfuzz fuzzy fallback against bundled dictionary terms
+    Layers (applied in order per text value):
+      1. Null / empty detection                -> NaN
+      2. Institution / culture collection guard-> tag Lab or skip
+      3. Abbreviation expansion                -> normalize abbreviations
+      4. Synonym normalization                 -> canonicalize synonyms
+      5. Processing-term extraction            -> decouple culture/DNA/isolate
+      6. Setting-term extraction               -> store setting separately
+      7. Compiled Tier-1 regex patterns        -> domain category
+      8. rapidfuzz fuzzy fallback              -> ontology_map corpus (optional)
 
     Field priority for classify_multi_field():
       isolation_source > env_medium > env_local_scale > env_broad_scale > sample_type > host
 
     Backward-compatible public API
     --------------------------------
-    classify(series)                -> pd.Series of one_health_category (legacy)
-    classify_joint(iso, host)       -> pd.Series of one_health_category (legacy)
-    classify_with_confidence(series)-> pd.DataFrame with 3 columns (legacy)
-    classify_multi_field(**fields)  -> pd.DataFrame with 6 columns (extended)
+    classify(series)                 -> pd.Series of one_health_category (legacy)
+    classify_joint(iso, host)        -> pd.Series of one_health_category (legacy)
+    classify_with_confidence(series) -> pd.DataFrame with 3 columns (legacy)
+    classify_multi_field(**fields)   -> pd.DataFrame with 6 columns (extended)
     """
 
     NULL_PATTERNS = re.compile(
@@ -64,39 +67,65 @@ class OneHealthClassifier:
             r"rhizosphere|sediment|environment|dust|biofilm|"
             r"compost|manure|outdoor|indoor|cave|sand|"
             r"farm|field|forest|bark|\bmoss\b|lichen|peat|"
-            r"wipe|swab.*surface|\bbaby\b.*wipe|"
             r"environmental\s+swab|env\s+swab|"
-            r"drain\s+swab|sink\s+swab",
+            r"drain\s+swab|sink\s+swab|surface\s+swab|floor\s+swab|"
+            r"beach|marine|seawater|estuar|freshwater|groundwater|"
+            r"sludge|digestate|bioaerosol|phyllosphere",
             re.IGNORECASE,
         )),
         ("Animal", re.compile(
-            r"bovine|cattle|\bpig\b|swine|poultry|chicken|sheep|horse|"
-            r"\bdog\b|\bcat\b|rodent|\bmouse\b|\brat\b|\bbird\b|\bfish\b|animal|"
-            r"insect|\bbee\b|\bant\b|wasp|queen|colony|\blarva\b|larvae|"
-            r"wild.caught|reared|invertebrate|arthropod|carcass|gut|flea|tick|"
-            r"\bfly\b|\bmite\b|\bworm\b|nematode|cloacal",
+            r"bovine|cattle|\bcow\b|\bcalf\b|bos\s+taurus|bos\s+indicus|"
+            r"\bpig\b|swine|piglet|\bsow\b|\bboar\b|sus\s+scrofa|"
+            r"poultry|chicken|broiler|layer\s+hen|turkey|\bduck\b|\bgoose\b|"
+            r"gallus\s+gallus|meleagris|"
+            r"\bsheep\b|\blamb\b|\bewe\b|\bram\b|ovis\s+aries|"
+            r"\bgoat\b|capra\s+hircus|"
+            r"\bhorse\b|\bfoal\b|\bmare\b|equus\s+caballus|"
+            r"donkey|\bmule\b|\brabbit\b|\bhare\b|"
+            r"\bdog\b|canine|canis\s+lupus|\bcat\b|feline|felis\s+catus|"
+            r"rodent|\bmouse\b|\brat\b|guinea\s+pig|hamster|"
+            r"mus\s+musculus|rattus\s+norvegicus|"
+            r"\bbird\b|wild\s+bird|migratory\s+bird|"
+            r"\bfish\b|salmon|trout|\bcarp\b|tilapia|"
+            r"insect|\bbee\b|\bant\b|wasp|\bfly\b|\bmite\b|tick|\bflea\b|"
+            r"\bworm\b|nematode|\blarva\b|larvae|"
+            r"alpaca|llama|\bcamel\b|\bdeer\b|wild\s+boar|\bfox\b|badger|hedgehog|"
+            r"zoo\s+animal|wild\s+animal|wildlife|companion\s+animal|\bpet\b|"
+            r"\banimal\b|veterinary|carcass|cloacal|rumen|cecum|cecal|"
+            r"wild.caught|reared|invertebrate|arthropod",
             re.IGNORECASE,
         )),
         ("Human", re.compile(
-            r"human|patient|clinical|homo\s+sapiens|person|"
+            r"human|patient|clinical|homo\s+sapiens|\bperson\b|"
             r"\bblood\b|urine|sputum|wound|stool|feces|fecal|faeces|"
             r"dental|plaque|biopsy|serum|plasma|\bcsf\b|cerebrospinal|"
-            r"nasopharyngeal|throat|\bswab\b|abscess|\bbal\b|balf|"
-            r"bronchoalveolar|bile|rectal|perirectal|urinary",
+            r"nasopharyngeal|throat|\bswab\b|abscess|\bbal\b|\bbalf\b|"
+            r"bronchoalveolar|bile|rectal|perirectal|urinary|"
+            r"pleural|peritoneal|ascit|synovial|\bpus\b|"
+            r"tracheal\s+aspirate|endotracheal|bronchial\s+aspirate|"
+            r"ear\s+swab|eye\s+swab|conjunctival|vaginal|cervical|"
+            r"skin\s+swab|bone\s+marrow|catheter\s+tip|"
+            r"oropharyngeal|oral\s+swab|gingival|tongue\s+swab",
             re.IGNORECASE,
         )),
         ("Food", re.compile(
-            r"food|\bmeat\b|\bmilk\b|cheese|vegetable|fruit|poultry product|"
-            r"dairy|\begg\b|seafood|water supply|spice|grain|cereal|"
+            r"food|\bmeat\b|\bmilk\b|cheese|vegetable|fruit|poultry\s+product|"
+            r"dairy|\begg\b|seafood|spice|grain|cereal|"
             r"flour|bread|fermented|beverage|pasta|sausage|ice.?cream|"
-            r"noodle|rice|soy|tofu|sprout|produce|feed|additive|"
-            r"supplement|\bhusk\b|\bbean\b|\bnut\b|\bherb\b|"
-            r"slaughterhouse|abattoir|retail\s+food",
+            r"noodle|\brice\b|\bsoy\b|tofu|sprout|produce|\bfeed\b|"
+            r"\bhusk\b|\bbean\b|\bnut\b|\bherb\b|"
+            r"retail\s+food|ready.to.eat|ready\s+meal|deli\s+meat|"
+            r"infant\s+formula|powdered\s+milk|baby\s+food|"
+            r"minced\s+meat|ground\s+beef|slaughterhouse\s+product|"
+            r"bulk\s+tank|lettuce|spinach",
             re.IGNORECASE,
         )),
         ("Lab", re.compile(
             r"\blab\b|laboratory|atcc|reference\s+strain|"
-            r"type\s+strain|synthetic|in\s+vitro|\bstrain\b.*collection",
+            r"type\s+strain|synthetic|in\s+vitro|\bstrain\b.*collection|"
+            r"culture\s+collection|\bdsm\b|\bdsmz\b|\bnctc\b|\blmg\b|"
+            r"\bcip\b|\bnrrl\b|\bcect\b|\bjcm\b|\bbcrc\b|\bnbrc\b|"
+            r"\bccug\b|\bncimb\b|passage|\bsubculture\b|lab\s+strain",
             re.IGNORECASE,
         )),
     )
@@ -113,6 +142,25 @@ class OneHealthClassifier:
     def __init__(self, dictionary_path=None, fuzzy_threshold=88):
         self._dicts = _load_dictionaries(dictionary_path)
         self._fuzzy_threshold = fuzzy_threshold
+
+        self._abbrev_map = {
+            k.lower(): v.lower()
+            for k, v in self._dicts.get("abbreviation_map", {}).items()
+        }
+
+        self._synonym_map = {
+            k.lower(): v.lower()
+            for k, v in self._dicts.get("synonym_map", {}).items()
+        }
+
+        inst_patterns = self._dicts.get("institution_patterns", [])
+        coll_prefixes = self._dicts.get("culture_collection_prefixes", [])
+        all_inst = inst_patterns + coll_prefixes
+        if all_inst:
+            pattern = "|".join(re.escape(p) for p in all_inst)
+            self._INSTITUTION_RE = re.compile(pattern, re.IGNORECASE)
+        else:
+            self._INSTITUTION_RE = None
 
         proc_terms = self._dicts.get("processing_terms", {})
         if proc_terms:
@@ -160,15 +208,6 @@ class OneHealthClassifier:
         Legacy joint classification.
         Classifies using isolation_source first; falls back to host
         where result is NaN or Unclassified.
-
-        Parameters
-        ----------
-        isolation_source_series : pd.Series
-        host_series             : pd.Series (must share same index)
-
-        Returns
-        -------
-        pd.Series of one_health_category
         """
         if not isolation_source_series.index.equals(host_series.index):
             raise ValueError(
@@ -185,10 +224,7 @@ class OneHealthClassifier:
     def classify_with_confidence(self, series):
         """
         Legacy confidence output.
-
-        Returns
-        -------
-        pd.DataFrame with columns:
+        Returns pd.DataFrame with columns:
           one_health_category, one_health_term, one_health_confidence
         """
         rows = series.apply(self._classify_text).tolist()
@@ -202,23 +238,9 @@ class OneHealthClassifier:
           isolation_source, host, sample_type,
           env_broad_scale, env_local_scale, env_medium
 
-        Any subset of these fields may be passed; absent fields are treated
-        as all-NaN. Fields are consumed in priority order (see _FIELD_PRIORITY).
-
-        Parameters
-        ----------
-        **fields : pd.Series
-            Named series corresponding to BioSample metadata columns.
-
-        Returns
-        -------
-        pd.DataFrame with columns:
-          one_health_category     - main domain label
-          one_health_term         - matched text span
-          one_health_confidence   - float 0-1
-          one_health_processing   - detected processing type or NaN
-          one_health_setting      - detected setting or NaN
-          one_health_source_field - which input field produced the category
+        Returns pd.DataFrame with columns:
+          one_health_category, one_health_term, one_health_confidence,
+          one_health_processing, one_health_setting, one_health_source_field
         """
         first = next((s for s in fields.values() if s is not None), None)
         if first is None:
@@ -277,14 +299,26 @@ class OneHealthClassifier:
 
         if out["one_health_category"] == "Unclassified" and pd.notna(out["one_health_setting"]):
             setting_lower = str(out["one_health_setting"]).lower()
-            if setting_lower in {"hospital", "clinic", "icu", "ward", "nursing home"}:
+            if setting_lower in {"hospital", "clinic", "ward", "icu",
+                                  "nursing home", "long term care facility",
+                                  "skilled nursing facility", "neonatal unit",
+                                  "veterinary clinic", "veterinary hospital"}:
                 out["one_health_category"] = "Human"
                 out["one_health_confidence"] = 0.5
                 out["one_health_term"] = setting_lower
                 out["one_health_source_field"] = "setting_inference"
-            elif setting_lower in {"farm", "abattoir", "slaughterhouse"}:
+            elif setting_lower in {"farm", "poultry farm", "dairy farm",
+                                    "pig farm", "cattle farm", "fish farm",
+                                    "aquaculture facility"}:
                 out["one_health_category"] = "Environmental"
                 out["one_health_confidence"] = 0.4
+                out["one_health_term"] = setting_lower
+                out["one_health_source_field"] = "setting_inference"
+            elif setting_lower in {"slaughterhouse", "abattoir",
+                                    "meat processing plant",
+                                    "poultry processing plant"}:
+                out["one_health_category"] = "Food"
+                out["one_health_confidence"] = 0.45
                 out["one_health_term"] = setting_lower
                 out["one_health_source_field"] = "setting_inference"
 
@@ -293,6 +327,30 @@ class OneHealthClassifier:
                 out["one_health_category"] = np.nan
 
         return out
+
+    def _expand_abbreviations(self, text):
+        """Expand known abbreviations (word-boundary aware)."""
+        if not self._abbrev_map:
+            return text
+        words = text.split()
+        expanded = []
+        for w in words:
+            wl = w.lower().rstrip(".,;:")
+            if wl in self._abbrev_map:
+                expanded.append(self._abbrev_map[wl])
+            else:
+                expanded.append(w)
+        return " ".join(expanded)
+
+    def _normalize_synonyms(self, text):
+        """Replace synonyms with canonical forms (longest-match first)."""
+        if not self._synonym_map:
+            return text
+        text_lower = text.lower()
+        for phrase, canonical in sorted(self._synonym_map.items(), key=lambda x: len(x[0]), reverse=True):
+            if phrase in text_lower:
+                text_lower = text_lower.replace(phrase, canonical)
+        return text_lower
 
     def _classify_text(self, value):
         """
@@ -319,10 +377,28 @@ class OneHealthClassifier:
         if self.NULL_PATTERNS.match(text):
             return empty
 
+        # Layer 2: Institution / culture collection guard
+        if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
+            stripped = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
+            if len(stripped) < 4:
+                return {
+                    "one_health_category": "Lab",
+                    "one_health_term": text[:60],
+                    "one_health_confidence": 0.9,
+                    "one_health_processing": np.nan,
+                    "one_health_setting": np.nan,
+                }
+
+        # Layer 3: Abbreviation expansion
+        text = self._expand_abbreviations(text)
+
+        # Layer 4: Synonym normalization
+        working = self._normalize_synonyms(text)
+
         processing = np.nan
         setting = np.nan
-        working = text
 
+        # Layer 5: Processing-term extraction
         if self._PROCESSING_RE:
             pmatch = self._PROCESSING_RE.search(working)
             if pmatch:
@@ -333,17 +409,19 @@ class OneHealthClassifier:
                     working = (
                         working[: pmatch.start()].strip()
                         + " " + specimen_override + " "
-                        + working[pmatch.end() :].strip()
+                        + working[pmatch.end():].strip()
                     ).strip()
                 else:
-                    working = (working[: pmatch.start()] + working[pmatch.end() :]).strip()
+                    working = (working[: pmatch.start()] + working[pmatch.end():]).strip()
 
+        # Layer 6: Setting-term extraction
         if self._SETTING_RE:
             smatch = self._SETTING_RE.search(working)
             if smatch:
                 setting = smatch.group(1).lower()
-                working = (working[: smatch.start()] + working[smatch.end() :]).strip()
+                working = (working[: smatch.start()] + working[smatch.end():]).strip()
 
+        # Layer 7: Tier-1 regex
         if working:
             for category, pattern in self.TIER1_PATTERNS:
                 m = pattern.search(working)
@@ -356,6 +434,7 @@ class OneHealthClassifier:
                         "one_health_setting": setting,
                     }
 
+        # Layer 8: rapidfuzz fuzzy fallback
         if _RAPIDFUZZ_AVAILABLE and self._fuzzy_corpus and working and len(working) > 2:
             result = _rfprocess.extractOne(
                 working.lower(),
