@@ -61,6 +61,9 @@ class OneHealthClassifier:
     Field priority:
       isolation_source > host > env_medium > env_local_scale > env_broad_scale > sample_type
 
+    one_health_category is ALWAYS a string. It is never NaN.
+    Values: Human | Animal | Plant | Food | Environmental | Lab | Unclassified
+
     Public API
     ----------
     classify(series)                 -> pd.Series  (legacy)
@@ -193,7 +196,7 @@ class OneHealthClassifier:
                 "classify_joint: series must share the same index."
             )
         result = self.classify(isolation_source_series).copy()
-        fallback_mask = result.isna() | (result == "Unclassified")
+        fallback_mask = result == "Unclassified"
         if fallback_mask.any():
             result.loc[fallback_mask] = self.classify(host_series.loc[fallback_mask])
         return result
@@ -218,6 +221,8 @@ class OneHealthClassifier:
         Returns pd.DataFrame with columns:
           one_health_category, one_health_term, one_health_confidence,
           one_health_processing, one_health_setting, one_health_source_field
+
+        one_health_category is always a string, never NaN.
         """
         first = next((s for s in fields.values() if s is not None), None)
         if first is None:
@@ -275,7 +280,7 @@ class OneHealthClassifier:
                 out["one_health_setting"] = layer["one_health_setting"]
 
             cat = layer.get("one_health_category")
-            if cat is None or (isinstance(cat, float) and np.isnan(cat)) or cat == "Unclassified":
+            if cat is None or cat == "Unclassified":
                 continue
 
             if field == "host":
@@ -350,9 +355,8 @@ class OneHealthClassifier:
                     out["one_health_term"] = setting_lower
                     out["one_health_source_field"] = "setting_inference"
 
-        if out["one_health_category"] == "Unclassified":
-            if pd.notna(out["one_health_processing"]) or pd.notna(out["one_health_setting"]):
-                out["one_health_category"] = np.nan
+        # one_health_category is always a string — never NaN
+        # fallback already set to "Unclassified" at top; nothing to do here
 
         return out
 
@@ -380,8 +384,8 @@ class OneHealthClassifier:
     # ------------------------------------------------------------------
 
     def _classify_text(self, value):
-        empty = {
-            "one_health_category": np.nan,
+        unclassified = {
+            "one_health_category": "Unclassified",
             "one_health_term": np.nan,
             "one_health_confidence": 0.0,
             "one_health_processing": np.nan,
@@ -389,11 +393,11 @@ class OneHealthClassifier:
         }
 
         if value is None or (isinstance(value, float) and np.isnan(value)):
-            return empty
+            return unclassified
 
         text = str(value).strip()
         if not text or self.NULL_PATTERNS.match(text):
-            return empty
+            return unclassified
 
         # Layer 2: institution / culture collection guard
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
@@ -470,15 +474,7 @@ class OneHealthClassifier:
                     "one_health_setting": setting,
                 }
 
-        if pd.notna(processing) or pd.notna(setting):
-            return {
-                "one_health_category": np.nan,
-                "one_health_term": np.nan,
-                "one_health_confidence": 0.0,
-                "one_health_processing": processing,
-                "one_health_setting": setting,
-            }
-
+        # No match — always Unclassified, never NaN
         return {
             "one_health_category": "Unclassified",
             "one_health_term": np.nan,
