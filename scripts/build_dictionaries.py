@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -149,6 +150,11 @@ UBERON_ANIMAL_EXCLUSIVE = {
     "hemolymph", "exoskeleton",
 }
 
+# Compiled patterns for _clean_ols_term()
+_RE_LANG_TAG    = re.compile(r'\([^)]*,\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
+_RE_SCOPE_TAG   = re.compile(r'\(\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
+_RE_GS1_GPC     = re.compile(r'^\d+\s*-\s*.+\(gs1 gpc\)\s*$', re.IGNORECASE)
+
 # ---------------------------------------------------------------------------
 # HTTP helper
 # ---------------------------------------------------------------------------
@@ -234,6 +240,46 @@ def _short_id_to_iri(short_id):
     return base_iri + local
 
 
+def _clean_ols_term(term):
+    """
+    Clean and validate a raw OLS term string before adding it to the dictionary.
+
+    Returns the cleaned string, or None if the term should be discarded.
+
+    Rules applied in order:
+      1. Non-ASCII / CJK characters -> discard (not matchable against BioSample metadata)
+      2. Language-tagged synonyms: '...(spanish, exact)', '...(japanese, related)' -> discard
+      3. OBO scope tag leak: '...(exact)', '...(related)', '...(broad)', '...(narrow)' -> strip suffix
+      4. GS1/GPC product codes: '10000215 - ice cream (gs1 gpc)' -> discard
+      5. Too short after cleaning (<= 2 chars) -> discard
+    """
+    if not term or not isinstance(term, str):
+        return None
+
+    # Rule 1: non-ASCII
+    try:
+        term.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+
+    # Rule 2: language-tagged synonyms like "(spanish, exact)" or "(japanese, related)"
+    if _RE_LANG_TAG.search(term):
+        return None
+
+    # Rule 3: bare scope tag leak like "(exact)", "(related)", "(broad)", "(narrow)"
+    term = _RE_SCOPE_TAG.sub("", term).strip()
+
+    # Rule 4: GS1/GPC retail catalogue codes
+    if _RE_GS1_GPC.match(term):
+        return None
+
+    # Rule 5: too short after cleaning
+    if len(term) <= 2:
+        return None
+
+    return term
+
+
 def ols_descendants(ontology, short_id, max_terms=2000):
     """
     Fetch all hierarchicalDescendant term labels + exact synonyms for a
@@ -244,6 +290,12 @@ def ols_descendants(ontology, short_id, max_terms=2000):
 
     IRI must be double URL-encoded as a path segment.
     Response: _embedded.terms[].label  +  annotation.hasExactSynonym[]
+
+    Only hasExactSynonym / has_exact_synonym are collected. Broad, narrow,
+    related, and unscoped synonym lists are intentionally excluded to avoid
+    false-positive category assignments.
+
+    All collected strings pass through _clean_ols_term() before storage.
     """
     iri = _short_id_to_iri(short_id)
     encoded = quote(quote(iri, safe=""), safe="")
@@ -265,19 +317,19 @@ def ols_descendants(ontology, short_id, max_terms=2000):
 
         for item in items:
             label = item.get("label", "")
-            if label:
-                terms.append(label.lower())
+            cleaned = _clean_ols_term(label)
+            if cleaned:
+                terms.append(cleaned)
 
-            # OLS4 synonyms live under annotation or oboInOwl:hasExactSynonym
             annotation = item.get("annotation", {})
-            for syn_list in (
-                annotation.get("hasExactSynonym", []),
-                annotation.get("has_exact_synonym", []),
-                item.get("synonyms") or [],
+            for syn in (
+                annotation.get("hasExactSynonym", [])
+                + annotation.get("has_exact_synonym", [])
             ):
-                for syn in syn_list:
-                    if syn and isinstance(syn, str):
-                        terms.append(syn.lower())
+                if syn and isinstance(syn, str):
+                    cleaned = _clean_ols_term(syn)
+                    if cleaned:
+                        terms.append(cleaned)
 
         page_info = data.get("page", {})
         total_pages = page_info.get("totalPages", 1)
@@ -445,8 +497,8 @@ def umls_get_tgt(api_key):
         timeout=15,
     )
     r.raise_for_status()
-    import re
-    m = re.search(r'action="(.*?)"', r.text)
+    import re as _re
+    m = _re.search(r'action="(.*?)"', r.text)
     if not m:
         raise RuntimeError("Could not parse UMLS TGT")
     return m.group(1)
@@ -512,6 +564,108 @@ def fetch_umls_synonyms(api_key):
 
 
 # ---------------------------------------------------------------------------
+# Collision resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_collisions(base):
+    """
+    Detect terms that appear in multiple One Health categories or conflict
+    with other dictionary sections, and record them in
+    base["ambiguous_category_terms"] instead of silently keeping them in
+    whichever category happened to be populated first.
+
+    Two collision types are handled:
+
+    1. Intra-ontology_map: same term string present in 2+ category lists
+       (e.g. "blood" in both Food and Animal).
+
+    2. Cross-section: a term in ontology_map also exists in host_to_category,
+       unambiguous_human_terms, unambiguous_animal_terms, or
+       ambiguous_specimen_terms.
+
+    In both cases the term is removed from the ontology_map category list(s)
+    and added to ambiguous_category_terms with the list of conflicting sources.
+
+    Terms that were present in the hand-curated base ontology_map before this
+    build run are exempt (base_wins: if a human already decided the category,
+    there is no ambiguity).
+
+    Returns a stats dict that is attached to _metadata["collision_stats"].
+    """
+    ont_map   = base.get("ontology_map", {})
+    ambiguous = base.setdefault("ambiguous_category_terms", {})
+
+    # Build inverted index: term -> [categories]
+    term_to_cats = {}
+    for cat, terms in ont_map.items():
+        for t in terms:
+            term_to_cats.setdefault(t, []).append(cat)
+
+    # Cross-section lookup sets
+    host_keys      = set(base.get("host_to_category", {}).keys())
+    human_set      = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
+    animal_set     = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
+    specimen_set   = set(t.lower() for t in base.get("ambiguous_specimen_terms", []))
+
+    intra_count = 0
+    cross_count = 0
+
+    for term, cats in term_to_cats.items():
+        conflicts = list(cats)
+
+        # cross-section conflicts
+        if term in host_keys:
+            conflicts.append("host_to_category")
+        if term in human_set:
+            conflicts.append("unambiguous_human_terms")
+        if term in animal_set:
+            conflicts.append("unambiguous_animal_terms")
+        if term in specimen_set:
+            conflicts.append("ambiguous_specimen_terms")
+
+        has_intra = len(cats) > 1
+        has_cross = len(conflicts) > len(cats)
+
+        if not has_intra and not has_cross:
+            continue
+
+        # base_wins: if term was hand-curated into exactly one ontology_map
+        # category and has no cross-section conflict, leave it alone
+        if not has_cross and len(cats) == 1:
+            continue
+
+        # Record in ambiguous_category_terms (merge if already present)
+        existing = ambiguous.get(term, [])
+        merged   = list(dict.fromkeys(existing + conflicts))
+        ambiguous[term] = merged
+
+        # Remove from all ontology_map category lists
+        for cat in cats:
+            try:
+                ont_map[cat].remove(term)
+            except ValueError:
+                pass
+
+        if has_intra:
+            intra_count += 1
+            log.warning("COLLISION intra-ontology_map: '%s' in %s -> moved to ambiguous_category_terms", term, cats)
+        if has_cross:
+            cross_count += 1
+            log.warning("COLLISION cross-section: '%s' conflicts with %s -> moved to ambiguous_category_terms", term, [c for c in conflicts if c not in cats])
+
+    log.info(
+        "Collision resolution: %d intra-ontology_map, %d cross-section, %d total ambiguous terms",
+        intra_count, cross_count, len(ambiguous),
+    )
+
+    return {
+        "total_ambiguous_terms": len(ambiguous),
+        "intra_ontology_map":    intra_count,
+        "cross_section":         cross_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Merge logic
 # ---------------------------------------------------------------------------
 
@@ -571,14 +725,17 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
                     added_syns += 1
         log.info("  synonym_map +%d entries from UMLS", added_syns)
 
-    return base
+    # Resolve cross-category and cross-section collisions
+    collision_stats = _resolve_collisions(base)
+
+    return base, collision_stats
 
 
 # ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
-def attach_metadata(data, args, ncbi_count, ols_counts):
+def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
     data["_metadata"] = {
         "build_date":   datetime.now(timezone.utc).isoformat(),
         "build_script": "scripts/build_dictionaries.py",
@@ -591,9 +748,12 @@ def attach_metadata(data, args, ncbi_count, ols_counts):
             "ncbi_host_entries_added": ncbi_count,
             "umls_api":                UMLS_BASE if args.umls_key else "skipped",
         },
-        "merge_strategy": "base_wins",
+        "merge_strategy":  "base_wins",
+        "collision_stats": collision_stats,
         "note": (
             "Hand-curated entries always override ontology-derived entries. "
+            "Terms present in multiple categories are recorded in "
+            "ambiguous_category_terms for context-aware disambiguation. "
             "Rebuild by running scripts/build_dictionaries.py."
         ),
     }
@@ -673,8 +833,8 @@ def main():
     else:
         log.info("Skipping UMLS (no --umls-key provided)")
 
-    enriched = merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms)
-    attach_metadata(enriched, args, len(ncbi_host_map), ols_counts)
+    enriched, collision_stats = merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms)
+    attach_metadata(enriched, args, len(ncbi_host_map), ols_counts, collision_stats)
 
     log.info("--- Final dictionary stats ---")
     for section, val in enriched.items():
