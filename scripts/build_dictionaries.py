@@ -15,7 +15,8 @@ Usage
   python scripts/build_dictionaries.py \\
       --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \\
       --output src/biometaharmonizer/schemas/one_health_dictionaries.json \\
-      --umls-key YOUR_UMLS_API_KEY          # optional
+      --ncbi-key YOUR_NCBI_API_KEY           # optional, raises rate limit to 10 req/s
+      --umls-key YOUR_UMLS_API_KEY           # optional
 
 Dependencies (all standard or already in requirements.txt):
   requests>=2.28
@@ -46,9 +47,9 @@ log = logging.getLogger("build_dictionaries")
 # Constants
 # ---------------------------------------------------------------------------
 
-OLS_BASE   = "https://www.ebi.ac.uk/ols4/api"
+OLS_BASE    = "https://www.ebi.ac.uk/ols4/api"
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-UMLS_BASE  = "https://uts-ws.nlm.nih.gov/rest"
+UMLS_BASE   = "https://uts-ws.nlm.nih.gov/rest"
 
 # Required by NCBI Entrez etiquette - set to something identifiable
 NCBI_EMAIL = "biometaharmonizer@github"
@@ -104,7 +105,7 @@ OLS_ONTOLOGY_MAP = {
 
 # NCBI Taxonomy node IDs -> One Health category
 NCBI_TAXON_ROOTS = {
-    9606:  "Human",    # Homo sapiens (exact, no tree walk)
+    9606:  "Human",    # Homo sapiens (exact, no subtree walk)
     40674: "Animal",   # Mammalia
     8782:  "Animal",   # Aves
     8504:  "Animal",   # Reptilia
@@ -138,6 +139,11 @@ UBERON_ANIMAL_EXCLUSIVE = {
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
+
+# Set by parse_args() based on --ncbi-key presence:
+#   0.34s  without API key  (3 req/s NCBI limit)
+#   0.11s  with API key     (10 req/s NCBI limit, slight margin)
+_NCBI_SLEEP = 0.34
 
 
 def _get(url, params=None, retries=3, backoff=2.0, as_text=False):
@@ -269,38 +275,7 @@ def fetch_ols_terms():
 # NCBI Entrez helpers
 # ---------------------------------------------------------------------------
 
-def entrez_get_children(taxon_id):
-    """
-    Use NCBI Entrez elink to get direct child tax_ids of taxon_id.
-    Returns list of int tax_ids.
-    """
-    data = _get(
-        f"{EUTILS_BASE}/elink.fcgi",
-        params={
-            "dbfrom": "taxonomy",
-            "db":     "taxonomy",
-            "id":     taxon_id,
-            "term":   f"txid{taxon_id}[orgn]",
-            "email":  NCBI_EMAIL,
-            "retmode": "json",
-        },
-    )
-    if not data:
-        return []
-
-    child_ids = []
-    try:
-        linksets = data.get("linksets", [])
-        for ls in linksets:
-            for linksetdb in ls.get("linksetdbs", []):
-                if linksetdb.get("linkname") == "taxonomy_taxonomy_child":
-                    child_ids = [int(x) for x in linksetdb.get("links", [])]
-    except (KeyError, TypeError, ValueError):
-        pass
-    return child_ids
-
-
-def entrez_fetch_names(tax_ids):
+def entrez_fetch_names(tax_ids, ncbi_key=None):
     """
     Fetch scientific + common names for a list of tax_ids via efetch.
     Returns list of (tax_id, sci_name, common_name) tuples.
@@ -308,22 +283,20 @@ def entrez_fetch_names(tax_ids):
     if not tax_ids:
         return []
 
-    # Batch in chunks of 100
     results = []
-    chunk_size = 100
+    chunk_size = 500
     for i in range(0, len(tax_ids), chunk_size):
         chunk = tax_ids[i:i + chunk_size]
-        xml_text = _get(
-            f"{EUTILS_BASE}/efetch.fcgi",
-            params={
-                "db":      "taxonomy",
-                "id":      ",".join(str(t) for t in chunk),
-                "rettype": "xml",
-                "retmode": "xml",
-                "email":   NCBI_EMAIL,
-            },
-            as_text=True,
-        )
+        params = {
+            "db":      "taxonomy",
+            "id":      ",".join(str(t) for t in chunk),
+            "rettype": "xml",
+            "retmode": "xml",
+            "email":   NCBI_EMAIL,
+        }
+        if ncbi_key:
+            params["api_key"] = ncbi_key
+        xml_text = _get(f"{EUTILS_BASE}/efetch.fcgi", params=params, as_text=True)
         if not xml_text:
             continue
         try:
@@ -339,52 +312,70 @@ def entrez_fetch_names(tax_ids):
                 common   = common_el.text.lower().strip() if common_el is not None else ""
                 results.append((tid, sci_name, common))
         except ET.ParseError as exc:
-            log.warning("XML parse error for chunk %s: %s", chunk[:3], exc)
-        time.sleep(0.1)
+            log.warning("XML parse error for chunk starting %s: %s", chunk[0], exc)
+        time.sleep(_NCBI_SLEEP)
 
     return results
 
 
-def fetch_ncbi_host_map(depth=2):
+def fetch_all_names_under_taxon(taxon_id, category, ncbi_key=None, max_ids=10000):
     """
-    Walk NCBI Taxonomy to given depth from each root in NCBI_TAXON_ROOTS
-    using Entrez elink (taxonomy_taxonomy_child) + efetch.
+    Fetch all names in the subtree of taxon_id using a single esearch
+    txid[Subtree] query followed by batched efetch.
     Returns dict: name_lower -> category
     """
-    log.info("Fetching NCBI Taxonomy host mappings (depth=%d)...", depth)
+    params = {
+        "db":      "taxonomy",
+        "term":    f"txid{taxon_id}[Subtree]",
+        "retmax":  max_ids,
+        "retmode": "json",
+        "email":   NCBI_EMAIL,
+    }
+    if ncbi_key:
+        params["api_key"] = ncbi_key
+
+    data = _get(f"{EUTILS_BASE}/esearch.fcgi", params=params)
+    if not data:
+        return {}
+
+    ids = data.get("esearchresult", {}).get("idlist", [])
+    if not ids:
+        log.warning("  taxon %d: esearch returned no ids", taxon_id)
+        return {}
+
+    log.info("  taxon %d (%s): %d ids from esearch, fetching names...", taxon_id, category, len(ids))
+    time.sleep(_NCBI_SLEEP)
+
+    names = entrez_fetch_names([int(x) for x in ids], ncbi_key=ncbi_key)
     host_map = {}
+    for _, sci_name, common_name in names:
+        if sci_name:
+            host_map[sci_name] = category
+        if common_name:
+            host_map[common_name] = category
+
+    return host_map
+
+
+def fetch_ncbi_host_map(ncbi_key=None):
+    """
+    Build host_to_category map using esearch txid[Subtree] for each root
+    in NCBI_TAXON_ROOTS. Two API calls per taxon instead of N² elink calls.
+    Returns dict: name_lower -> category
+    """
+    log.info("Fetching NCBI Taxonomy host mappings (esearch subtree)...")
+    host_map = {
+        "homo sapiens": "Human",
+        "human":        "Human",
+    }
 
     for root_id, category in NCBI_TAXON_ROOTS.items():
         if root_id == 9606:
-            host_map["homo sapiens"] = "Human"
-            host_map["human"]        = "Human"
             continue
-
-        queue   = [(root_id, 0)]
-        visited = set()
-
-        while queue:
-            taxon_id, current_depth = queue.pop(0)
-            if taxon_id in visited:
-                continue
-            visited.add(taxon_id)
-
-            child_ids = entrez_get_children(taxon_id)
-            if not child_ids:
-                continue
-
-            names = entrez_fetch_names(child_ids)
-            for child_id, sci_name, common_name in names:
-                if sci_name:
-                    host_map[sci_name] = category
-                if common_name:
-                    host_map[common_name] = category
-                if current_depth + 1 < depth:
-                    queue.append((child_id, current_depth + 1))
-
-            time.sleep(0.1)
-
-        log.info("  taxon %d (%s): %d names so far", root_id, category, len(host_map))
+        partial = fetch_all_names_under_taxon(root_id, category, ncbi_key=ncbi_key)
+        host_map.update(partial)
+        log.info("    -> %d names collected", len(partial))
+        time.sleep(_NCBI_SLEEP)
 
     return host_map
 
@@ -514,9 +505,9 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
 
     # UMLS synonym_map
     if umls_synonyms:
-        syn_map      = base.setdefault("synonym_map", {})
+        syn_map       = base.setdefault("synonym_map", {})
         base_syn_keys = {k.lower() for k in syn_map}
-        added_syns   = 0
+        added_syns    = 0
         for canonical, synonyms in umls_synonyms.items():
             for syn in synonyms:
                 s = syn.lower().strip()
@@ -538,13 +529,13 @@ def attach_metadata(data, args, ncbi_count, ols_counts):
         "build_date":   datetime.now(timezone.utc).isoformat(),
         "build_script": "scripts/build_dictionaries.py",
         "sources": {
-            "hand_curated_base":      str(args.base),
-            "ols4_api":               OLS_BASE,
-            "ols4_ontologies":        list(OLS_ONTOLOGY_MAP.keys()),
-            "ols4_term_counts":       ols_counts,
-            "ncbi_entrez_api":        EUTILS_BASE,
+            "hand_curated_base":       str(args.base),
+            "ols4_api":                OLS_BASE,
+            "ols4_ontologies":         list(OLS_ONTOLOGY_MAP.keys()),
+            "ols4_term_counts":        ols_counts,
+            "ncbi_entrez_api":         EUTILS_BASE,
             "ncbi_host_entries_added": ncbi_count,
-            "umls_api":               UMLS_BASE if args.umls_key else "skipped",
+            "umls_api":                UMLS_BASE if args.umls_key else "skipped",
         },
         "merge_strategy": "base_wins",
         "note": (
@@ -563,19 +554,25 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Build enriched one_health_dictionaries.json from ontology sources."
     )
-    p.add_argument("--base",       default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
-    p.add_argument("--output",     default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
-    p.add_argument("--ncbi-depth", type=int, default=2)
-    p.add_argument("--umls-key",   default=None)
-    p.add_argument("--skip-ols",   action="store_true")
-    p.add_argument("--skip-ncbi",  action="store_true")
-    p.add_argument("--dry-run",    action="store_true")
+    p.add_argument("--base",      default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--output",    default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--ncbi-key",  default=None, help="NCBI API key (raises rate limit to 10 req/s)")
+    p.add_argument("--umls-key",  default=None, help="UMLS API key for synonym expansion")
+    p.add_argument("--skip-ols",  action="store_true")
+    p.add_argument("--skip-ncbi", action="store_true")
+    p.add_argument("--dry-run",   action="store_true")
     return p.parse_args()
 
 
 def main():
+    global _NCBI_SLEEP
+
     args      = parse_args()
     base_path = Path(args.base)
+
+    if args.ncbi_key:
+        _NCBI_SLEEP = 0.11
+        log.info("NCBI API key provided - using 10 req/s rate limit")
 
     if not base_path.exists():
         log.error("Base file not found: %s", base_path)
@@ -598,8 +595,8 @@ def main():
 
     ncbi_host_map = {}
     if not args.skip_ncbi:
-        ncbi_host_map = fetch_ncbi_host_map(depth=args.ncbi_depth)
-        log.info("NCBI host map: %d entries", len(ncbi_host_map))
+        ncbi_host_map = fetch_ncbi_host_map(ncbi_key=args.ncbi_key)
+        log.info("NCBI host map: %d entries total", len(ncbi_host_map))
     else:
         log.info("Skipping NCBI Taxonomy (--skip-ncbi)")
 
