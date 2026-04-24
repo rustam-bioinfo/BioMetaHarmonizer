@@ -67,14 +67,27 @@ OLS_ONTOLOGY_MAP = {
         "Environmental": [
             "ENVO:00000428",   # biome
             "ENVO:00010483",   # environmental material
-            "ENVO:00002297",   # environmental feature
+            # ENVO:00002297 (environmental feature) is obsolete - replaced below
             "ENVO:01000254",   # anthropogenic environment
+            "ENVO:01001110",   # ecosystem  (replaces obsolete ENVO:00002297)
+            "ENVO:00005772",   # habitat    (replaces obsolete ENVO:00002297)
+            "ENVO:00000063",   # soil
+            "ENVO:00000015",   # ocean
+            "ENVO:00000873",   # freshwater body
+            "ENVO:00000134",   # sediment
+            "ENVO:00002006",   # water
+            "ENVO:00002042",   # surface water
+            "ENVO:00000375",   # biofilm
         ],
     },
     "foodon": {
         "Food": [
             "FOODON:00001002",  # food product
             "FOODON:03400361",  # food material
+            "FOODON:00001709",  # animal food product
+            "FOODON:03310113",  # aquatic food product
+            "FOODON:03411347",  # dairy product
+            "FOODON:03420194",  # plant food product
         ],
     },
     "uberon": {
