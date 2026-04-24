@@ -172,15 +172,28 @@ def _run(args: argparse.Namespace) -> int:
     else:
         logger.info("Step 4/5  Geospatial parsing skipped (no geo_loc_name column).")
 
+    logger.info("Step 5/5  One Health classification")
     classifier = OneHealthClassifier()
-    if "isolation_source" in df.columns and "host" in df.columns:
-        logger.info("Step 5/5  One Health classification (joint mode)")
-        df["one_health_category"] = classifier.classify_joint(df["isolation_source"], df["host"])
-    elif "isolation_source" in df.columns:
-        logger.info("Step 5/5  One Health classification (isolation_source only)")
-        df["one_health_category"] = classifier.classify(df["isolation_source"])
+    src_cols = ["isolation_source", "env_broad_scale", "env_local_scale", "env_medium", "sample_type", "host"]
+    present = {col: df[col] for col in src_cols if col in df.columns}
+
+    if present:
+        try:
+            oh_df = classifier.classify_multi_field(**present)
+            for col in oh_df.columns:
+                df[col] = oh_df[col]
+            logger.info("         Extended mode: %d source fields consumed.", len(present))
+        except Exception as exc:
+            logger.warning("Extended classification failed (%s); falling back to legacy joint mode.", exc)
+            if "isolation_source" in df.columns and "host" in df.columns:
+                df["one_health_category"] = classifier.classify_joint(
+                    df["isolation_source"], df["host"]
+                )
+            elif "isolation_source" in df.columns:
+                df["one_health_category"] = classifier.classify(df["isolation_source"])
     else:
-        logger.info("Step 5/5  One Health skipped (no isolation_source column).")
+        logger.info("         One Health skipped (no source columns present).")
+
     if "one_health_category" in df.columns:
         classified = df["one_health_category"].notna().sum()
         logger.info("         %d / %d records classified.", classified, len(df))
