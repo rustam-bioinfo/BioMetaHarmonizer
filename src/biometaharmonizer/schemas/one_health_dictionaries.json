@@ -1,0 +1,90 @@
+{
+    "processing_terms": {
+        "pure culture": "culture",
+        "blood culture": "culture",
+        "urine culture": "culture",
+        "sputum culture": "culture",
+        "mixed culture": "culture",
+        "bacterial culture": "culture",
+        "cell culture": "culture",
+        "laboratory culture": "culture",
+        "pure isolate": "isolate",
+        "bacterial isolate": "isolate",
+        "clinical isolate": "isolate",
+        "environmental isolate": "isolate",
+        "genomic dna": "dna",
+        "whole genome": "dna",
+        "single cell": "isolate",
+        "whole organism": "isolate",
+        "type strain": "isolate",
+        "reference strain": "isolate",
+        "dna": "dna"
+    },
+    "processing_specimen_map": {
+        "blood culture": "blood",
+        "urine culture": "urine",
+        "sputum culture": "sputum"
+    },
+    "setting_patterns": [
+        "wastewater treatment plant",
+        "nursing home",
+        "slaughterhouse",
+        "abattoir",
+        "hospital",
+        "clinic",
+        "retail",
+        "wwtp",
+        "farm",
+        "ward",
+        "icu",
+        "stp"
+    ],
+    "generic_penalties": [
+        "clinical specimen",
+        "patient",
+        "environment",
+        "surface",
+        "sample",
+        "isolate",
+        "swab",
+        "specimen"
+    ],
+    "ontology_map": {
+        "Human": [
+            "blood", "urine", "sputum", "wound swab", "dental plaque",
+            "feces", "stool", "faeces", "csf", "nasopharyngeal swab",
+            "abscess", "plasma", "serum", "biopsy", "throat swab",
+            "bronchoalveolar lavage fluid", "balf", "bal",
+            "rectal swab", "perirectal swab", "bile", "liver abscess",
+            "wound secretion", "urinary tract", "human", "homo sapiens"
+        ],
+        "Animal": [
+            "bovine", "cattle", "pig", "swine", "poultry", "chicken",
+            "sheep", "horse", "dog", "cat", "rodent", "mouse", "rat",
+            "bird", "fish", "animal", "insect", "bee", "ant", "carcass",
+            "gut", "flea", "tick", "fly", "mite", "worm", "nematode",
+            "wild caught", "cloacal swab", "cloacal", "bos taurus",
+            "gallus gallus", "sus scrofa"
+        ],
+        "Food": [
+            "milk", "raw meat", "ice cream", "pasta", "sausage", "grain",
+            "food", "meat", "cheese", "vegetable", "fruit", "dairy", "egg",
+            "seafood", "spice", "cereal", "flour", "bread", "beverage",
+            "fermented", "noodle", "rice", "tofu", "sprout", "produce",
+            "feed", "slaughterhouse product", "retail food", "bulk tank milk",
+            "raw milk"
+        ],
+        "Environmental": [
+            "soil", "river water", "lake water", "groundwater", "sediment",
+            "sewage", "wastewater", "wastewater influent", "wastewater effluent",
+            "hospital sewage", "air", "rhizosphere", "dust", "biofilm",
+            "compost", "manure", "farmyard manure", "surface biofilm",
+            "environmental swab", "drain swab", "sink swab", "drain sample",
+            "sink sample", "marine water", "freshwater", "river sediment",
+            "marine sediment", "urban biome"
+        ],
+        "Lab": [
+            "atcc", "synthetic", "in vitro", "type strain reference"
+        ]
+    }
+}

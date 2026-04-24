@@ -6,3 +6,4 @@ pycountry>=22.3
 python-dateutil>=2.8
 openpyxl>=3.0
 pyarrow>=12.0
+rapidfuzz>=3.0.0
