@@ -4,7 +4,7 @@ build_dictionaries.py
 
 Builds an enriched one_health_dictionaries.json by querying:
   1. OLS4 API  - ENVO, FoodOn, UBERON, Plant Ontology
-  2. NCBI Taxonomy API - host_to_category for all vertebrates + plants
+  2. NCBI Entrez eutils - host_to_category for vertebrates + plants
   3. UMLS API  - synonym expansion (optional, requires API key)
 
 The hand-curated base file is loaded first. Any key present in the base
@@ -12,9 +12,9 @@ always wins over ontology-derived data (merge strategy: base_wins).
 
 Usage
 -----
-  python scripts/build_dictionaries.py \
-      --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
-      --output src/biometaharmonizer/schemas/one_health_dictionaries.json \
+  python scripts/build_dictionaries.py \\
+      --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \\
+      --output src/biometaharmonizer/schemas/one_health_dictionaries.json \\
       --umls-key YOUR_UMLS_API_KEY          # optional
 
 Dependencies (all standard or already in requirements.txt):
@@ -28,8 +28,10 @@ import json
 import logging
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -44,14 +46,24 @@ log = logging.getLogger("build_dictionaries")
 # Constants
 # ---------------------------------------------------------------------------
 
-OLS_BASE = "https://www.ebi.ac.uk/ols4/api"
-NCBI_TAX_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2/taxonomy"
-UMLS_BASE = "https://uts-ws.nlm.nih.gov/rest"
+OLS_BASE   = "https://www.ebi.ac.uk/ols4/api"
+EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+UMLS_BASE  = "https://uts-ws.nlm.nih.gov/rest"
 
-# OLS ontology ids -> One Health category for their terms
+# Required by NCBI Entrez etiquette - set to something identifiable
+NCBI_EMAIL = "biometaharmonizer@github"
+
+# OLS4: map short IDs to full purl IRIs
+OLS_IRI_PREFIXES = {
+    "ENVO":   "http://purl.obolibrary.org/obo/ENVO_",
+    "FOODON": "http://purl.obolibrary.org/obo/FOODON_",
+    "UBERON": "http://purl.obolibrary.org/obo/UBERON_",
+    "PO":     "http://purl.obolibrary.org/obo/PO_",
+}
+
+# OLS ontology ids -> One Health category -> list of seed term IRIs
 OLS_ONTOLOGY_MAP = {
     "envo": {
-        # parent term IDs whose entire subtree maps to Environmental
         "Environmental": [
             "ENVO:00000428",   # biome
             "ENVO:00010483",   # environmental material
@@ -66,9 +78,6 @@ OLS_ONTOLOGY_MAP = {
         ],
     },
     "uberon": {
-        # anatomical structures - split by whether they are human-exclusive,
-        # animal-exclusive, or shared (ambiguous). We collect all and classify
-        # in post-processing using taxon constraints embedded in UBERON.
         "_anatomy": [
             "UBERON:0000465",  # material anatomical entity
         ],
@@ -82,29 +91,27 @@ OLS_ONTOLOGY_MAP = {
 
 # NCBI Taxonomy node IDs -> One Health category
 NCBI_TAXON_ROOTS = {
-    9606:  "Human",     # Homo sapiens (exact)
-    40674: "Animal",    # Mammalia
-    8782:  "Animal",    # Aves
-    8504:  "Animal",    # Reptilia
-    8292:  "Animal",    # Amphibia
-    7776:  "Animal",    # Chondrichthyes (sharks/rays)
-    7898:  "Animal",    # Actinopterygii (ray-finned fish)
-    6656:  "Animal",    # Arthropoda
-    6447:  "Animal",    # Mollusca
-    33090: "Plant",     # Viridiplantae
-    4751:  "Lab",       # Fungi (lab/model organisms)
+    9606:  "Human",    # Homo sapiens (exact, no tree walk)
+    40674: "Animal",   # Mammalia
+    8782:  "Animal",   # Aves
+    8504:  "Animal",   # Reptilia
+    8292:  "Animal",   # Amphibia
+    7776:  "Animal",   # Chondrichthyes
+    7898:  "Animal",   # Actinopterygii
+    6656:  "Animal",   # Arthropoda
+    6447:  "Animal",   # Mollusca
+    33090: "Plant",    # Viridiplantae
+    4751:  "Lab",      # Fungi
 }
 
-# UBERON terms that are exclusively human-clinical context
-# (no wild animal has these in practice in NCBI BioSample)
+# Substring sets to classify UBERON anatomy terms
 UBERON_HUMAN_EXCLUSIVE = {
     "cerebrospinal fluid", "pleural fluid", "peritoneal fluid",
     "synovial fluid", "amniotic fluid", "dialysate",
-    "bronchoalveolar lavage fluid", "sputum", "dental plaque",
-    "catheter", "central venous catheter",
+    "bronchoalveolar lavage", "sputum", "dental plaque",
+    "catheter", "central venous",
 }
 
-# UBERON terms that are exclusively animal context in NCBI BioSample
 UBERON_ANIMAL_EXCLUSIVE = {
     "rumen", "reticulum", "omasum", "abomasum",
     "gizzard", "proventriculus", "crop",
@@ -120,17 +127,17 @@ SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
 
 
-def _get(url, params=None, retries=3, backoff=2.0):
+def _get(url, params=None, retries=3, backoff=2.0, as_text=False):
     for attempt in range(retries):
         try:
-            r = SESSION.get(url, params=params, timeout=20)
+            r = SESSION.get(url, params=params, timeout=30)
             if r.status_code == 429:
-                wait = backoff * (attempt + 1)
-                log.warning("Rate limited by %s, waiting %.0fs", url, wait)
+                wait = backoff * (attempt + 1) * 2
+                log.warning("Rate limited, waiting %.0fs", wait)
                 time.sleep(wait)
                 continue
             r.raise_for_status()
-            return r.json()
+            return r.text if as_text else r.json()
         except requests.RequestException as exc:
             if attempt == retries - 1:
                 log.error("Failed GET %s: %s", url, exc)
@@ -143,13 +150,32 @@ def _get(url, params=None, retries=3, backoff=2.0):
 # OLS4 helpers
 # ---------------------------------------------------------------------------
 
-def ols_descendants(ontology, term_iri, max_terms=2000):
+def _short_id_to_iri(short_id):
     """
-    Fetch all descendant term labels + synonyms for a given IRI
-    from OLS4. Returns list of lowercase strings.
+    Convert 'ENVO:00000428' -> 'http://purl.obolibrary.org/obo/ENVO_00000428'
     """
-    encoded_iri = requests.utils.quote(requests.utils.quote(term_iri, safe=""))
-    url = f"{OLS_BASE}/ontologies/{ontology}/terms/{encoded_iri}/descendants"
+    prefix, local = short_id.split(":", 1)
+    base_iri = OLS_IRI_PREFIXES.get(prefix.upper())
+    if not base_iri:
+        raise ValueError(f"Unknown IRI prefix: {prefix}")
+    return base_iri + local
+
+
+def ols_descendants(ontology, short_id, max_terms=2000):
+    """
+    Fetch all hierarchicalDescendant term labels + exact synonyms for a
+    given short ID from OLS4.
+
+    OLS4 endpoint:
+      GET /ontologies/{onto}/terms/{double_encoded_iri}/hierarchicalDescendants
+
+    IRI must be double URL-encoded as a path segment.
+    Response: _embedded.terms[].label  +  annotation.hasExactSynonym[]
+    """
+    iri = _short_id_to_iri(short_id)
+    encoded = quote(quote(iri, safe=""), safe="")
+    url = f"{OLS_BASE}/ontologies/{ontology}/terms/{encoded}/hierarchicalDescendants"
+
     terms = []
     page = 0
     page_size = 500
@@ -158,57 +184,59 @@ def ols_descendants(ontology, term_iri, max_terms=2000):
         data = _get(url, params={"size": page_size, "page": page})
         if not data:
             break
+
         embedded = data.get("_embedded", {})
         items = embedded.get("terms", [])
         if not items:
             break
+
         for item in items:
             label = item.get("label", "")
             if label:
                 terms.append(label.lower())
-            for syn in item.get("synonyms") or []:
-                if syn:
-                    terms.append(syn.lower())
-        total_pages = data.get("page", {}).get("totalPages", 1)
+
+            # OLS4 synonyms live under annotation or oboInOwl:hasExactSynonym
+            annotation = item.get("annotation", {})
+            for syn_list in (
+                annotation.get("hasExactSynonym", []),
+                annotation.get("has_exact_synonym", []),
+                item.get("synonyms") or [],
+            ):
+                for syn in syn_list:
+                    if syn and isinstance(syn, str):
+                        terms.append(syn.lower())
+
+        page_info = data.get("page", {})
+        total_pages = page_info.get("totalPages", 1)
         page += 1
         if page >= total_pages:
             break
-        time.sleep(0.1)
+        time.sleep(0.15)
 
-    return list(dict.fromkeys(terms))  # deduplicate preserving order
+    return list(dict.fromkeys(terms))
 
 
 def fetch_ols_terms():
-    """
-    Returns dict: category -> list of terms
-    and separate anatomy lists for ambiguous/human/animal classification.
-    """
     log.info("Fetching OLS4 terms...")
     result = {}
     anatomy_all = []
 
     for ontology, category_map in OLS_ONTOLOGY_MAP.items():
-        for category, iris in category_map.items():
-            if category == "_anatomy":
-                for iri in iris:
-                    log.info("  UBERON %s (anatomy)", iri)
-                    terms = ols_descendants(ontology, iri, max_terms=3000)
+        for category, short_ids in category_map.items():
+            for short_id in short_ids:
+                if category == "_anatomy":
+                    log.info("  UBERON %s (anatomy)", short_id)
+                    terms = ols_descendants(ontology, short_id, max_terms=3000)
                     anatomy_all.extend(terms)
                     log.info("    -> %d anatomy terms", len(terms))
-            else:
-                if category not in result:
-                    result[category] = []
-                for iri in iris:
-                    log.info("  %s %s -> %s", ontology.upper(), iri, category)
-                    terms = ols_descendants(ontology, iri)
-                    result[category].extend(terms)
+                else:
+                    log.info("  %s %s -> %s", ontology.upper(), short_id, category)
+                    terms = ols_descendants(ontology, short_id)
+                    result.setdefault(category, []).extend(terms)
                     log.info("    -> %d terms", len(terms))
 
-    # Classify anatomy terms
-    human_terms = []
-    animal_terms = []
-    ambiguous_terms = []
-
+    # Classify anatomy terms into human / animal / ambiguous
+    human_terms, animal_terms, ambiguous_terms = [], [], []
     for term in anatomy_all:
         if any(excl in term for excl in UBERON_HUMAN_EXCLUSIVE):
             human_terms.append(term)
@@ -217,44 +245,98 @@ def fetch_ols_terms():
         else:
             ambiguous_terms.append(term)
 
-    result["_uberon_human"] = human_terms
-    result["_uberon_animal"] = animal_terms
+    result["_uberon_human"]     = human_terms
+    result["_uberon_animal"]    = animal_terms
     result["_uberon_ambiguous"] = ambiguous_terms
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# NCBI Taxonomy helpers
+# NCBI Entrez helpers
 # ---------------------------------------------------------------------------
 
-def ncbi_children(taxon_id, max_results=500):
+def entrez_get_children(taxon_id):
     """
-    Fetch direct children of a taxon node from NCBI Taxonomy.
-    Returns list of (tax_id, sci_name, common_name) tuples.
+    Use NCBI Entrez elink to get direct child tax_ids of taxon_id.
+    Returns list of int tax_ids.
     """
-    url = f"{NCBI_TAX_BASE}/taxon/{taxon_id}/children"
-    data = _get(url, params={"page_size": max_results})
+    data = _get(
+        f"{EUTILS_BASE}/elink.fcgi",
+        params={
+            "dbfrom": "taxonomy",
+            "db":     "taxonomy",
+            "id":     taxon_id,
+            "term":   f"txid{taxon_id}[orgn]",
+            "email":  NCBI_EMAIL,
+            "retmode": "json",
+        },
+    )
     if not data:
         return []
-    children = []
-    for taxon in data.get("taxonomy_nodes", []):
-        tax = taxon.get("taxonomy", {})
-        tax_id = tax.get("tax_id")
-        sci_name = tax.get("organism_name", "")
-        common = ""
-        if tax.get("common_name"):
-            common = tax["common_name"]
-        if tax_id and sci_name:
-            children.append((tax_id, sci_name.lower(), common.lower()))
-    return children
+
+    child_ids = []
+    try:
+        linksets = data.get("linksets", [])
+        for ls in linksets:
+            for linksetdb in ls.get("linksetdbs", []):
+                if linksetdb.get("linkname") == "taxonomy_taxonomy_child":
+                    child_ids = [int(x) for x in linksetdb.get("links", [])]
+    except (KeyError, TypeError, ValueError):
+        pass
+    return child_ids
+
+
+def entrez_fetch_names(tax_ids):
+    """
+    Fetch scientific + common names for a list of tax_ids via efetch.
+    Returns list of (tax_id, sci_name, common_name) tuples.
+    """
+    if not tax_ids:
+        return []
+
+    # Batch in chunks of 100
+    results = []
+    chunk_size = 100
+    for i in range(0, len(tax_ids), chunk_size):
+        chunk = tax_ids[i:i + chunk_size]
+        xml_text = _get(
+            f"{EUTILS_BASE}/efetch.fcgi",
+            params={
+                "db":      "taxonomy",
+                "id":      ",".join(str(t) for t in chunk),
+                "rettype": "xml",
+                "retmode": "xml",
+                "email":   NCBI_EMAIL,
+            },
+            as_text=True,
+        )
+        if not xml_text:
+            continue
+        try:
+            root = ET.fromstring(xml_text)
+            for taxon in root.findall(".//Taxon"):
+                tax_id_el   = taxon.find("TaxId")
+                sci_name_el = taxon.find("ScientificName")
+                common_el   = taxon.find("OtherNames/CommonName")
+                if tax_id_el is None or sci_name_el is None:
+                    continue
+                tid      = int(tax_id_el.text)
+                sci_name = sci_name_el.text.lower().strip()
+                common   = common_el.text.lower().strip() if common_el is not None else ""
+                results.append((tid, sci_name, common))
+        except ET.ParseError as exc:
+            log.warning("XML parse error for chunk %s: %s", chunk[:3], exc)
+        time.sleep(0.1)
+
+    return results
 
 
 def fetch_ncbi_host_map(depth=2):
     """
-    Walk NCBI Taxonomy to depth `depth` from each root in NCBI_TAXON_ROOTS.
-    Returns dict: scientific_name_lower -> category
-                  common_name_lower     -> category  (where available)
+    Walk NCBI Taxonomy to given depth from each root in NCBI_TAXON_ROOTS
+    using Entrez elink (taxonomy_taxonomy_child) + efetch.
+    Returns dict: name_lower -> category
     """
     log.info("Fetching NCBI Taxonomy host mappings (depth=%d)...", depth)
     host_map = {}
@@ -262,10 +344,10 @@ def fetch_ncbi_host_map(depth=2):
     for root_id, category in NCBI_TAXON_ROOTS.items():
         if root_id == 9606:
             host_map["homo sapiens"] = "Human"
-            host_map["human"] = "Human"
+            host_map["human"]        = "Human"
             continue
 
-        queue = [(root_id, 0)]
+        queue   = [(root_id, 0)]
         visited = set()
 
         while queue:
@@ -274,18 +356,22 @@ def fetch_ncbi_host_map(depth=2):
                 continue
             visited.add(taxon_id)
 
-            children = ncbi_children(taxon_id)
-            for child_id, sci_name, common_name in children:
-                host_map[sci_name] = category
+            child_ids = entrez_get_children(taxon_id)
+            if not child_ids:
+                continue
+
+            names = entrez_fetch_names(child_ids)
+            for child_id, sci_name, common_name in names:
+                if sci_name:
+                    host_map[sci_name] = category
                 if common_name:
                     host_map[common_name] = category
                 if current_depth + 1 < depth:
                     queue.append((child_id, current_depth + 1))
 
-            time.sleep(0.05)
+            time.sleep(0.1)
 
-        log.info("  taxon %d (%s): %d names collected so far",
-                 root_id, category, len(host_map))
+        log.info("  taxon %d (%s): %d names so far", root_id, category, len(host_map))
 
     return host_map
 
@@ -294,75 +380,72 @@ def fetch_ncbi_host_map(depth=2):
 # UMLS helpers (optional)
 # ---------------------------------------------------------------------------
 
-def umls_get_ticket(api_key):
-    tgt_url = "https://utslogin.nlm.nih.gov/cas/v1/api-key"
-    r = requests.post(tgt_url, data={"apikey": api_key}, timeout=15)
+def umls_get_tgt(api_key):
+    r = requests.post(
+        "https://utslogin.nlm.nih.gov/cas/v1/api-key",
+        data={"apikey": api_key},
+        timeout=15,
+    )
     r.raise_for_status()
     import re
-    match = re.search(r'action="(.*?)"', r.text)
-    if not match:
-        raise RuntimeError("Could not parse UMLS TGT from response")
-    return match.group(1)
+    m = re.search(r'action="(.*?)"', r.text)
+    if not m:
+        raise RuntimeError("Could not parse UMLS TGT")
+    return m.group(1)
 
 
 def umls_service_ticket(tgt_url):
-    r = requests.post(tgt_url, data={"service": "http://umlsks.nlm.nih.gov"}, timeout=15)
+    r = requests.post(
+        tgt_url,
+        data={"service": "http://umlsks.nlm.nih.gov"},
+        timeout=15,
+    )
     r.raise_for_status()
     return r.text.strip()
 
 
-def umls_synonyms_for_concept(cui, tgt_url):
-    """
-    Fetch all English atom strings for a UMLS CUI.
-    Returns list of lowercase strings.
-    """
-    st = umls_service_ticket(tgt_url)
-    url = f"{UMLS_BASE}/content/current/CUI/{cui}/atoms"
-    data = _get(url, params={"ticket": st, "language": "ENG", "pageSize": 100})
+def umls_synonyms_for_cui(cui, tgt_url):
+    st   = umls_service_ticket(tgt_url)
+    data = _get(
+        f"{UMLS_BASE}/content/current/CUI/{cui}/atoms",
+        params={"ticket": st, "language": "ENG", "pageSize": 100},
+    )
     if not data:
         return []
-    synonyms = []
-    for atom in data.get("result", []):
-        name = atom.get("name", "")
-        if name:
-            synonyms.append(name.lower())
-    return synonyms
+    return [
+        atom["name"].lower()
+        for atom in data.get("result", [])
+        if atom.get("name")
+    ]
 
 
-# Seed CUIs for specimen types we care about most
 UMLS_SPECIMEN_CUIS = {
-    # CUI       : canonical term
-    "C0005767":  "blood",
-    "C0042036":  "urine",
-    "C0038569":  "sputum",
-    "C0007555":  "cerebrospinal fluid",
-    "C0205189":  "pleural fluid",
-    "C0003967":  "ascitic fluid",
-    "C0039981":  "synovial fluid",
-    "C0006252":  "bronchial lavage",
-    "C0444941":  "wound",
-    "C0000735":  "abscess",
-    "C0032227":  "pus",
-    "C0015411":  "feces",
-    "C0521481":  "rectal swab",
-    "C0029001":  "oral swab",
-    "C0042048":  "vaginal swab",
-    "C0877612":  "nasal swab",
-    "C0586478":  "throat swab",
-    "C0042036":  "urine",
-    "C0005767":  "blood",
+    "C0005767": "blood",
+    "C0042036": "urine",
+    "C0038569": "sputum",
+    "C0007555": "cerebrospinal fluid",
+    "C0205189": "pleural fluid",
+    "C0003967": "ascitic fluid",
+    "C0039981": "synovial fluid",
+    "C0006252": "bronchial lavage",
+    "C0444941": "wound",
+    "C0000735": "abscess",
+    "C0032227": "pus",
+    "C0015411": "feces",
+    "C0521481": "rectal swab",
+    "C0029001": "oral swab",
+    "C0042048": "vaginal swab",
+    "C0877612": "nasal swab",
+    "C0586478": "throat swab",
 }
 
 
 def fetch_umls_synonyms(api_key):
-    """
-    Returns dict: canonical_term -> list of synonym strings
-    """
     log.info("Fetching UMLS synonyms...")
-    tgt_url = umls_get_ticket(api_key)
+    tgt_url     = umls_get_tgt(api_key)
     synonym_map = {}
     for cui, canonical in UMLS_SPECIMEN_CUIS.items():
-        syns = umls_synonyms_for_concept(cui, tgt_url)
+        syns = umls_synonyms_for_cui(cui, tgt_url)
         if syns:
             synonym_map[canonical] = syns
             log.info("  %s (%s): %d synonyms", canonical, cui, len(syns))
@@ -375,26 +458,12 @@ def fetch_umls_synonyms(api_key):
 # ---------------------------------------------------------------------------
 
 def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
-    """
-    Merge ontology-derived data into base dictionary.
-    Base always wins on conflict.
-
-    Strategy per section:
-      ontology_map  : extend lists with new terms not already present
-      host_to_category : add entries not already in base
-      synonym_map   : add synonym -> canonical pairs not already in base
-      unambiguous_human_terms  : extend with UBERON human-exclusive terms
-      unambiguous_animal_terms : extend with UBERON animal-exclusive terms
-      ambiguous_specimen_terms : extend with UBERON ambiguous anatomy terms
-                                 that are short (<= 3 words) and not already
-                                 in unambiguous sets
-    """
     log.info("Merging ontology data into base dictionary...")
 
-    # --- ontology_map ---
+    # ontology_map
     ont_map = base.setdefault("ontology_map", {})
     for category in ("Environmental", "Food", "Plant"):
-        existing = set(ont_map.get(category, []))
+        existing  = set(ont_map.get(category, []))
         new_terms = [
             t for t in ols_terms.get(category, [])
             if t not in existing and len(t) >= 3
@@ -403,59 +472,44 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
             ont_map.setdefault(category, []).extend(new_terms)
             log.info("  ontology_map[%s] +%d terms", category, len(new_terms))
 
-    # --- host_to_category ---
-    host_map = base.setdefault("host_to_category", {})
+    # host_to_category
+    host_map   = base.setdefault("host_to_category", {})
     base_hosts = {k.lower() for k in host_map}
-    added_hosts = 0
-    for name, category in ncbi_host_map.items():
-        if name.lower() not in base_hosts:
-            host_map[name.lower()] = category
-            added_hosts += 1
-    log.info("  host_to_category +%d entries", added_hosts)
+    added      = sum(
+        1 for name, cat in ncbi_host_map.items()
+        if name.lower() not in base_hosts
+        and not host_map.update({name.lower(): cat})
+    )
+    log.info("  host_to_category +%d entries", added)
 
-    # --- unambiguous human/animal from UBERON ---
-    base_unambig_human = set(t.lower() for t in base.get("unambiguous_human_terms", []))
-    base_unambig_animal = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
-    base_ambig = set(t.lower() for t in base.get("ambiguous_specimen_terms", []))
-    all_protected = base_unambig_human | base_unambig_animal | base_ambig
+    # UBERON anatomy -> unambiguous / ambiguous lists
+    base_unambig_h = {t.lower() for t in base.get("unambiguous_human_terms",  [])}
+    base_unambig_a = {t.lower() for t in base.get("unambiguous_animal_terms", [])}
+    base_ambig     = {t.lower() for t in base.get("ambiguous_specimen_terms", [])}
+    protected      = base_unambig_h | base_unambig_a | base_ambig
 
-    new_human = [
-        t for t in ols_terms.get("_uberon_human", [])
-        if t not in all_protected and 2 <= len(t) <= 60
-    ]
-    new_animal = [
-        t for t in ols_terms.get("_uberon_animal", [])
-        if t not in all_protected and 2 <= len(t) <= 60
-    ]
-    new_ambig = [
-        t for t in ols_terms.get("_uberon_ambiguous", [])
-        if t not in all_protected
-        and 2 <= len(t) <= 60
-        and len(t.split()) <= 3
-    ]
+    new_h = [t for t in ols_terms.get("_uberon_human",     []) if t not in protected and 2 <= len(t) <= 60]
+    new_a = [t for t in ols_terms.get("_uberon_animal",    []) if t not in protected and 2 <= len(t) <= 60]
+    new_b = [t for t in ols_terms.get("_uberon_ambiguous", []) if t not in protected and 2 <= len(t) <= 60 and len(t.split()) <= 3]
 
-    base.setdefault("unambiguous_human_terms", []).extend(new_human)
-    base.setdefault("unambiguous_animal_terms", []).extend(new_animal)
-    base.setdefault("ambiguous_specimen_terms", []).extend(new_ambig)
-    log.info("  unambiguous_human_terms +%d", len(new_human))
-    log.info("  unambiguous_animal_terms +%d", len(new_animal))
-    log.info("  ambiguous_specimen_terms +%d", len(new_ambig))
+    base.setdefault("unambiguous_human_terms",  []).extend(new_h)
+    base.setdefault("unambiguous_animal_terms", []).extend(new_a)
+    base.setdefault("ambiguous_specimen_terms", []).extend(new_b)
+    log.info("  unambiguous_human_terms  +%d", len(new_h))
+    log.info("  unambiguous_animal_terms +%d", len(new_a))
+    log.info("  ambiguous_specimen_terms +%d", len(new_b))
 
-    # --- synonym_map from UMLS ---
+    # UMLS synonym_map
     if umls_synonyms:
-        syn_map = base.setdefault("synonym_map", {})
+        syn_map      = base.setdefault("synonym_map", {})
         base_syn_keys = {k.lower() for k in syn_map}
-        added_syns = 0
+        added_syns   = 0
         for canonical, synonyms in umls_synonyms.items():
             for syn in synonyms:
-                syn_lower = syn.lower().strip()
-                if (
-                    syn_lower not in base_syn_keys
-                    and syn_lower != canonical.lower()
-                    and 3 <= len(syn_lower) <= 80
-                ):
-                    syn_map[syn_lower] = canonical
-                    base_syn_keys.add(syn_lower)
+                s = syn.lower().strip()
+                if s and s not in base_syn_keys and s != canonical.lower() and 3 <= len(s) <= 80:
+                    syn_map[s] = canonical
+                    base_syn_keys.add(s)
                     added_syns += 1
         log.info("  synonym_map +%d entries from UMLS", added_syns)
 
@@ -468,16 +522,16 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
 
 def attach_metadata(data, args, ncbi_count, ols_counts):
     data["_metadata"] = {
-        "build_date": datetime.now(timezone.utc).isoformat(),
+        "build_date":   datetime.now(timezone.utc).isoformat(),
         "build_script": "scripts/build_dictionaries.py",
         "sources": {
-            "hand_curated_base": str(args.base),
-            "ols4_api": OLS_BASE,
-            "ols4_ontologies": list(OLS_ONTOLOGY_MAP.keys()),
-            "ols4_term_counts": ols_counts,
-            "ncbi_taxonomy_api": NCBI_TAX_BASE,
+            "hand_curated_base":      str(args.base),
+            "ols4_api":               OLS_BASE,
+            "ols4_ontologies":        list(OLS_ONTOLOGY_MAP.keys()),
+            "ols4_term_counts":       ols_counts,
+            "ncbi_entrez_api":        EUTILS_BASE,
             "ncbi_host_entries_added": ncbi_count,
-            "umls_api": UMLS_BASE if args.umls_key else "skipped (no key provided)",
+            "umls_api":               UMLS_BASE if args.umls_key else "skipped",
         },
         "merge_strategy": "base_wins",
         "note": (
@@ -496,49 +550,20 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Build enriched one_health_dictionaries.json from ontology sources."
     )
-    p.add_argument(
-        "--base",
-        default="src/biometaharmonizer/schemas/one_health_dictionaries.json",
-        help="Path to hand-curated base JSON (default: %(default)s)",
-    )
-    p.add_argument(
-        "--output",
-        default="src/biometaharmonizer/schemas/one_health_dictionaries.json",
-        help="Output path (default: overwrites base)",
-    )
-    p.add_argument(
-        "--ncbi-depth",
-        type=int,
-        default=2,
-        help="Taxonomy walk depth from each NCBI root (default: 2)",
-    )
-    p.add_argument(
-        "--umls-key",
-        default=None,
-        help="UMLS API key for synonym expansion (optional)",
-    )
-    p.add_argument(
-        "--skip-ols",
-        action="store_true",
-        help="Skip OLS4 queries (faster, for testing NCBI/UMLS only)",
-    )
-    p.add_argument(
-        "--skip-ncbi",
-        action="store_true",
-        help="Skip NCBI Taxonomy queries",
-    )
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print stats but do not write output file",
-    )
+    p.add_argument("--base",       default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--output",     default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--ncbi-depth", type=int, default=2)
+    p.add_argument("--umls-key",   default=None)
+    p.add_argument("--skip-ols",   action="store_true")
+    p.add_argument("--skip-ncbi",  action="store_true")
+    p.add_argument("--dry-run",    action="store_true")
     return p.parse_args()
 
 
 def main():
-    args = parse_args()
-
+    args      = parse_args()
     base_path = Path(args.base)
+
     if not base_path.exists():
         log.error("Base file not found: %s", base_path)
         sys.exit(1)
@@ -547,8 +572,7 @@ def main():
         base = json.load(f)
     log.info("Loaded base dictionary from %s", base_path)
 
-    # --- OLS4 ---
-    ols_terms = {}
+    ols_terms  = {}
     ols_counts = {}
     if not args.skip_ols:
         ols_terms = fetch_ols_terms()
@@ -559,7 +583,6 @@ def main():
     else:
         log.info("Skipping OLS4 (--skip-ols)")
 
-    # --- NCBI Taxonomy ---
     ncbi_host_map = {}
     if not args.skip_ncbi:
         ncbi_host_map = fetch_ncbi_host_map(depth=args.ncbi_depth)
@@ -567,7 +590,6 @@ def main():
     else:
         log.info("Skipping NCBI Taxonomy (--skip-ncbi)")
 
-    # --- UMLS ---
     umls_synonyms = {}
     if args.umls_key:
         try:
@@ -577,21 +599,15 @@ def main():
     else:
         log.info("Skipping UMLS (no --umls-key provided)")
 
-    # --- Merge ---
     enriched = merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms)
+    attach_metadata(enriched, args, len(ncbi_host_map), ols_counts)
 
-    # Track how many new hosts were added
-    ncbi_new = len(ncbi_host_map)
-
-    attach_metadata(enriched, args, ncbi_new, ols_counts)
-
-    # --- Stats ---
     log.info("--- Final dictionary stats ---")
     for section, val in enriched.items():
         if section == "_metadata":
             continue
         if isinstance(val, dict):
-            log.info("  %-35s  %d keys", section, len(val))
+            log.info("  %-35s  %d keys",    section, len(val))
         elif isinstance(val, list):
             log.info("  %-35s  %d entries", section, len(val))
 
