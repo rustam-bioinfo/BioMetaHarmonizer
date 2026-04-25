@@ -4,7 +4,7 @@ build_dictionaries.py
 
 Builds an enriched one_health_dictionaries.json by querying:
   1. OLS4 API  - ENVO, FoodOn, UBERON, Plant Ontology
-  2. NCBI Entrez eutils - host_to_category for vertebrates + plants
+  2. NCBI Taxonomy local dump - host_to_category for vertebrates + plants
   3. UMLS API  - synonym expansion (optional, requires API key)
 
 The hand-curated base file is loaded first. Any key present in the base
@@ -13,17 +13,18 @@ always wins over ontology-derived data (merge strategy: base_wins).
 Usage
 -----
   python scripts/build_dictionaries.py \\
-      --base        src/biometaharmonizer/schemas/one_health_dictionaries.json \\
-      --output      src/biometaharmonizer/schemas/one_health_dictionaries.json \\
-      --ncbi-email  your.email@institution.edu  \\
-      --ncbi-key    YOUR_NCBI_API_KEY           # optional, raises rate limit to 10 req/s
-      --umls-key    YOUR_UMLS_API_KEY           # optional
+      --base    src/biometaharmonizer/schemas/one_health_dictionaries.json \\
+      --output  src/biometaharmonizer/schemas/one_health_dictionaries.json
 
-NCBI Entrez etiquette requires a valid, reachable email address.
-Priority: --ncbi-email flag > NCBI_EMAIL environment variable > error at startup.
+  # Use a pre-downloaded taxdmp.zip to skip the ~65 MB download:
+  python scripts/build_dictionaries.py --taxdmp /path/to/taxdmp.zip
+
+  # Skip taxonomy entirely:
+  python scripts/build_dictionaries.py --skip-ncbi
 
 Dependencies (all standard or already in requirements.txt):
   requests>=2.28
+  pandas>=1.5
 
 The script is intentionally standalone - no imports from biometaharmonizer.
 """
@@ -33,13 +34,17 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
-import xml.etree.ElementTree as ET
+import zipfile
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+import pandas as pd
 import requests
 
 logging.basicConfig(
@@ -53,17 +58,10 @@ log = logging.getLogger("build_dictionaries")
 # Constants
 # ---------------------------------------------------------------------------
 
-OLS_BASE    = "https://www.ebi.ac.uk/ols4/api"
-EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-UMLS_BASE   = "https://uts-ws.nlm.nih.gov/rest"
+OLS_BASE  = "https://www.ebi.ac.uk/ols4/api"
+UMLS_BASE = "https://uts-ws.nlm.nih.gov/rest"
 
-# Resolved at startup from --ncbi-email / NCBI_EMAIL env var.
-# NCBI Entrez etiquette: must be a valid RFC-5321 address.
-NCBI_EMAIL: str = ""  # set by _resolve_ncbi_email()
-
-# NCBI efetch GET requests fail with HTTP 414 if too many IDs are sent.
-# Safe upper bound for numeric taxonomy IDs is ~200 per request.
-EFETCH_CHUNK_SIZE = 200
+NCBI_TAXDMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdmp.zip"
 
 # OLS4: map short IDs to full purl IRIs
 OLS_IRI_PREFIXES = {
@@ -78,9 +76,9 @@ OLS_IRI_PREFIXES = {
 # Removed seeds that return 0 descendants from OLS4 hierarchicalDescendants
 # because they use OWL restriction-based (not subClassOf) hierarchies:
 #
-#   ENVO:00005772  habitat      - subclasses linked via 'overlaps' not subClassOf
+#   ENVO:00005772  habitat       - subclasses linked via 'overlaps' not subClassOf
 #   ENVO:00002042  surface water - partOf hierarchy, not traversed by OLS4
-#   ENVO:00000375  biofilm      - no real subClassOf tree; hand-curated in base dict
+#   ENVO:00000375  biofilm       - no real subClassOf tree; hand-curated in base dict
 #
 # Removed FoodOn seeds that are either obsolete or return 0 descendants:
 #   FOODON:03310113  aquatic food product - suspected obsolete IRI
@@ -130,7 +128,7 @@ OLS_ONTOLOGY_MAP = {
 # text-signal category only, detected via ontology_map["Lab"] keywords
 # (e.g. "in vitro", "ATCC", "type strain") -- never via taxon subtree.
 NCBI_TAXON_ROOTS = {
-    9606:  "Human",    # Homo sapiens (exact match, no subtree walk)
+    9606:  "Human",    # Homo sapiens (exact match only, no subtree walk)
     40674: "Animal",   # Mammalia
     8782:  "Animal",   # Aves
     8504:  "Animal",   # Reptilia
@@ -140,6 +138,17 @@ NCBI_TAXON_ROOTS = {
     6656:  "Animal",   # Arthropoda
     6447:  "Animal",   # Mollusca
     33090: "Plant",    # Viridiplantae
+}
+
+# name_class values from names.dmp that are useful for host matching.
+# Excluded: 'synonym', 'authority', 'blast name', 'in-part', 'includes',
+# 'type material', 'anamorph', 'teleomorph' - too technical or cause
+# false positives against BioSample free-text metadata.
+NAMES_DMP_KEEP_CLASSES = {
+    "scientific name",
+    "common name",
+    "genbank common name",
+    "equivalent name",
 }
 
 # Substring sets to classify UBERON anatomy terms
@@ -158,9 +167,9 @@ UBERON_ANIMAL_EXCLUSIVE = {
 }
 
 # Compiled patterns for _clean_ols_term()
-_RE_LANG_TAG    = re.compile(r'\([^)]*,\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
-_RE_SCOPE_TAG   = re.compile(r'\(\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
-_RE_GS1_GPC     = re.compile(r'^\d+\s*-\s*.+\(gs1 gpc\)\s*$', re.IGNORECASE)
+_RE_LANG_TAG  = re.compile(r'\([^)]*,\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
+_RE_SCOPE_TAG = re.compile(r'\(\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
+_RE_GS1_GPC   = re.compile(r'^\d+\s*-\s*.+\(gs1 gpc\)\s*$', re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # HTTP helper
@@ -168,11 +177,6 @@ _RE_GS1_GPC     = re.compile(r'^\d+\s*-\s*.+\(gs1 gpc\)\s*$', re.IGNORECASE)
 
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
-
-# Set by parse_args() based on --ncbi-key presence:
-#   0.34s  without API key  (3 req/s NCBI limit)
-#   0.11s  with API key     (10 req/s NCBI limit, slight margin)
-_NCBI_SLEEP = 0.34
 
 
 def _get(url, params=None, retries=3, backoff=2.0, as_text=False):
@@ -192,44 +196,6 @@ def _get(url, params=None, retries=3, backoff=2.0, as_text=False):
                 return None
             time.sleep(backoff)
     return None
-
-
-# ---------------------------------------------------------------------------
-# NCBI email resolution
-# ---------------------------------------------------------------------------
-
-def _resolve_ncbi_email(cli_value):
-    """
-    Resolve the NCBI contact email from (in priority order):
-      1. --ncbi-email CLI argument
-      2. NCBI_EMAIL environment variable
-
-    Exits with an informative error if neither is set or the value looks
-    like a placeholder (no '@' or no domain dot).
-    """
-    global NCBI_EMAIL
-
-    email = cli_value or os.environ.get("NCBI_EMAIL", "").strip()
-
-    if not email:
-        log.error(
-            "NCBI contact email is required. "
-            "Provide it via --ncbi-email your@email.com "
-            "or set the NCBI_EMAIL environment variable."
-        )
-        sys.exit(1)
-
-    local, _, domain = email.partition("@")
-    if not local or "." not in domain:
-        log.error(
-            "'%s' does not look like a valid email address (RFC-5321). "
-            "NCBI Entrez requires a real, reachable address.",
-            email,
-        )
-        sys.exit(1)
-
-    NCBI_EMAIL = email
-    log.info("NCBI contact email: %s", NCBI_EMAIL)
 
 
 # ---------------------------------------------------------------------------
@@ -410,112 +376,206 @@ def fetch_ols_terms():
 
 
 # ---------------------------------------------------------------------------
-# NCBI Entrez helpers
+# NCBI local taxonomy dump helpers
 # ---------------------------------------------------------------------------
 
-def entrez_fetch_names(tax_ids, ncbi_key=None):
+def _download_taxdmp(dest_dir):
     """
-    Fetch scientific + common names for a list of tax_ids via efetch.
-    Chunks into EFETCH_CHUNK_SIZE batches to stay within GET URI length limits.
-    Returns list of (tax_id, sci_name, common_name) tuples.
+    Download taxdmp.zip from NCBI FTP into dest_dir.
+    Returns path to the downloaded zip file.
     """
-    if not tax_ids:
-        return []
+    zip_path = Path(dest_dir) / "taxdmp.zip"
+    log.info("Downloading taxdmp.zip from %s ...", NCBI_TAXDMP_URL)
+    with requests.get(NCBI_TAXDMP_URL, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        with open(zip_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                f.write(chunk)
+                downloaded += len(chunk)
+        log.info("Downloaded %.1f MB", downloaded / 1e6)
+    return zip_path
 
-    results = []
-    for i in range(0, len(tax_ids), EFETCH_CHUNK_SIZE):
-        chunk = tax_ids[i:i + EFETCH_CHUNK_SIZE]
-        params = {
-            "db":      "taxonomy",
-            "id":      ",".join(str(t) for t in chunk),
-            "rettype": "xml",
-            "retmode": "xml",
-            "email":   NCBI_EMAIL,
+
+def _extract_taxdmp(zip_path, dest_dir):
+    """
+    Extract names.dmp and nodes.dmp from taxdmp.zip into dest_dir.
+    Returns (names_path, nodes_path).
+    """
+    log.info("Extracting names.dmp and nodes.dmp ...")
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extract("names.dmp", dest_dir)
+        zf.extract("nodes.dmp", dest_dir)
+    return Path(dest_dir) / "names.dmp", Path(dest_dir) / "nodes.dmp"
+
+
+def _parse_names_dmp(names_path):
+    """
+    Parse names.dmp into a DataFrame with columns:
+        tax_id (Int64), name_txt (str), name_class (str)
+
+    Only rows whose name_class is in NAMES_DMP_KEEP_CLASSES are kept.
+    name_txt is lowercased for case-insensitive downstream matching.
+    """
+    log.info("Parsing names.dmp ...")
+    df = pd.read_csv(
+        names_path,
+        sep=r"\t\|\t",
+        engine="python",
+        header=None,
+        names=["tax_id", "name_txt", "unique_name", "name_class"],
+        dtype=str,
+    )
+    df["name_class"] = df["name_class"].str.replace(r"\t\|$", "", regex=True)
+    df = df.apply(lambda col: col.str.strip())
+    df["tax_id"] = df["tax_id"].astype("Int64")
+    df = df[df["name_class"].isin(NAMES_DMP_KEEP_CLASSES)].copy()
+    df["name_txt"] = df["name_txt"].str.lower()
+    log.info("  %d name rows kept (after class filter)", len(df))
+    return df[["tax_id", "name_txt"]]
+
+
+def _parse_nodes_dmp(nodes_path):
+    """
+    Parse nodes.dmp into a parent->children mapping.
+    Returns dict[int, list[int]].
+    """
+    log.info("Parsing nodes.dmp ...")
+    nodes = pd.read_csv(
+        nodes_path,
+        sep=r"\t\|\t",
+        engine="python",
+        header=None,
+        usecols=[0, 1],
+        names=["tax_id", "parent_tax_id"],
+        dtype=str,
+    )
+    nodes = nodes.apply(lambda col: col.str.strip())
+    nodes["tax_id"]        = nodes["tax_id"].astype("Int64")
+    nodes["parent_tax_id"] = nodes["parent_tax_id"].astype("Int64")
+    log.info("  %d nodes loaded", len(nodes))
+
+    children = defaultdict(list)
+    for row in nodes.itertuples(index=False):
+        tid = int(row.tax_id)
+        pid = int(row.parent_tax_id)
+        if tid != pid:  # root node points to itself
+            children[pid].append(tid)
+    return children
+
+
+def _bfs_subtree(root_id, children):
+    """
+    Iterative BFS from root_id over the children dict.
+    Returns frozenset of all descendant tax_ids (including root_id).
+    """
+    visited = set()
+    queue = [root_id]
+    while queue:
+        node = queue.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        queue.extend(children.get(node, []))
+    return frozenset(visited)
+
+
+def _resolve_taxdmp_path(taxdmp_arg):
+    """
+    Resolve the path to names.dmp and nodes.dmp from the --taxdmp argument.
+
+    Accepts:
+      - a .zip file path  -> extract to a temp dir
+      - a directory path  -> expect names.dmp + nodes.dmp inside
+      - None              -> download taxdmp.zip to a temp dir
+
+    Returns (names_path, nodes_path, tmp_dir_to_cleanup_or_None).
+    """
+    if taxdmp_arg is None:
+        tmp = tempfile.mkdtemp(prefix="taxdmp_")
+        zip_path = _download_taxdmp(tmp)
+        names_path, nodes_path = _extract_taxdmp(zip_path, tmp)
+        return names_path, nodes_path, tmp
+
+    p = Path(taxdmp_arg)
+    if p.is_file() and p.suffix == ".zip":
+        tmp = tempfile.mkdtemp(prefix="taxdmp_")
+        names_path, nodes_path = _extract_taxdmp(p, tmp)
+        return names_path, nodes_path, tmp
+
+    if p.is_dir():
+        names_path = p / "names.dmp"
+        nodes_path = p / "nodes.dmp"
+        if not names_path.exists() or not nodes_path.exists():
+            log.error("--taxdmp dir %s must contain names.dmp and nodes.dmp", p)
+            sys.exit(1)
+        return names_path, nodes_path, None
+
+    log.error("--taxdmp must be a .zip file or a directory; got: %s", taxdmp_arg)
+    sys.exit(1)
+
+
+def build_host_map_from_dump(taxdmp_arg=None):
+    """
+    Build host_to_category dict from the local NCBI taxonomy dump.
+
+    Algorithm:
+      1. Resolve / download names.dmp + nodes.dmp
+      2. Parse names.dmp, keep scientific name / common name /
+         genbank common name / equivalent name rows
+      3. Parse nodes.dmp -> parent->children dict
+      4. For each root in NCBI_TAXON_ROOTS (except 9606 Human):
+         BFS to collect all descendant tax_ids
+      5. Filter names df to those tax_ids, emit name_txt -> category
+      6. Add hard-coded Human entries for tax_id 9606
+
+    Returns dict: name_lower -> category
+    """
+    log.info("Building host map from local taxonomy dump...")
+
+    names_path, nodes_path, tmp_dir = _resolve_taxdmp_path(taxdmp_arg)
+
+    try:
+        names_df = _parse_names_dmp(names_path)
+        children = _parse_nodes_dmp(nodes_path)
+
+        # Build a set of all tax_ids present in names.dmp for fast membership checks
+        all_name_ids = set(names_df["tax_id"].dropna().astype(int))
+
+        host_map = {
+            "homo sapiens": "Human",
+            "human":        "Human",
+            "man":          "Human",
         }
-        if ncbi_key:
-            params["api_key"] = ncbi_key
-        xml_text = _get(f"{EUTILS_BASE}/efetch.fcgi", params=params, as_text=True)
-        if not xml_text:
-            continue
-        try:
-            root = ET.fromstring(xml_text)
-            for taxon in root.findall(".//Taxon"):
-                tax_id_el   = taxon.find("TaxId")
-                sci_name_el = taxon.find("ScientificName")
-                common_el   = taxon.find("OtherNames/CommonName")
-                if tax_id_el is None or sci_name_el is None:
-                    continue
-                tid      = int(tax_id_el.text)
-                sci_name = sci_name_el.text.lower().strip()
-                common   = common_el.text.lower().strip() if common_el is not None else ""
-                results.append((tid, sci_name, common))
-        except ET.ParseError as exc:
-            log.warning("XML parse error for chunk starting %s: %s", chunk[0], exc)
-        time.sleep(_NCBI_SLEEP)
 
-    return results
+        for root_id, category in NCBI_TAXON_ROOTS.items():
+            if root_id == 9606:
+                continue
 
+            subtree_ids = _bfs_subtree(root_id, children)
+            # Intersect with IDs that actually have names
+            name_ids_in_subtree = subtree_ids & all_name_ids
 
-def fetch_all_names_under_taxon(taxon_id, category, ncbi_key=None, max_ids=10000):
-    """
-    Fetch all names in the subtree of taxon_id using a single esearch
-    txid[Subtree] query followed by batched efetch.
-    Returns dict: name_lower -> category
-    """
-    params = {
-        "db":      "taxonomy",
-        "term":    f"txid{taxon_id}[Subtree]",
-        "retmax":  max_ids,
-        "retmode": "json",
-        "email":   NCBI_EMAIL,
-    }
-    if ncbi_key:
-        params["api_key"] = ncbi_key
+            subset = names_df[names_df["tax_id"].isin(name_ids_in_subtree)]
+            count = 0
+            for name in subset["name_txt"]:
+                if name and len(name) >= 3:
+                    host_map[name] = category
+                    count += 1
 
-    data = _get(f"{EUTILS_BASE}/esearch.fcgi", params=params)
-    if not data:
-        return {}
+            log.info(
+                "  taxon %d (%s): %d nodes in subtree, %d name entries",
+                root_id, category, len(subtree_ids), count,
+            )
 
-    ids = data.get("esearchresult", {}).get("idlist", [])
-    if not ids:
-        log.warning("  taxon %d: esearch returned no ids", taxon_id)
-        return {}
+        log.info("host_to_category: %d entries total", len(host_map))
+        return host_map
 
-    log.info("  taxon %d (%s): %d ids from esearch, fetching names...", taxon_id, category, len(ids))
-    time.sleep(_NCBI_SLEEP)
-
-    names = entrez_fetch_names([int(x) for x in ids], ncbi_key=ncbi_key)
-    host_map = {}
-    for _, sci_name, common_name in names:
-        if sci_name:
-            host_map[sci_name] = category
-        if common_name:
-            host_map[common_name] = category
-
-    return host_map
-
-
-def fetch_ncbi_host_map(ncbi_key=None):
-    """
-    Build host_to_category map using esearch txid[Subtree] for each root
-    in NCBI_TAXON_ROOTS. Two API calls per taxon instead of N^2 elink calls.
-    Returns dict: name_lower -> category
-    """
-    log.info("Fetching NCBI Taxonomy host mappings (esearch subtree)...")
-    host_map = {
-        "homo sapiens": "Human",
-        "human":        "Human",
-    }
-
-    for root_id, category in NCBI_TAXON_ROOTS.items():
-        if root_id == 9606:
-            continue
-        partial = fetch_all_names_under_taxon(root_id, category, ncbi_key=ncbi_key)
-        host_map.update(partial)
-        log.info("    -> %d names collected", len(partial))
-        time.sleep(_NCBI_SLEEP)
-
-    return host_map
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            log.info("Cleaned up temp dir %s", tmp_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -634,10 +694,10 @@ def _resolve_collisions(base):
             term_to_cats.setdefault(t, []).append(cat)
 
     # Cross-section lookup sets
-    host_keys      = set(base.get("host_to_category", {}).keys())
-    human_set      = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
-    animal_set     = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
-    specimen_set   = set(t.lower() for t in base.get("ambiguous_specimen_terms", []))
+    host_keys    = set(base.get("host_to_category", {}).keys())
+    human_set    = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
+    animal_set   = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
+    specimen_set = set(t.lower() for t in base.get("ambiguous_specimen_terms", []))
 
     intra_count = 0
     cross_count = 0
@@ -777,7 +837,7 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
             "ols4_api":                OLS_BASE,
             "ols4_ontologies":         list(OLS_ONTOLOGY_MAP.keys()),
             "ols4_term_counts":        ols_counts,
-            "ncbi_entrez_api":         EUTILS_BASE,
+            "ncbi_taxonomy_source":    "local taxdmp.zip (ftp.ncbi.nlm.nih.gov/pub/taxonomy/)",
             "ncbi_host_entries_added": ncbi_count,
             "umls_api":                UMLS_BASE if args.umls_key else "skipped",
         },
@@ -801,35 +861,27 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Build enriched one_health_dictionaries.json from ontology sources."
     )
-    p.add_argument("--base",       default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
-    p.add_argument("--output",     default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--base",   default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
+    p.add_argument("--output", default="src/biometaharmonizer/schemas/one_health_dictionaries.json")
     p.add_argument(
-        "--ncbi-email",
+        "--taxdmp",
         default=None,
         help=(
-            "Valid RFC-5321 email for NCBI Entrez etiquette (required). "
-            "Falls back to the NCBI_EMAIL environment variable."
+            "Path to a pre-downloaded taxdmp.zip or an extracted directory "
+            "containing names.dmp and nodes.dmp. "
+            "If omitted, taxdmp.zip is downloaded automatically from NCBI FTP."
         ),
     )
-    p.add_argument("--ncbi-key",   default=None, help="NCBI API key (raises rate limit to 10 req/s)")
-    p.add_argument("--umls-key",   default=None, help="UMLS API key for synonym expansion")
-    p.add_argument("--skip-ols",   action="store_true")
-    p.add_argument("--skip-ncbi",  action="store_true")
-    p.add_argument("--dry-run",    action="store_true")
+    p.add_argument("--umls-key",  default=None, help="UMLS API key for synonym expansion")
+    p.add_argument("--skip-ols",  action="store_true")
+    p.add_argument("--skip-ncbi", action="store_true")
+    p.add_argument("--dry-run",   action="store_true")
     return p.parse_args()
 
 
 def main():
-    global _NCBI_SLEEP
-
     args      = parse_args()
     base_path = Path(args.base)
-
-    _resolve_ncbi_email(args.ncbi_email)
-
-    if args.ncbi_key:
-        _NCBI_SLEEP = 0.11
-        log.info("NCBI API key provided - using 10 req/s rate limit")
 
     if not base_path.exists():
         log.error("Base file not found: %s", base_path)
@@ -851,8 +903,7 @@ def main():
 
     ncbi_host_map = {}
     if not args.skip_ncbi:
-        ncbi_host_map = fetch_ncbi_host_map(ncbi_key=args.ncbi_key)
-        log.info("NCBI host map: %d entries total", len(ncbi_host_map))
+        ncbi_host_map = build_host_map_from_dump(taxdmp_arg=args.taxdmp)
     else:
         log.info("Skipping NCBI Taxonomy (--skip-ncbi)")
 
