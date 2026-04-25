@@ -166,10 +166,56 @@ UBERON_ANIMAL_EXCLUSIVE = {
     "hemolymph", "exoskeleton",
 }
 
+# ---------------------------------------------------------------------------
 # Compiled patterns for _clean_ols_term()
+# ---------------------------------------------------------------------------
+
 _RE_LANG_TAG  = re.compile(r'\([^)]*,\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
 _RE_SCOPE_TAG = re.compile(r'\(\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGNORECASE)
 _RE_GS1_GPC   = re.compile(r'^\d+\s*-\s*.+\(gs1 gpc\)\s*$', re.IGNORECASE)
+
+# Regulatory catalogue codes from FoodOn synonyms.
+# These are classification scheme artefacts, not biological terms that can
+# be matched against BioSample free-text metadata.
+#
+# Pattern families covered:
+#   EFSA FoodEx2  : "12640 - bay leaves, dry (efsa foodex2)"
+#   EC codes      : "0900000 - 9. sugar plants (ec)"
+#   EuroFIR       : "grain or grain product (eurofir)"
+#   EFG (EFSA)    : "33  products for special nutritional use (efg)"
+#   CIAA          : "CIAA fruits and vegetables"
+#   CCFAC         : "CCFAC bakery wares"
+#   Codex         : "formulation agent (codex)", "food preservative (codex)"
+#   Other (...source) catalogue synonyms caught by the generic rule below
+#
+# Rule order matters: most-specific patterns first, generic catch-all last.
+_RE_REGULATORY_CATALOGUE = re.compile(
+    r"""
+    (?:
+        # Numeric code + dash + description + parenthesised source tag
+        # e.g.  "12640 - bay leaves, dry (efsa foodex2)"
+        #        "0900000 - 9. sugar plants (ec)"
+        ^\s*\d[\d\s]*\s*-\s*.+\(\s*(?:efsa\s+foodex2?|ec|eurofir|efg|codex|ciaa|ccfac|gs1|gpc)[^)]*\)\s*$
+        |
+        # Numeric code + dash + description, no source tag but format is clearly a catalogue entry
+        # e.g.  "05110 - sunflower shoots and sprouts (efsa foodex2)"
+        # (already caught above, but guard for tag-less variants)
+        ^\s*0\d{4,}\s*-\s*.+$
+        |
+        # Parenthesised source tag at end, no leading code
+        # e.g.  "grain or grain product (eurofir)"
+        #        "formulation agent (codex)"
+        #        "33  products for special nutritional use (efg)"
+        .+\(\s*(?:efsa\s+foodex2?|eurofir|efg|codex|ciaa|ccfac|gs1\s+gpc)[^)]*\)\s*$
+        |
+        # CIAA / CCFAC bare prefix (no parentheses)
+        # e.g.  "CIAA edible ices", "CCFAC cereals and cereal products"
+        ^\s*(?:CIAA|CCFAC)\s+.+$
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 # ---------------------------------------------------------------------------
 # HTTP helper
@@ -220,11 +266,13 @@ def _clean_ols_term(term):
     Returns the cleaned string, or None if the term should be discarded.
 
     Rules applied in order:
-      1. Non-ASCII / CJK characters -> discard (not matchable against BioSample metadata)
-      2. Language-tagged synonyms: '...(spanish, exact)', '...(japanese, related)' -> discard
-      3. OBO scope tag leak: '...(exact)', '...(related)', '...(broad)', '...(narrow)' -> strip suffix
-      4. GS1/GPC product codes: '10000215 - ice cream (gs1 gpc)' -> discard
-      5. Too short after cleaning (<= 2 chars) -> discard
+      1. Non-ASCII characters -> discard
+      2. Language-tagged synonyms: '...(spanish, exact)' -> discard
+      3. OBO scope tag leak: '...(exact)' -> strip suffix
+      4. GS1/GPC retail catalogue codes -> discard
+      5. Regulatory catalogue codes (EFSA FoodEx2, EC, EuroFIR, EFG,
+         CIAA, CCFAC, Codex) -> discard
+      6. Too short after cleaning (<= 2 chars) -> discard
     """
     if not term or not isinstance(term, str):
         return None
@@ -235,18 +283,22 @@ def _clean_ols_term(term):
     except UnicodeEncodeError:
         return None
 
-    # Rule 2: language-tagged synonyms like "(spanish, exact)" or "(japanese, related)"
+    # Rule 2: language-tagged synonyms
     if _RE_LANG_TAG.search(term):
         return None
 
-    # Rule 3: bare scope tag leak like "(exact)", "(related)", "(broad)", "(narrow)"
+    # Rule 3: bare OBO scope tag leak
     term = _RE_SCOPE_TAG.sub("", term).strip()
 
-    # Rule 4: GS1/GPC retail catalogue codes
+    # Rule 4: GS1/GPC retail catalogue codes (kept separate for clarity)
     if _RE_GS1_GPC.match(term):
         return None
 
-    # Rule 5: too short after cleaning
+    # Rule 5: regulatory catalogue codes (EFSA, EC, EuroFIR, CIAA, CCFAC, Codex)
+    if _RE_REGULATORY_CATALOGUE.match(term):
+        return None
+
+    # Rule 6: too short after cleaning
     if len(term) <= 2:
         return None
 

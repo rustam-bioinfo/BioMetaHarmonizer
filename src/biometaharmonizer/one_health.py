@@ -27,6 +27,68 @@ def _load_dictionaries(path):
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Institution / organisation guard for the host field
+# ---------------------------------------------------------------------------
+# Strings like "Amity Institute of Biotechnology, Rajasthan" are deposited
+# in the BioSample host attribute by submitters who confused it with an
+# affiliation field.  They must never produce a biological category.
+#
+# Two complementary signals are checked:
+#   1. _INSTITUTION_KEYWORD_RE  - well-known institutional words present
+#      anywhere in the string.
+#   2. _HOST_INSTITUTION_HEURISTIC_RE - structural pattern: a comma-separated
+#      string of 3+ capitalised tokens that looks like an address or
+#      organisation name rather than a binomial species name.
+#      A binomial has exactly two tokens, no comma, first capitalised.
+#      An institution name typically has >= 3 tokens and/or a comma.
+#
+# Both checks are applied only to the host field (see _integrate_evidence).
+# The isolation_source and env_* fields are not affected.
+
+_INSTITUTION_KEYWORD_RE = re.compile(
+    r"\b(?:"
+    r"university|universit[ae]t|universite|universidad|universidade"
+    r"|institute|institut"
+    r"|college|school of"
+    r"|laboratory|laboratories"
+    r"|center|centre"
+    r"|department|dept"
+    r"|hospital|clinic"
+    r"|foundation|association"
+    r"|corporation|corp\b|inc\b|ltd\b|llc\b"
+    r"|academy|academie"
+    r"|biotechnology|microbiology|virology|medicine|sciences"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Structural heuristic: string contains a comma AND at least one token
+# after the comma starts with an uppercase letter (city / state / country
+# component of an address).  Biological host names do not have commas.
+_HOST_COMMA_ADDRESS_RE = re.compile(
+    r".+,\s*[A-Z][a-zA-Z]"
+)
+
+
+def _is_institution_host(text):
+    """
+    Return True if the host field value looks like an institution or
+    address string rather than a biological organism name.
+
+    Criteria (either is sufficient):
+      - Contains an institution keyword (university, institute, college, ...)
+      - Structural pattern: has a comma followed by a capitalised token,
+        which is the typical form of "Organisation, City" or
+        "Organisation, State" deposited by mistake in the host field.
+    """
+    if _INSTITUTION_KEYWORD_RE.search(text):
+        return True
+    if _HOST_COMMA_ADDRESS_RE.match(text):
+        return True
+    return False
+
+
 class OneHealthClassifier:
     """
     Module 5: One Health Categorization.
@@ -277,8 +339,6 @@ class OneHealthClassifier:
         specimen_term = None
         specimen_field = None
         specimen_confidence = 0.0
-        # term that matched in isolation_source/specimen field — kept for
-        # evidence reporting even when domain drives the final category
         evidence_term = None
 
         for field in self._FIELD_PRIORITY:
@@ -287,6 +347,17 @@ class OneHealthClassifier:
                 continue
             val_str = str(val).strip()
             if not val_str or self.NULL_PATTERNS.match(val_str):
+                continue
+
+            # Institution / address guard: applies to the host field only.
+            # A value like "Amity Institute of Biotechnology, Rajasthan"
+            # should never produce a biological category.  Skip the entire
+            # value without further processing.
+            if field == "host" and _is_institution_host(val_str):
+                logger.debug(
+                    "host field looks like an institution/address, skipping: %r",
+                    val_str[:80],
+                )
                 continue
 
             layer = self._classify_text(val_str)
@@ -306,16 +377,12 @@ class OneHealthClassifier:
             if field == "host":
                 host_cat = self._host_to_category.get(val_str.lower())
                 if host_cat:
-                    # direct host lookup — unambiguous by definition
                     if domain_category is None:
                         domain_category = host_cat
                         domain_term = val_str
                         domain_field = field
                     continue
-                # host string classified via text layers — check ambiguity
-                # before promoting to domain signal
                 if term_lower in self._ambiguous_category_set:
-                    # treat as ambiguous specimen, not a reliable domain signal
                     if evidence_term is None:
                         evidence_term = term_lower
                     continue
@@ -338,8 +405,6 @@ class OneHealthClassifier:
 
             # specimen field
             if term_lower in self._ambiguous_category_set:
-                # cross-category ambiguous term: record as evidence but do not
-                # assign a category — needs domain context to resolve
                 if evidence_term is None:
                     evidence_term = term_lower
                     specimen_field = field
@@ -372,8 +437,6 @@ class OneHealthClassifier:
         # Pass 2: resolve
         # ------------------------------------------------------------------
         if domain_category is not None:
-            # domain wins; term reported is the domain term (what drove category)
-            # evidence_term or specimen_term kept as supporting evidence
             supporting = specimen_term or evidence_term
             out["one_health_category"]    = domain_category
             out["one_health_term"]        = domain_term
@@ -385,7 +448,6 @@ class OneHealthClassifier:
             out["one_health_confidence"]  = specimen_confidence
             out["one_health_source_field"] = specimen_field
         elif specimen_term is not None or evidence_term is not None:
-            # evidence found but category is ambiguous without domain context
             out["one_health_category"]    = "Unclassified"
             out["one_health_term"]        = specimen_term or evidence_term
             out["one_health_confidence"]  = specimen_confidence
