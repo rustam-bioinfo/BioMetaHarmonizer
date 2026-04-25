@@ -74,22 +74,31 @@ OLS_IRI_PREFIXES = {
 }
 
 # OLS ontology ids -> One Health category -> list of seed term IRIs
+#
+# Removed seeds that return 0 descendants from OLS4 hierarchicalDescendants
+# because they use OWL restriction-based (not subClassOf) hierarchies:
+#
+#   ENVO:00005772  habitat      - subclasses linked via 'overlaps' not subClassOf
+#   ENVO:00002042  surface water - partOf hierarchy, not traversed by OLS4
+#   ENVO:00000375  biofilm      - no real subClassOf tree; hand-curated in base dict
+#
+# Removed FoodOn seeds that are either obsolete or return 0 descendants:
+#   FOODON:03310113  aquatic food product - suspected obsolete IRI
+#   FOODON:03411347  dairy product        - suspected obsolete IRI
+# These food subcategories are already covered by FOODON:00001002 (food product)
+# and FOODON:03400361 (food material) which harvest their full subtrees.
 OLS_ONTOLOGY_MAP = {
     "envo": {
         "Environmental": [
             "ENVO:00000428",   # biome
             "ENVO:00010483",   # environmental material
-            # ENVO:00002297 (environmental feature) is obsolete - replaced below
             "ENVO:01000254",   # anthropogenic environment
-            "ENVO:01001110",   # ecosystem  (replaces obsolete ENVO:00002297)
-            "ENVO:00005772",   # habitat    (replaces obsolete ENVO:00002297)
+            "ENVO:01001110",   # ecosystem
             "ENVO:00000063",   # soil
             "ENVO:00000015",   # ocean
             "ENVO:00000873",   # freshwater body
             "ENVO:00000134",   # sediment
             "ENVO:00002006",   # water
-            "ENVO:00002042",   # surface water
-            "ENVO:00000375",   # biofilm
         ],
     },
     "foodon": {
@@ -97,8 +106,6 @@ OLS_ONTOLOGY_MAP = {
             "FOODON:00001002",  # food product
             "FOODON:03400361",  # food material
             "FOODON:00001709",  # animal food product
-            "FOODON:03310113",  # aquatic food product
-            "FOODON:03411347",  # dairy product
             "FOODON:03420194",  # plant food product
         ],
     },
@@ -121,7 +128,7 @@ OLS_ONTOLOGY_MAP = {
 # is context-dependent (Environmental pathogen, Food spoilage, Animal/Human
 # mycosis) and cannot be resolved from taxonomy alone. "Lab" is a
 # text-signal category only, detected via ontology_map["Lab"] keywords
-# (e.g. "in vitro", "ATCC", "type strain") — never via taxon subtree.
+# (e.g. "in vitro", "ATCC", "type strain") -- never via taxon subtree.
 NCBI_TAXON_ROOTS = {
     9606:  "Human",    # Homo sapiens (exact match, no subtree walk)
     40674: "Animal",   # Mammalia
@@ -296,6 +303,10 @@ def ols_descendants(ontology, short_id, max_terms=2000):
     false-positive category assignments.
 
     All collected strings pass through _clean_ols_term() before storage.
+
+    Warns if:
+      - zero terms are returned (likely obsolete IRI or restriction-based hierarchy)
+      - the max_terms ceiling is hit (results may be truncated)
     """
     iri = _short_id_to_iri(short_id)
     encoded = quote(quote(iri, safe=""), safe="")
@@ -338,7 +349,22 @@ def ols_descendants(ontology, short_id, max_terms=2000):
             break
         time.sleep(0.15)
 
-    return list(dict.fromkeys(terms))
+    unique_terms = list(dict.fromkeys(terms))
+
+    if len(unique_terms) == 0:
+        log.warning(
+            "ZERO terms returned for %s:%s - IRI may be obsolete or use "
+            "a non-subClassOf hierarchy not traversed by OLS4 hierarchicalDescendants",
+            ontology.upper(), short_id,
+        )
+    elif len(terms) >= max_terms:
+        log.warning(
+            "max_terms ceiling (%d) hit for %s:%s - results may be truncated; "
+            "consider raising max_terms",
+            max_terms, ontology.upper(), short_id,
+        )
+
+    return unique_terms
 
 
 def fetch_ols_terms():
@@ -373,6 +399,12 @@ def fetch_ols_terms():
     result["_uberon_human"]     = human_terms
     result["_uberon_animal"]    = animal_terms
     result["_uberon_ambiguous"] = ambiguous_terms
+
+    # Log post-collection unique counts per category
+    for cat in ("Environmental", "Food", "Plant"):
+        raw = result.get(cat, [])
+        unique = len(set(raw))
+        log.info("OLS terms collected: %s -> %d raw / %d unique", cat, len(raw), unique)
 
     return result
 
@@ -682,7 +714,8 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
         ]
         if new_terms:
             ont_map.setdefault(category, []).extend(new_terms)
-            log.info("  ontology_map[%s] +%d terms", category, len(new_terms))
+            post_dedup = len(set(ont_map[category]))
+            log.info("  ontology_map[%s] +%d terms -> %d unique total", category, len(new_terms), post_dedup)
 
     # host_to_category
     host_map   = base.setdefault("host_to_category", {})
@@ -813,7 +846,6 @@ def main():
         for cat, terms in ols_terms.items():
             if not cat.startswith("_"):
                 ols_counts[cat] = len(terms)
-                log.info("OLS terms collected: %s -> %d", cat, len(terms))
     else:
         log.info("Skipping OLS4 (--skip-ols)")
 
