@@ -137,7 +137,15 @@ NCBI_TAXON_ROOTS = {
     7898:  "Animal",   # Actinopterygii
     6656:  "Animal",   # Arthropoda
     6447:  "Animal",   # Mollusca
+    6231:  "Animal",   # Nematoda
+    6340:  "Animal",   # Annelida
+    7586:  "Animal",   # Echinodermata
+    6073:  "Animal",   # Cnidaria
+    6040:  "Animal",   # Porifera
     33090: "Plant",    # Viridiplantae
+    2763:  "Plant",    # Rhodophyta (red algae)
+    3041:  "Plant",    # Chlorophyta (green algae, non-land)
+    2870:  "Plant",    # Phaeophyceae (brown algae / kelp)
 }
 
 # name_class values from names.dmp that are useful for host matching.
@@ -580,6 +588,9 @@ def build_host_map_from_dump(taxdmp_arg=None):
       4. For each root in NCBI_TAXON_ROOTS (except 9606 Human):
          BFS to collect all descendant tax_ids
       5. Filter names df to those tax_ids, emit name_txt -> category
+         Only names with 1-3 tokens are kept (binomials, trinomials, and
+         short common names); longer strings are strain/haplotype descriptors
+         that never appear in BioSample host fields.
       6. Add hard-coded Human entries for tax_id 9606
 
     Returns dict: name_lower -> category
@@ -612,7 +623,7 @@ def build_host_map_from_dump(taxdmp_arg=None):
             subset = names_df[names_df["tax_id"].isin(name_ids_in_subtree)]
             count = 0
             for name in subset["name_txt"]:
-                if name and len(name) >= 3:
+                if name and len(name) >= 3 and len(name.split()) <= 3:
                     host_map[name] = category
                     count += 1
 
