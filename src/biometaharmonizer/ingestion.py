@@ -25,6 +25,7 @@ Working directory note (Colab):
 import importlib.resources
 import json
 import logging
+import random
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -49,7 +50,7 @@ ASSEMBLY_SUMMARY_REFSEQ = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
 _BATCH_SIZE = 200
-_ESEARCH_BATCH = 100
+_ESEARCH_BATCH = 50
 _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
@@ -209,6 +210,12 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
 
     Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
+
+    if ENTREZ_API_KEY is None:
+        logger.warning(
+            "No NCBI API key set. Rate limit is 3 req/s; connection resets may occur. "
+            "Register a free key at https://www.ncbi.nlm.nih.gov/account/ and call set_api_key()."
+        )
 
     ids = _load_ids(source)
     ids = _deduplicate(ids)
@@ -439,6 +446,9 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
     acc_to_uid = {}
 
     for start in range(0, len(accessions), _ESEARCH_BATCH):
+        if start == 0:
+            time.sleep(inter_req_sleep)
+
         batch = accessions[start:start + _ESEARCH_BATCH]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
@@ -456,7 +466,8 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
             except Exception as exc:
                 wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
-                    "esearch attempt %d/%d failed: %s. Retrying in %ds...",
+                    "esearch attempt %d/%d: NCBI closed connection (likely rate limit): %s. "
+                    "Retrying in %ds...",
                     attempt, _MAX_RETRIES, exc, wait,
                 )
                 time.sleep(wait)
@@ -495,7 +506,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 if acc and uid:
                     acc_to_uid[acc] = uid
 
-        time.sleep(inter_req_sleep)
+        time.sleep(inter_req_sleep + random.uniform(0, 0.05))
 
     return acc_to_uid
 
@@ -549,7 +560,7 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
         fetched = min(start + _BATCH_SIZE, total)
         logger.info("Fetched %d / %d (%d/%d batches)", fetched, total, batch_i + 1, n_batches)
         if batch_i < n_batches - 1:
-            time.sleep(inter_batch_sleep)
+            time.sleep(inter_batch_sleep + random.uniform(0, 0.05))
 
     if failed_ids:
         logger.warning("%d UIDs could not be fetched: %s", len(failed_ids), failed_ids[:10])
