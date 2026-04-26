@@ -54,6 +54,14 @@ _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
 
+# Laboratory / collection-context terms that should be stripped from any field
+# before tier1 matching.  These describe the handling/provenance of the sample,
+# not its biological origin.
+_LAB_CONTEXT_RE = re.compile(
+    r"\b(?:laboratory|laboratories|lab\b|in\s+vitro|in\s+vivo)\b",
+    re.IGNORECASE,
+)
+
 
 def _is_institution_host(text):
     if _INSTITUTION_KEYWORD_RE.search(text):
@@ -578,6 +586,14 @@ class OneHealthClassifier:
                 out["one_health_setting"] = layer["one_health_setting"]
 
             cat = layer.get("one_health_category")
+
+            # Lab from _classify_text is only meaningful for host/specimen
+            # fields where a culture collection prefix (ATCC, DSM, etc.)
+            # was the sole content.  For supporting/domain fields the Lab
+            # signal should not override real biological evidence.
+            if cat == "Lab":
+                continue
+
             if cat is None or cat == "Unclassified":
                 continue
 
@@ -743,8 +759,14 @@ class OneHealthClassifier:
           "host_dict"    from host_to_category lookup
           "tier1"        from tier1_patterns regex
           "fuzzy"        from rapidfuzz fallback
-          "institution"  from institution/culture collection guard
+          "institution"  from culture collection prefix guard only
           "none"         no match
+
+        Lab category is returned ONLY when a culture collection prefix
+        (ATCC, DSM, NCTC, etc.) is the sole meaningful content of the
+        field after stripping.  Broad institution keywords (laboratory,
+        hospital, university) are stripped and classification continues
+        on the residual text rather than returning Lab directly.
         """
         unclassified = {
             "one_health_category":    "Unclassified",
@@ -762,19 +784,20 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
-        if _is_institution_host(text):
-            stripped = _INSTITUTION_KEYWORD_RE.sub("", text).strip(" .,;:-")
-            if len(stripped) < 4:
-                return {
-                    "one_health_category":    "Lab",
-                    "one_health_term":        text[:60],
-                    "one_health_confidence":  0.9,
-                    "one_health_term_source": "institution",
-                    "one_health_processing":  np.nan,
-                    "one_health_setting":     np.nan,
-                }
-            text = stripped if stripped else text
-
+        # ------------------------------------------------------------------
+        # Institution guard — two levels:
+        #
+        # Level 1: culture collection prefixes (ATCC, DSM, NCTC, ...) via
+        #   self._INSTITUTION_RE.  If the residual after stripping these is
+        #   <4 chars the field is a culture collection reference -> Lab.
+        #
+        # Level 2: broad institution keywords (laboratory, university, ...) via
+        #   _INSTITUTION_KEYWORD_RE.  These describe provenance / handling
+        #   context, not biological origin.  Strip them and continue
+        #   classification on the residual.  Do NOT return Lab from this path
+        #   because "laboratory sample", "environmental laboratory sample", etc.
+        #   carry real biological signal in the remaining words.
+        # ------------------------------------------------------------------
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
             stripped = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
             if len(stripped) < 4:
@@ -786,6 +809,14 @@ class OneHealthClassifier:
                     "one_health_processing":  np.nan,
                     "one_health_setting":     np.nan,
                 }
+
+        # Strip broad institution keywords and lab-context words before
+        # further processing.  The residual may still contain biological
+        # signal (e.g. "Environmental laboratory sample" -> "Environmental sample").
+        text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
+        text = _LAB_CONTEXT_RE.sub("", text).strip()
+        if not text:
+            return unclassified
 
         text = self._expand_abbreviations(text)
         working = self._normalize_synonyms(text)
