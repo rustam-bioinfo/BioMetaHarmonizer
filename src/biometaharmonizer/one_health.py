@@ -89,6 +89,24 @@ def _is_institution_host(text):
     return False
 
 
+def _tier1_to_pattern(value):
+    """
+    Convert a tier1_patterns value to a compiled regex.
+
+    The JSON stores tier1_patterns values as either:
+      - a list of strings  -> joined with | and each term word-boundary wrapped
+      - a string           -> used directly as a regex pattern
+
+    Returns a compiled re.Pattern.
+    """
+    if isinstance(value, list):
+        escaped = "|".join(re.escape(t) for t in value)
+        pattern = r"\b(?:" + escaped + r")\b"
+    else:
+        pattern = value
+    return re.compile(pattern, re.IGNORECASE)
+
+
 class OneHealthClassifier:
     """
     Module 5: One Health Categorization.
@@ -236,7 +254,7 @@ class OneHealthClassifier:
         for category in tier1_order:
             if category in tier1_raw:
                 self._TIER1_PATTERNS.append(
-                    (category, re.compile(tier1_raw[category], re.IGNORECASE))
+                    (category, _tier1_to_pattern(tier1_raw[category]))
                 )
 
         if _RAPIDFUZZ_AVAILABLE:
