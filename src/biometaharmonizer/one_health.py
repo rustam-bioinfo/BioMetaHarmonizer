@@ -34,29 +34,6 @@ def _load_dictionaries(path):
 # ---------------------------------------------------------------------------
 # Institution / organisation guard for the host field
 # ---------------------------------------------------------------------------
-# Strings like "Amity Institute of Biotechnology, Rajasthan" are deposited
-# in the BioSample host attribute by submitters who confused it with an
-# affiliation field.  They must never produce a biological category.
-#
-# Two complementary signals are checked:
-#   1. _INSTITUTION_KEYWORD_RE  - well-known institutional words present
-#      anywhere in the string.
-#      NOTE: deliberately excludes domain-specific scientific terms
-#      (biotechnology, microbiology, virology, medicine, sciences) that
-#      appear legitimately in isolation_source / host values such as
-#      "marine microbiology sample" or "traditional medicine plant".
-#   2. _HOST_INSTITUTION_HEURISTIC_RE - structural pattern: a comma-separated
-#      string that looks like an address or organisation name.
-#      IMPORTANT: the pattern explicitly rejects valid biological notations
-#      of the form "Genus species, Strain" (two-word binomial + strain).
-#      A binomial + strain has exactly one comma and the pre-comma part
-#      contains at most two whitespace-separated tokens.  Strings with
-#      three or more tokens before the comma are treated as addresses.
-#
-# Both checks are applied to the host field in _integrate_evidence AND
-# inside _classify_text so that the institution guard is active for all
-# public API entry-points including the legacy classify() method.
-
 _INSTITUTION_KEYWORD_RE = re.compile(
     r"\b(?:"
     r"university|universit[ae]t|universite|universidad|universidade"
@@ -73,16 +50,10 @@ _INSTITUTION_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 # FIX #5: removed over-broad scientific terms (biotechnology, microbiology,
-# virology, medicine, sciences) from _INSTITUTION_KEYWORD_RE.  Those terms
-# appear legitimately in biological metadata values (e.g. host =
-# "traditional medicine plant", isolation_source = "marine microbiology
-# sample") and must not trigger the institution guard.
+# virology, medicine, sciences) from _INSTITUTION_KEYWORD_RE.
 
-# FIX #6: Structural heuristic restricted to strings where the part before
-# the first comma has THREE OR MORE whitespace tokens, which is the typical
-# form of an organisation name ("Amity Institute of Biotechnology").
-# Valid biological notations like "Mus musculus, C57BL/6" have exactly ONE
-# or TWO tokens before the comma and are now correctly preserved.
+# FIX #6: requires >=3 tokens before comma so strain notations like
+# 'Mus musculus, C57BL/6' are NOT flagged as institution addresses.
 _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
@@ -92,21 +63,68 @@ def _is_institution_host(text):
     """
     Return True if the host field value looks like an institution or
     address string rather than a biological organism name.
-
-    Criteria (either is sufficient):
-      - Contains an institution keyword (university, institute, college, ...)
-        NOTE: scientific field names (biotechnology, microbiology, etc.) are
-        deliberately NOT included to avoid false positives.
-      - Structural pattern: three or more words before a comma followed by a
-        capitalised token, consistent with "Organisation Name, City" form.
-        Biological strain notations ("Mus musculus, C57BL/6") have at most
-        two words before the comma and are NOT flagged.
     """
     if _INSTITUTION_KEYWORD_RE.search(text):
         return True
     if _HOST_COMMA_ADDRESS_RE.match(text):
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Host name normalisation
+# ---------------------------------------------------------------------------
+# Submitters frequently append botanical authority abbreviations ('L.',
+# 'Thunb.', 'DC.'), infraspecific ranks ('subsp.', 'var.', 'f.'),
+# trailing rank indicators ('sp.', 'ssp.'), strain/colony suffixes, or
+# parenthetical common-name qualifiers to scientific names.
+# None of these are present as keys in host_to_category; stripping them
+# before lookup recovers the canonical binomial.
+#
+# Examples that are fixed:
+#   'Capsicum annuum L.'                          -> 'capsicum annuum'
+#   'Tryonyx sinensis (Chinese soft-shell turtle)' -> 'tryonyx sinensis'
+#   'Ursus sp.'                                    -> 'ursus'
+#   'Macrotermes natalensis colony Mn106'          -> 'macrotermes natalensis'
+#   'Bacillus thuringiensis subsp'                 -> 'bacillus thuringiensis'
+#   'Galium aparine L.'                            -> 'galium aparine'
+
+# Step 1: remove parenthetical qualifiers like '(common name)'
+_HOST_PAREN_RE = re.compile(r"\s*\(.*?\)\s*")
+# Step 2: remove trailing author abbreviations / infraspecific suffixes
+# Order matters: longer patterns first.
+_HOST_SUFFIX_RE = re.compile(
+    r"\s+(?:"
+    r"subsp\.?(?:\s+\S+)?"     # subsp. or subsp epithet
+    r"|ssp\.?(?:\s+\S+)?"
+    r"|var\.?(?:\s+\S+)?"
+    r"|f\.(?:\s+\S+)?"
+    r"|sp\.?"
+    r"|colony\s+\S+"
+    r"|strain\s+\S+"
+    r"|[A-Z][a-z]*\."          # single-letter or abbreviated author (e.g. 'L.')
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_host_name(text):
+    """
+    Strip parenthetical qualifiers and taxonomic suffixes from a host
+    field value and return the cleaned, lower-cased string for use as a
+    key in host_to_category.
+
+    Tries the fully stripped form first; if that is not useful (less than
+    two tokens), returns only the cleaned lower-case original so the
+    caller can decide what to do with it.
+    """
+    cleaned = _HOST_PAREN_RE.sub(" ", text).strip()
+    # Iteratively strip trailing suffixes (handles stacked qualifiers)
+    prev = None
+    while prev != cleaned:
+        prev = cleaned
+        cleaned = _HOST_SUFFIX_RE.sub("", cleaned).strip()
+    return cleaned.lower()
 
 
 def _tier1_to_pattern(value):
@@ -141,16 +159,11 @@ _CLASSIFY_TEXT_KEYS = frozenset({
 # ---------------------------------------------------------------------------
 # One Health category values
 # ---------------------------------------------------------------------------
-# Core WHO/FAO/OIE One Health tiers.  Aquatic and Wildlife are recognised
-# as first-class sub-tiers (FIX #7) that may be returned by tier-1 patterns
-# loaded from one_health_dictionaries.json.  They are treated as valid
-# category values so downstream analytics can distinguish them from the
-# broad Animal / Environmental umbrella when the evidence supports it.
 _VALID_CATEGORIES = frozenset({
     "Human",
     "Animal",
-    "Aquatic",    # FIX #7: explicit aquatic surveillance tier
-    "Wildlife",   # FIX #7: explicit wildlife reservoir tier
+    "Aquatic",    # FIX #7
+    "Wildlife",   # FIX #7
     "Plant",
     "Food",
     "Environmental",
@@ -181,17 +194,13 @@ class OneHealthClassifier:
       7. Tier-1 regex patterns (loaded from JSON, compiled at init)
       8. rapidfuzz fuzzy fallback (ontology_map corpus)
 
-    Two-pass evidence integration in classify_multi_field():
-      Pass 1 - collect signals from all fields without committing:
-               domain signals  <- host / env_broad_scale (supporting only)
-                                  / sample_type
-               specimen signals <- isolation_source / env_medium /
-                                   env_local_scale
-               setting / processing <- all fields
-      Pass 2 - resolve using term sets loaded from JSON:
-               domain_category wins over specimen-only match
-               ambiguous terms checked against ambiguous_category_terms for
-               context-aware tiebreaking; without domain -> Unclassified
+    Host-field resolution in _integrate_evidence (two-pass):
+      The host_to_category dictionary lookup is performed BEFORE calling
+      _classify_text so that Latinised binomials ('Bos taurus',
+      'Gallus gallus', etc.) that have no match in tier1_patterns are
+      correctly resolved via the dict without being incorrectly skipped.
+      _normalize_host_name() strips botanical suffixes and parenthetical
+      common-name qualifiers before the lookup.
 
     Field priority:
       isolation_source > host > env_medium > env_local_scale
@@ -204,7 +213,7 @@ class OneHealthClassifier:
     Fuzzy threshold (default 92):
       WRatio >= 92 is required before a fuzzy match is accepted.
       This conservative default avoids false positives for short
-      biological terms (e.g. "rat" / "cat" score ~87 on WRatio).
+      biological terms (e.g. 'rat' / 'cat' score ~87 on WRatio).
       Lower values increase recall at the cost of precision.
 
     Public API
@@ -225,11 +234,8 @@ class OneHealthClassifier:
     ]
 
     # FIX #1 / FIX #8:
-    # host is handled by a dedicated explicit branch in _integrate_evidence
-    # (not via the _DOMAIN_FIELDS branch) to preserve its higher semantic
-    # authority.  env_broad_scale is demoted from _DOMAIN_FIELDS to
-    # _SUPPORTING_FIELDS: it contributes evidence only when no domain or
-    # specimen signal has been found, and at reduced confidence.
+    # host is handled by a dedicated explicit branch in _integrate_evidence.
+    # env_broad_scale demoted to _SUPPORTING_FIELDS.
     _DOMAIN_FIELDS = {"sample_type"}
     _SUPPORTING_FIELDS = {"env_broad_scale"}   # FIX #8
     _SPECIMEN_FIELDS = {"isolation_source", "env_medium", "env_local_scale"}
@@ -253,8 +259,7 @@ class OneHealthClassifier:
             key=lambda x: len(x[0]),
             reverse=True,
         )
-        # FIX #10: pre-compile word-boundary patterns for each synonym phrase
-        # so that short phrases ("rat", "pig") do not match inside longer words.
+        # FIX #10: pre-compile word-boundary patterns for synonym phrases
         self._synonym_patterns = [
             (re.compile(r"\b" + re.escape(phrase) + r"\b", re.IGNORECASE), canonical)
             for phrase, canonical in self._synonym_map
@@ -382,7 +387,6 @@ class OneHealthClassifier:
         rows = []
         for v in series:
             result = self._classify_text(v)
-            # Validate schema and patch any missing keys defensively
             for key in _CLASSIFY_TEXT_KEYS:
                 if key not in result:
                     logger.warning(
@@ -412,9 +416,7 @@ class OneHealthClassifier:
 
         one_health_category is always a string, never NaN.
 
-        FIX #11: unknown keyword arguments trigger a UserWarning so callers
-        catch typos (e.g. env_localscale instead of env_local_scale) rather
-        than silently losing the series.
+        FIX #11: unknown keyword arguments trigger a UserWarning.
         """
         known = set(self._FIELD_PRIORITY)
         for k in fields:
@@ -470,8 +472,8 @@ class OneHealthClassifier:
         specimen_field = None
         specimen_confidence = 0.0
         evidence_term = None
-        evidence_field = None   # FIX #3: track the field that set evidence_term
-        supporting_category = None   # FIX #8: env_broad_scale supporting signal
+        evidence_field = None   # FIX #3
+        supporting_category = None   # FIX #8
         supporting_term = None
         supporting_field = None
 
@@ -483,19 +485,82 @@ class OneHealthClassifier:
             if not val_str or self.NULL_PATTERNS.match(val_str):
                 continue
 
-            # Institution / address guard: applies to the host field only.
-            if field == "host" and _is_institution_host(val_str):
-                logger.debug(
-                    "host field looks like an institution/address, skipping: %r",
-                    val_str[:80],
-                )
+            # ----------------------------------------------------------
+            # host field: institution guard then host_to_category lookup
+            # BEFORE calling _classify_text.
+            #
+            # ROOT-CAUSE FIX: previously host_to_category was consulted
+            # only AFTER checking `cat == 'Unclassified'` from
+            # _classify_text.  Latinised binomials (Bos taurus, Gallus
+            # gallus, Mus musculus …) have NO match in tier1_patterns
+            # (which stores adjective-form terms: bovine, avian, murine)
+            # so _classify_text returned Unclassified and the `continue`
+            # guard fired before the dict was ever consulted.  Moving the
+            # lookup here makes host_to_category the primary resolution
+            # mechanism for the host field, as intended.
+            # ----------------------------------------------------------
+            if field == "host":
+                if _is_institution_host(val_str):
+                    logger.debug(
+                        "host field looks like an institution/address, skipping: %r",
+                        val_str[:80],
+                    )
+                    continue
+
+                # Try exact match first, then normalised (suffix-stripped) form
+                host_key = val_str.lower()
+                host_cat = self._host_to_category.get(host_key)
+                if host_cat is None:
+                    norm_key = _normalize_host_name(val_str)
+                    host_cat = self._host_to_category.get(norm_key)
+                    lookup_term = norm_key
+                else:
+                    lookup_term = host_key
+
+                if host_cat is not None:
+                    if domain_category is None:
+                        domain_category = host_cat
+                        domain_term = lookup_term
+                        domain_field = field
+                    # Collect processing/setting from this field even
+                    # on a dict hit, then move on.
+                    layer = self._classify_text(val_str)
+                    if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
+                        out["one_health_processing"] = layer["one_health_processing"]
+                    if pd.notna(layer.get("one_health_setting")) and pd.isna(out["one_health_setting"]):
+                        out["one_health_setting"] = layer["one_health_setting"]
+                    continue
+
+                # No dict hit: fall through to _classify_text
+                layer = self._classify_text(val_str)
+                if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
+                    out["one_health_processing"] = layer["one_health_processing"]
+                if pd.notna(layer.get("one_health_setting")) and pd.isna(out["one_health_setting"]):
+                    out["one_health_setting"] = layer["one_health_setting"]
+
+                cat = layer.get("one_health_category")
+                if cat is None or cat == "Unclassified":
+                    continue
+                term_lower = str(layer.get("one_health_term") or val_str).lower()
+                if term_lower in self._ambiguous_category_set:
+                    if evidence_term is None:
+                        evidence_term = term_lower
+                        evidence_field = field
+                    continue
+                if domain_category is None:
+                    domain_category = cat
+                    # FIX #2: store resolved token, not raw val_str
+                    domain_term = layer.get("one_health_term") or val_str
+                    domain_field = field
                 continue
 
+            # ----------------------------------------------------------
+            # All other fields: call _classify_text first
+            # ----------------------------------------------------------
             layer = self._classify_text(val_str)
 
             if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
                 out["one_health_processing"] = layer["one_health_processing"]
-
             if pd.notna(layer.get("one_health_setting")) and pd.isna(out["one_health_setting"]):
                 out["one_health_setting"] = layer["one_health_setting"]
 
@@ -505,39 +570,7 @@ class OneHealthClassifier:
 
             term_lower = str(layer.get("one_health_term") or val_str).lower()
 
-            # ----------------------------------------------------------
-            # host field: explicit branch (highest biological authority)
-            # FIX #1: host is intentionally outside _DOMAIN_FIELDS to
-            # keep its dedicated lookup logic independent of the generic
-            # domain branch.  Do NOT add host to _DOMAIN_FIELDS.
-            # ----------------------------------------------------------
-            if field == "host":
-                host_cat = self._host_to_category.get(val_str.lower())
-                if host_cat:
-                    if domain_category is None:
-                        domain_category = host_cat
-                        # FIX #2: store the matched layer term (the
-                        # resolved token), not the raw val_str.  Fall
-                        # back to val_str only when no layer term exists.
-                        domain_term = layer.get("one_health_term") or val_str
-                        domain_field = field
-                    continue
-                if term_lower in self._ambiguous_category_set:
-                    if evidence_term is None:
-                        evidence_term = term_lower
-                        evidence_field = field   # FIX #3
-                    continue
-                if domain_category is None:
-                    domain_category = cat
-                    domain_term = layer["one_health_term"]
-                    domain_field = field
-                continue
-
-            # ----------------------------------------------------------
-            # FIX #8: env_broad_scale demoted to supporting signal.
-            # It does NOT set domain_category; it is recorded separately
-            # and used in Pass 2 only when no stronger signal exists.
-            # ----------------------------------------------------------
+            # FIX #8: env_broad_scale demoted to supporting signal
             if field in self._SUPPORTING_FIELDS:
                 if term_lower not in self._ambiguous_category_set:
                     if supporting_category is None:
@@ -594,28 +627,28 @@ class OneHealthClassifier:
         # ------------------------------------------------------------------
         if domain_category is not None:
             supporting = specimen_term or evidence_term
-            out["one_health_category"]    = domain_category
-            out["one_health_term"]        = domain_term
-            out["one_health_confidence"]  = 1.0 if supporting else 0.8
+            out["one_health_category"]     = domain_category
+            out["one_health_term"]         = domain_term
+            out["one_health_confidence"]   = 1.0 if supporting else 0.8
             out["one_health_source_field"] = domain_field
         elif specimen_category is not None:
-            out["one_health_category"]    = specimen_category
-            out["one_health_term"]        = specimen_term
-            out["one_health_confidence"]  = specimen_confidence
+            out["one_health_category"]     = specimen_category
+            out["one_health_term"]         = specimen_term
+            out["one_health_confidence"]   = specimen_confidence
             out["one_health_source_field"] = specimen_field
         elif specimen_term is not None or evidence_term is not None:
-            # FIX #3: use evidence_field as fallback when specimen_field is None
+            # FIX #3: use evidence_field when specimen_field is None
             source = specimen_field if specimen_field is not None else evidence_field
-            out["one_health_category"]    = "Unclassified"
-            out["one_health_term"]        = specimen_term or evidence_term
-            out["one_health_confidence"]  = specimen_confidence
+            out["one_health_category"]     = "Unclassified"
+            out["one_health_term"]         = specimen_term or evidence_term
+            out["one_health_confidence"]   = specimen_confidence
             out["one_health_source_field"] = source
         else:
-            # FIX #8: try supporting signal (env_broad_scale) before setting inference
+            # FIX #8: try supporting signal before setting inference
             if supporting_category is not None:
-                out["one_health_category"]    = supporting_category
-                out["one_health_term"]        = supporting_term
-                out["one_health_confidence"]  = 0.5
+                out["one_health_category"]     = supporting_category
+                out["one_health_term"]         = supporting_term
+                out["one_health_confidence"]   = 0.5
                 out["one_health_source_field"] = supporting_field
             else:
                 setting_val = out.get("one_health_setting")
@@ -623,9 +656,9 @@ class OneHealthClassifier:
                     setting_lower = str(setting_val).lower()
                     inferred = self._setting_to_category.get(setting_lower)
                     if inferred:
-                        out["one_health_category"]    = inferred
-                        out["one_health_confidence"]  = self._setting_confidence.get(inferred, 0.4)
-                        out["one_health_term"]        = setting_lower
+                        out["one_health_category"]     = inferred
+                        out["one_health_confidence"]   = self._setting_confidence.get(inferred, 0.4)
+                        out["one_health_term"]         = setting_lower
                         out["one_health_source_field"] = "setting_inference"
 
         return out
@@ -638,16 +671,12 @@ class OneHealthClassifier:
         """
         Expand abbreviations token by token.
 
-        FIX #9: tokens are split on whitespace, hyphens, and forward-slashes
-        so that compound forms like "N/A", "CSF-blood", or "env/food" are
-        correctly decomposed before abbreviation lookup.  Non-matching
-        sub-tokens are reassembled with their original separator.
+        FIX #9: split on whitespace, hyphens, and forward-slashes so
+        that 'N/A', 'CSF-blood', 'env/food' are correctly decomposed.
         """
-        # Split on whitespace while keeping track of separators
         tokens = re.split(r"([\s/\-]+)", text)
         expanded = []
         for tok in tokens:
-            # Separators (pure whitespace/punctuation) pass through unchanged
             if re.fullmatch(r"[\s/\-]+", tok):
                 expanded.append(tok)
                 continue
@@ -657,12 +686,8 @@ class OneHealthClassifier:
 
     def _normalize_synonyms(self, text):
         """
-        Replace synonym phrases with their canonical forms.
-
-        FIX #10: each synonym phrase is matched with word-boundary anchors
-        (pre-compiled in __init__ as self._synonym_patterns) so that short
-        phrases like "rat" or "pig" are not replaced inside longer words
-        such as "cattle" or "pigeon".
+        Replace synonym phrases with canonical forms using word-boundary
+        anchors (FIX #10).
         """
         result = text
         for pattern, canonical in self._synonym_patterns:
@@ -679,9 +704,8 @@ class OneHealthClassifier:
           one_health_category, one_health_term, one_health_confidence,
           one_health_processing, one_health_setting
 
-        The institution guard (Layer 2) is applied here so it is active
-        for ALL public entry-points including the legacy classify() and
-        classify_with_confidence() methods.  (FIX #4)
+        FIX #4: institution guard applied here so all entry-points
+        (including legacy classify()) benefit from it.
         """
         unclassified = {
             "one_health_category": "Unclassified",
@@ -698,11 +722,7 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
-        # FIX #4: institution guard applied here (not only in
-        # _integrate_evidence) so legacy classify() also benefits.
-        # The module-level _is_institution_host() uses the conservative
-        # regex that excludes scientific field names (FIX #5) and
-        # correctly handles strain notations (FIX #6).
+        # FIX #4 / #5 / #6: conservative institution guard
         if _is_institution_host(text):
             stripped = _INSTITUTION_KEYWORD_RE.sub("", text).strip(" .,;:-")
             if len(stripped) < 4:
@@ -713,11 +733,9 @@ class OneHealthClassifier:
                     "one_health_processing": np.nan,
                     "one_health_setting": np.nan,
                 }
-            # Not short enough to be pure institution token; continue
-            # classification with the remaining text.
             text = stripped if stripped else text
 
-        # Layer 2b: JSON-loaded institution / culture collection patterns
+        # Layer 2b: JSON institution / culture collection patterns
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
             stripped = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
             if len(stripped) < 4:
@@ -732,7 +750,7 @@ class OneHealthClassifier:
         # Layer 3: abbreviation expansion
         text = self._expand_abbreviations(text)
 
-        # Layer 4: synonym normalization (word-boundary safe, FIX #10)
+        # Layer 4: synonym normalization (FIX #10)
         working = self._normalize_synonyms(text)
 
         processing = np.nan
@@ -761,7 +779,7 @@ class OneHealthClassifier:
                 setting = smatch.group(1).lower()
                 working = (working[: smatch.start()] + working[smatch.end():]).strip()
 
-        # Layer 7: tier-1 patterns compiled from JSON
+        # Layer 7: tier-1 patterns
         if working:
             for category, pattern in self._TIER1_PATTERNS:
                 m = pattern.search(working)
@@ -774,8 +792,7 @@ class OneHealthClassifier:
                         "one_health_setting": setting,
                     }
 
-        # Layer 8: rapidfuzz fuzzy fallback
-        # FIX #13: threshold raised to 92 (see class docstring for rationale)
+        # Layer 8: rapidfuzz fuzzy fallback (FIX #13: threshold 92)
         if _RAPIDFUZZ_AVAILABLE and self._fuzzy_corpus and working and len(working) > 2:
             result = _rfprocess.extractOne(
                 working.lower(),
@@ -793,7 +810,6 @@ class OneHealthClassifier:
                     "one_health_setting": setting,
                 }
 
-        # No match
         return {
             "one_health_category": "Unclassified",
             "one_health_term": np.nan,
