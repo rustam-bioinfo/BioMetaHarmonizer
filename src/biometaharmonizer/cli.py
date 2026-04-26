@@ -136,7 +136,7 @@ def _run(args: argparse.Namespace) -> int:
         print("ERROR: Ingestion returned an empty DataFrame.", file=sys.stderr)
         return 2
 
-    logger.info("         %d records, %d columns ingested.", len(df), len(df.columns))
+    logger.info("         %d records ingested.", len(df))
 
     logger.info("Step 2/5  Key harmonization")
     try:
@@ -146,8 +146,6 @@ def _run(args: argparse.Namespace) -> int:
         print(f"ERROR during key harmonization: {exc}", file=sys.stderr)
         logger.debug("", exc_info=True)
         return 2
-
-    logger.info("         fixed schema retained: %d columns.", len(df.columns))
 
     if "collection_date" in df.columns:
         logger.info("Step 3/5  Date parsing")
@@ -182,7 +180,7 @@ def _run(args: argparse.Namespace) -> int:
             oh_df = classifier.classify_multi_field(**present)
             for col in oh_df.columns:
                 df[col] = oh_df[col]
-            logger.info("         Extended mode: %d source fields consumed.", len(present))
+            logger.info("         %d source fields used.", len(present))
         except Exception as exc:
             logger.warning("Extended classification failed (%s); falling back to legacy joint mode.", exc)
             if "isolation_source" in df.columns and "host" in df.columns:
