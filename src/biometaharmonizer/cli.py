@@ -5,6 +5,7 @@ Command-line interface for BioMetaHarmonizer.
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 
@@ -82,7 +83,11 @@ def _looks_like_filepath(s: str) -> bool:
 
 def _run(args: argparse.Namespace) -> int:
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s  %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     logger = logging.getLogger("biometaharmonizer.cli")
 
     input_arg = args.input.strip()
@@ -125,6 +130,7 @@ def _run(args: argparse.Namespace) -> int:
         kwargs["cache_dir"] = args.cache_dir
 
     logger.info("Step 1/5  Ingestion")
+    t0 = time.perf_counter()
     try:
         df = ingest(source, **kwargs)
     except Exception as exc:
@@ -136,9 +142,10 @@ def _run(args: argparse.Namespace) -> int:
         print("ERROR: Ingestion returned an empty DataFrame.", file=sys.stderr)
         return 2
 
-    logger.info("         %d records ingested.", len(df))
+    logger.info("         %d records ingested in %.1fs.", len(df), time.perf_counter() - t0)
 
     logger.info("Step 2/5  Key harmonization")
+    t0 = time.perf_counter()
     try:
         mapper = KeyMapper()
         df = mapper.map_columns(df)
@@ -146,31 +153,41 @@ def _run(args: argparse.Namespace) -> int:
         print(f"ERROR during key harmonization: {exc}", file=sys.stderr)
         logger.debug("", exc_info=True)
         return 2
+    logger.info("         Done in %.1fs.", time.perf_counter() - t0)
 
     if "collection_date" in df.columns:
         logger.info("Step 3/5  Date parsing")
+        t0 = time.perf_counter()
         de = DateEngine()
         date_df = de.parse_with_range(df["collection_date"])
         df["collection_date"] = date_df["collection_date"]
         if "collection_date_range" in date_df.columns:
             df["collection_date_range"] = date_df["collection_date_range"]
         parsed = df["collection_date"].notna().sum()
-        logger.info("         %d / %d dates parsed.", parsed, len(df))
+        logger.info(
+            "         %d / %d dates parsed in %.1fs.",
+            parsed, len(df), time.perf_counter() - t0,
+        )
     else:
         logger.info("Step 3/5  Date parsing skipped (no collection_date column).")
 
     if "geo_loc_name" in df.columns:
         logger.info("Step 4/5  Geospatial parsing")
+        t0 = time.perf_counter()
         ge = GeoEngine()
         geo_df = ge.parse(df["geo_loc_name"])
         for col in geo_df.columns:
             df[col] = geo_df[col]
         resolved = df["geo_country"].notna().sum() if "geo_country" in df.columns else 0
-        logger.info("         %d / %d geo_loc_name values resolved to country.", resolved, len(df))
+        logger.info(
+            "         %d / %d geo_loc_name values resolved to country in %.1fs.",
+            resolved, len(df), time.perf_counter() - t0,
+        )
     else:
         logger.info("Step 4/5  Geospatial parsing skipped (no geo_loc_name column).")
 
     logger.info("Step 5/5  One Health classification")
+    t0 = time.perf_counter()
     classifier = OneHealthClassifier()
     src_cols = ["isolation_source", "env_broad_scale", "env_local_scale", "env_medium", "sample_type", "host"]
     present = {col: df[col] for col in src_cols if col in df.columns}
@@ -180,7 +197,10 @@ def _run(args: argparse.Namespace) -> int:
             oh_df = classifier.classify_multi_field(**present)
             for col in oh_df.columns:
                 df[col] = oh_df[col]
-            logger.info("         %d source fields used.", len(present))
+            logger.info(
+                "         %d source fields used; done in %.1fs.",
+                len(present), time.perf_counter() - t0,
+            )
         except Exception as exc:
             logger.warning("Extended classification failed (%s); falling back to legacy joint mode.", exc)
             if "isolation_source" in df.columns and "host" in df.columns:
@@ -197,12 +217,14 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("         %d / %d records classified.", classified, len(df))
 
     logger.info("Writing output to %s (format=%s)", output_path, fmt)
+    t0 = time.perf_counter()
     try:
         write(df, output_path, fmt=fmt)
     except Exception as exc:
         print(f"ERROR writing output: {exc}", file=sys.stderr)
         logger.debug("", exc_info=True)
         return 2
+    logger.info("         Written in %.1fs.", time.perf_counter() - t0)
 
     if args.summary:
         summary_path = Path(args.summary)
