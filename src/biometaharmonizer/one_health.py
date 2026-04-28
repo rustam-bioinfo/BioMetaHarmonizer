@@ -20,15 +20,71 @@ except ImportError:
     )
 
 
+_REQUIRED_DICT_KEYS = frozenset({
+    "ontology_map",
+    "host_to_category",
+    "unambiguous_human_terms",
+    "unambiguous_animal_terms",
+    "ambiguous_specimen_terms",
+    "synonym_map",
+    "tier1_patterns",
+})
+
+
 def _load_dictionaries(path):
-    if path is not None and Path(path).exists():
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    bundled = Path(__file__).parent / "schemas" / "one_health_dictionaries.json"
-    if bundled.exists():
-        with open(bundled, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    """
+    Load one_health_dictionaries.json from *path* (if given and exists),
+    or from the bundled schemas/ location.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither the caller-supplied path nor the bundled file exists.
+    ValueError
+        If the file cannot be parsed as JSON, or if required top-level
+        keys are absent.  The error message names the problematic file
+        and instructs the user how to regenerate it.
+    """
+    candidate = None
+    if path is not None:
+        p = Path(path)
+        if p.exists():
+            candidate = p
+        else:
+            raise FileNotFoundError(
+                f"one_health_dictionaries.json not found at the supplied path: {path}. "
+                "Check the path or omit it to use the bundled dictionary."
+            )
+
+    if candidate is None:
+        bundled = Path(__file__).parent / "schemas" / "one_health_dictionaries.json"
+        if bundled.exists():
+            candidate = bundled
+        else:
+            raise FileNotFoundError(
+                f"one_health_dictionaries.json not found at bundled path: {bundled}. "
+                "Run: python scripts/build_dictionaries.py"
+            )
+
+    try:
+        with open(candidate, encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"one_health_dictionaries.json is malformed at {candidate}: {exc}. "
+            "Re-run scripts/build_dictionaries.py to regenerate."
+        ) from exc
+
+    missing = _REQUIRED_DICT_KEYS - data.keys()
+    if missing:
+        raise ValueError(
+            f"one_health_dictionaries.json at {candidate} is missing required keys: "
+            f"{sorted(missing)}. "
+            "Re-run scripts/build_dictionaries.py to regenerate."
+        )
+
+    logger.debug("Loaded one_health_dictionaries.json from %s", candidate)
+    return data
 
 
 # ---------------------------------------------------------------------------
