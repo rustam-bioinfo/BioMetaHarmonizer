@@ -43,7 +43,7 @@ biometaharmonizer run \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--input FILE` | required | Path to accession list (one per line) or comma-separated accessions |
+| `--input FILE` | required | Path to accession list (one per line) |
 | `--email EMAIL` | required | Valid contact email for NCBI Entrez — must contain `@` and a domain |
 | `--output FILE` | required | Output file path |
 | `--api-key KEY` | — | NCBI API key; raises rate limit from 3 to 10 requests/second |
@@ -100,7 +100,9 @@ write_summary(df, "fill_rates.csv")
 
 ## Output columns
 
-The output DataFrame contains the following 52 columns. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
+The output DataFrame contains the following 57 columns. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
+
+The first 52 columns come from ingestion. The final 5 are added by `OneHealthClassifier.classify_multi_field()` (column 28, `one_health_category`, is also from that step).
 
 | # | Column | Source | Description |
 |---|--------|--------|-------------|
@@ -119,8 +121,8 @@ The output DataFrame contains the following 52 columns. Columns with no data for
 | 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
 | 14 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
 | 15 | `geo_country` | GeoEngine | Country resolved from `geo_loc_name` |
-| 16 | `geo_region` | GeoEngine | Sub-national region parsed from the colon-delimited format `"Country: Region, Locality"`; `NaN` for comma-only inputs |
-| 17 | `geo_locality` | GeoEngine | Locality parsed after the region in colon format, or the part after the first comma in comma-only inputs |
+| 16 | `geo_region` | GeoEngine | Sub-national region; populated only from colon-format inputs (`"Country: Region, Locality"`); `NaN` for comma-only inputs |
+| 17 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
 | 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
 | 19 | `geo_sea_ocean` | GeoEngine | Sea or ocean name for marine locations |
 | 20 | `geo_loc_raw` | GeoEngine | Preserved raw string for coordinate-only inputs (e.g. `"40.71 N, 74.00 W"`); `NaN` for all other inputs |
@@ -131,31 +133,37 @@ The output DataFrame contains the following 52 columns. Columns with no data for
 | 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
 | 26 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
 | 27 | `sample_type` | BioSample attribute | Sample type or specimen classification |
-| 28 | `one_health_category` | OneHealthClassifier | Human / Animal / Food / Environmental / Lab |
-| 29 | `isolate` | BioSample attribute | Isolate identifier |
-| 30 | `strain` | BioSample attribute | Strain designation |
-| 31 | `sub_strain` | BioSample attribute | Sub-strain designation |
-| 32 | `serotype` | BioSample attribute | Serotype |
-| 33 | `serovar` | BioSample attribute | Serovar |
-| 34 | `genotype` | BioSample attribute | Genotype or sequence type |
-| 35 | `culture_collection` | BioSample attribute | Culture collection identifier |
-| 36 | `outbreak` | BioSample attribute | Outbreak identifier |
-| 37 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
-| 38 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
-| 39 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
-| 40 | `sequencing_method` | BioSample attribute | Sequencing platform |
-| 41 | `assembly_method` | BioSample attribute | Genome assembly software |
-| 42 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
-| 43 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
-| 44 | `submission_date` | BioSample XML | Date first submitted |
-| 45 | `last_update` | BioSample XML | Date last modified |
-| 46 | `publication_date` | BioSample XML | Date made publicly available |
-| 47 | `access` | BioSample XML | `public` or `controlled-access` |
-| 48 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
-| 49 | `status_date` | BioSample XML | Date current status was assigned |
-| 50 | `title` | BioSample XML | Free-text title of the BioSample record |
-| 51 | `description_comment` | BioSample XML | Free-text description or comment block |
-| 52 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict; also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector |
+| 28 | `one_health_category` | OneHealthClassifier | One of: Human, Animal, Aquatic, Wildlife, Plant, Food, Environmental, Lab, Unclassified |
+| 29 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
+| 30 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
+| 31 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
+| 32 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
+| 33 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`), if any |
+| 34 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
+| 35 | `isolate` | BioSample attribute | Isolate identifier |
+| 36 | `strain` | BioSample attribute | Strain designation |
+| 37 | `sub_strain` | BioSample attribute | Sub-strain designation |
+| 38 | `serotype` | BioSample attribute | Serotype |
+| 39 | `serovar` | BioSample attribute | Serovar |
+| 40 | `genotype` | BioSample attribute | Genotype or sequence type |
+| 41 | `culture_collection` | BioSample attribute | Culture collection identifier |
+| 42 | `outbreak` | BioSample attribute | Outbreak identifier |
+| 43 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
+| 44 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
+| 45 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 46 | `sequencing_method` | BioSample attribute | Sequencing platform |
+| 47 | `assembly_method` | BioSample attribute | Genome assembly software |
+| 48 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
+| 49 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
+| 50 | `submission_date` | BioSample XML | Date first submitted |
+| 51 | `last_update` | BioSample XML | Date last modified |
+| 52 | `publication_date` | BioSample XML | Date made publicly available |
+| 53 | `access` | BioSample XML | `public` or `controlled-access` |
+| 54 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
+| 55 | `status_date` | BioSample XML | Date current status was assigned |
+| 56 | `title` | BioSample XML | Free-text title of the BioSample record |
+| 57 | `description_comment` | BioSample XML | Free-text description or comment block |
+| 58 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict; also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector |
 
 ---
 
@@ -261,9 +269,33 @@ Handling notes:
 
 ## One Health classification
 
-`OneHealthClassifier` assigns one of five categories: **Human**, **Animal**, **Food**, **Environmental**, **Lab**.
+`OneHealthClassifier` loads all biological knowledge from `schemas/one_health_dictionaries.json` and assigns each record one of nine categories: **Human**, **Animal**, **Aquatic**, **Wildlife**, **Plant**, **Food**, **Environmental**, **Lab**, **Unclassified**.
 
-Up to six columns are scored simultaneously: `isolation_source`, `env_broad_scale`, `env_local_scale`, `env_medium`, `sample_type`, `host`. Each column is scored independently against Tier 1 keyword patterns; the highest-confidence match across all columns wins. The CLI pipeline uses multi-field mode automatically.
+`classify_multi_field()` accepts up to six named `pd.Series` and returns a DataFrame with seven columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `one_health_category` | str | Assigned category; always a string, never NaN |
+| `one_health_term` | str / NaN | The specific term or phrase that triggered the classification |
+| `one_health_confidence` | float | Score in [0, 1]; computed as `term_specificity × field_weight + corroboration_bonus` |
+| `one_health_evidence_level` | str | `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
+| `one_health_processing` | str / NaN | Processing/handling term detected in the text (e.g. `pasteurized`, `frozen`) |
+| `one_health_setting` | str / NaN | Setting term detected in the text (e.g. `clinical`, `farm`, `retail`) |
+| `one_health_source_field` | str / NaN | Input field that produced the winning classification |
+
+**Confidence model.** For each field, `confidence = min(1.0, term_specificity × field_weight + corroboration_bonus)`:
+
+- `term_specificity`: 1.0 for host dictionary or unambiguous list hits; 0.90/0.75/0.50 for tier1 phrases by length; `WRatio / 100` for rapidfuzz fallback; 0.30 for ambiguous terms.
+- `field_weight`: `isolation_source` / host dict hit → 1.00; host text hit → 0.90; `env_medium` → 0.85; `env_local_scale` → 0.80; `sample_type` → 0.70; `env_broad_scale` → 0.50.
+- `corroboration_bonus`: +0.10 when a second independent field agrees with the same category.
+
+**Classification pipeline per record:**
+
+1. `host` field: institution guard (strips culture collection prefixes; returns Lab if residual < 4 chars), then `host_to_category` dictionary lookup, then text classification fallback.
+2. `isolation_source`, `env_medium`, `env_local_scale`: matched against unambiguous human/animal term lists, then tier1 patterns, then rapidfuzz fuzzy fallback against the ontology map.
+3. `sample_type`: domain-level signal; used to set category if no specimen field matched.
+4. `env_broad_scale`: supporting signal only; contributes a corroboration bonus but does not set the primary category on its own.
+5. Pass 2 resolves the winning category from accumulated domain/specimen/supporting evidence.
 
 ---
 
@@ -302,10 +334,10 @@ The package ships with pre-built schema files. Rebuild them only when you want t
 
 ### `one_health_dictionaries.json`
 
-Generated by `scripts/build_dictionaries.py`. It queries OLS4 (ENVO, FoodOn, UBERON, Plant Ontology), downloads the NCBI Taxonomy dump, and optionally queries the UMLS API for synonym expansion. Hand-curated entries in the base file always win over ontology-derived ones.
+Generated by `scripts/build_dictionaries.py`. It queries OLS4 (ENVO, FoodOn, UBERON, Plant Ontology), downloads the NCBI Taxonomy dump (~65 MB), and optionally queries the UMLS API for synonym expansion. Hand-curated entries in the base file always win over ontology-derived ones.
 
 ```bash
-# Full rebuild (downloads taxdmp.zip ~65 MB from NCBI)
+# Full rebuild (downloads taxdmp.zip from NCBI automatically)
 python scripts/build_dictionaries.py \
     --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
     --output src/biometaharmonizer/schemas/one_health_dictionaries.json
