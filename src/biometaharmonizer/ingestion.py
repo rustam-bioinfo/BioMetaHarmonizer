@@ -58,10 +58,10 @@ _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
 
+# fix(#17): lightweight email validation for NCBI Entrez contact email.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 # fix(#21): only retry on errors that are genuinely transient.
-# Previously a bare `except Exception` retried AttributeError, TypeError,
-# KeyError, MemoryError etc. identically to network hiccups, which masked
-# bugs and wasted the entire retry budget on unrecoverable failures.
 _TRANSIENT_EXCEPTIONS = (
     urllib.error.URLError,
     http.client.HTTPException,
@@ -170,6 +170,12 @@ BIOSAMPLE_SCHEMA_SET = set(BIOSAMPLE_SCHEMA)
 
 def set_email(email: str) -> None:
     global ENTREZ_EMAIL
+    email = str(email).strip()
+    if not _EMAIL_RE.match(email):
+        raise ValueError(
+            f"Invalid email address: {email!r}. "
+            "NCBI requires a valid contact email for all Entrez API calls."
+        )
     ENTREZ_EMAIL = email
     Entrez.email = email
 
@@ -222,18 +228,20 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
     return _read_assembly_summary_cached(str(cache_path), mtime)
 
 
-def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
+def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd.DataFrame:
+    # fix(#25): require an explicit valid email before any Entrez API call.
+    resolved_email = email or (None if ENTREZ_EMAIL == _DEFAULT_EMAIL else ENTREZ_EMAIL)
+    if not resolved_email:
+        raise ValueError(
+            "An email address is required for NCBI Entrez API calls. "
+            "Pass email='your@email.com' to ingest() or call set_email() beforehand."
+        )
+    set_email(resolved_email)
+
     if api_key is not None:
         set_api_key(api_key)
     if cache_dir is not None:
         set_cache_dir(cache_dir)
-
-    if ENTREZ_EMAIL == _DEFAULT_EMAIL:
-        raise ValueError(
-            "A valid e-mail address is required by NCBI for all Entrez API calls. "
-            "Call set_email('your@real.email') before calling ingest(), "
-            "or pass email via the CLI --email flag."
-        )
 
     Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
@@ -256,7 +264,22 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
         samn = list(set(samn + resolved))
 
     if not samn:
-        raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
+        # fix(#16): provide actionable breakdown instead of a generic error.
+        reasons = []
+        if unrecognized:
+            reasons.append(
+                f"{len(unrecognized)} unrecognized IDs (expected SAMN/SAME/SAMD/GCF/GCA prefixes)"
+            )
+        if gcx and unresolved_gcx:
+            reasons.append(
+                f"{len(unresolved_gcx)} assembly accessions not found in the local assembly index "
+                f"(cache dir: {CACHE_DIR}; delete cached assembly_summary_*.txt to force refresh)"
+            )
+        if not reasons:
+            reasons.append(
+                "no BioSample accessions remained after input classification and assembly-to-BioSample resolution"
+            )
+        raise ValueError("No valid BioSample IDs could be resolved. Reasons: " + "; ".join(reasons))
 
     synonym_lookup = build_synonym_lookup()
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
@@ -615,12 +638,8 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             )
             raw = handle.read()
             handle.close()
-            # _parse_biosample_xml guards against empty/truncated XML (fix #19)
-            # and raises ET.ParseError only for truly malformed content, which
-            # we treat as non-retryable here.
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
         except ET.ParseError as exc:
-            # Non-retryable: bad XML from NCBI will not improve on retry.
             logger.error(
                 "XML ParseError on efetch batch (malformed/truncated response): %s", exc
             )
@@ -639,14 +658,6 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
 
 
 def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
-    """
-    Parse a BioSampleSet XML byte string into a list of record dicts.
-
-    fix(#19): guard against empty or whitespace-only responses before calling
-    ET.fromstring().  An empty NCBI response previously raised ET.ParseError
-    which was indistinguishable from a malformed response and consumed all
-    retry budget in the caller.
-    """
     if not xml_bytes or not xml_bytes.strip():
         logger.warning("Received empty XML response from NCBI efetch -- skipping batch.")
         return []
@@ -656,7 +667,7 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
     except ET.ParseError as exc:
         logger.error("XML ParseError from NCBI response (truncated?): %s", exc)
         logger.debug("Partial XML content (first 200 bytes): %r", xml_bytes[:200])
-        raise  # re-raise so _fetch_batch_with_retry can catch and return []
+        raise
 
     records = []
     for sample in root.findall(".//BioSample"):
