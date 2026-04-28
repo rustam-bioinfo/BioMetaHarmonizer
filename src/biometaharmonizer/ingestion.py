@@ -23,11 +23,13 @@ Working directory note (Colab):
 """
 
 import functools
+import http.client
 import importlib.resources
 import json
 import logging
 import re
 import time
+import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -55,6 +57,18 @@ _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
+
+# fix(#21): only retry on errors that are genuinely transient.
+# Previously a bare `except Exception` retried AttributeError, TypeError,
+# KeyError, MemoryError etc. identically to network hiccups, which masked
+# bugs and wasted the entire retry budget on unrecoverable failures.
+_TRANSIENT_EXCEPTIONS = (
+    urllib.error.URLError,
+    http.client.HTTPException,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
 
 _NULL_PATTERNS = re.compile(
     r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
@@ -169,23 +183,8 @@ def set_api_key(key: str) -> None:
 def set_cache_dir(path) -> None:
     global CACHE_DIR
     CACHE_DIR = Path(path)
-    # Invalidate the lru_cache when the cache directory is changed so the
-    # next call re-reads from the new location.
     _read_assembly_summary_cached.cache_clear()
 
-
-# ---------------------------------------------------------------------------
-# fix(#30): Assembly summary in-memory cache
-#
-# The assembly summary TSVs are ~300 MB each and contain ~2 M rows.  Reading
-# them from disk takes 3-15 s depending on the environment.  In interactive
-# sessions (e.g. a per-organism loop) ingest() was called repeatedly and the
-# files were re-read every time.
-#
-# Solution: cache the parsed DataFrame keyed on (path_str, mtime).  The mtime
-# key ensures automatic invalidation whenever _ensure_assembly_summaries()
-# re-downloads a stale file.  maxsize=2 covers both refseq + genbank.
-# ---------------------------------------------------------------------------
 
 @functools.lru_cache(maxsize=2)
 def _read_assembly_summary_cached(path_str: str, mtime: float) -> pd.DataFrame:
@@ -217,14 +216,7 @@ def _read_assembly_summary_uncached(cache_path: Path, extra_cols: list = None) -
 
 
 def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
-    """
-    Public-facing wrapper: returns a cached DataFrame for *cache_path*.
-    The cache is keyed on (path, mtime) so a freshly downloaded file
-    automatically invalidates the previous entry.
-    """
     if extra_cols:
-        # Extra columns bypass the cache because the cached frame may not
-        # include them.  This path is rare (only used by optional callers).
         return _read_assembly_summary_uncached(cache_path, extra_cols=extra_cols)
     mtime = cache_path.stat().st_mtime if cache_path.exists() else 0.0
     return _read_assembly_summary_cached(str(cache_path), mtime)
@@ -381,8 +373,6 @@ def _ensure_assembly_summaries() -> None:
                     cache_path.unlink()
                 except OSError:
                     pass
-                # Invalidate the in-memory cache for this file so the
-                # freshly downloaded version is read on the next access.
                 _read_assembly_summary_cached.cache_clear()
             else:
                 logger.debug("Assembly index cache OK: %s (%.1f days old)", label, age_days)
@@ -432,19 +422,6 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
 
 
 def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
-    """
-    Build a biosample -> {bioproject, refseq, genbank} lookup dict.
-
-    fix(#20): replaced iterrows() with a fully vectorised approach.
-    iterrows() on the 2 M-row assembly summary DataFrame was the dominant
-    cost for large datasets (7k+ genomes).  The new implementation:
-      1. Filters the DataFrame to matching rows with .isin() (unchanged).
-      2. Selects the first GCF_ and first GCA_ accession per biosample
-         using vectorised str.startswith() + groupby-first, then merges
-         into a dict via a single to_dict() call.
-    This reduces the per-record overhead from O(columns) Python loop
-    iterations to O(1) dict lookups.
-    """
     lookup: dict = {}
 
     for label in ["refseq", "genbank"]:
@@ -461,17 +438,13 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
             if hits.empty:
                 continue
 
-            # Vectorised: assign GCF/GCA prefix column once, then groupby.
             hits["_is_refseq"] = hits["assembly_accession"].str.startswith("GCF_")
 
-            # First bioproject per biosample (any row).
             bp_series = (
                 hits[hits["bioproject"].notna()]
                 .groupby("biosample")["bioproject"]
                 .first()
             )
-
-            # First RefSeq and GenBank accession per biosample.
             refseq_series = (
                 hits[hits["_is_refseq"]]
                 .groupby("biosample")["assembly_accession"]
@@ -520,7 +493,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 result = Entrez.read(handle)
                 handle.close()
                 break
-            except Exception as exc:
+            except _TRANSIENT_EXCEPTIONS as exc:
                 wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
                     "esearch attempt %d/%d failed: %s. Retrying in %ds...",
@@ -538,11 +511,6 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
-        # fix(#18): add rate-limit sleep after every esummary call in the
-        # inner loop.  Previously sleep() fired only at the end of the outer
-        # esearch loop, leaving consecutive esummary calls with no delay.
-        # Without an API key NCBI permits 3 req/s; back-to-back esearch +
-        # esummary on the same iteration exceeded this and triggered HTTP 429.
         for uid_start in range(0, len(uids), _ESEARCH_BATCH):
             uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
             for attempt in range(1, _MAX_RETRIES + 1):
@@ -551,7 +519,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                     summaries = Entrez.read(sum_handle)
                     sum_handle.close()
                     break
-                except Exception as exc:
+                except _TRANSIENT_EXCEPTIONS as exc:
                     wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                     logger.warning(
                         "esummary attempt %d/%d failed: %s. Retrying in %ds...",
@@ -567,7 +535,6 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 if acc and uid:
                     acc_to_uid[acc] = uid
 
-            # Rate-limit sleep after each esummary sub-batch (fix #18).
             time.sleep(inter_req_sleep)
 
         time.sleep(inter_req_sleep)
@@ -633,6 +600,11 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
 
 
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
+    """
+    Fetch one efetch batch and parse it.  Retries on transient network errors
+    only (fix #21).  ET.ParseError (malformed/truncated NCBI response) is
+    caught immediately and returns [] without consuming retry budget.
+    """
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -643,21 +615,50 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             )
             raw = handle.read()
             handle.close()
+            # _parse_biosample_xml guards against empty/truncated XML (fix #19)
+            # and raises ET.ParseError only for truly malformed content, which
+            # we treat as non-retryable here.
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
-        except Exception as exc:
+        except ET.ParseError as exc:
+            # Non-retryable: bad XML from NCBI will not improve on retry.
+            logger.error(
+                "XML ParseError on efetch batch (malformed/truncated response): %s", exc
+            )
+            return []
+        except _TRANSIENT_EXCEPTIONS as exc:
             wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
             logger.warning(
-                "Batch fetch attempt %d/%d failed: %s. Retrying in %ds...",
+                "Batch fetch attempt %d/%d failed (transient): %s. Retrying in %ds...",
                 attempt, _MAX_RETRIES, exc, wait,
             )
             time.sleep(wait)
+    logger.error(
+        "efetch failed after %d retries for %d UIDs.", _MAX_RETRIES, len(uid_batch)
+    )
     return None
 
 
 def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
-    records = []
-    root = ET.fromstring(xml_bytes)
+    """
+    Parse a BioSampleSet XML byte string into a list of record dicts.
 
+    fix(#19): guard against empty or whitespace-only responses before calling
+    ET.fromstring().  An empty NCBI response previously raised ET.ParseError
+    which was indistinguishable from a malformed response and consumed all
+    retry budget in the caller.
+    """
+    if not xml_bytes or not xml_bytes.strip():
+        logger.warning("Received empty XML response from NCBI efetch -- skipping batch.")
+        return []
+
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        logger.error("XML ParseError from NCBI response (truncated?): %s", exc)
+        logger.debug("Partial XML content (first 200 bytes): %r", xml_bytes[:200])
+        raise  # re-raise so _fetch_batch_with_retry can catch and return []
+
+    records = []
     for sample in root.findall(".//BioSample"):
         record = dict.fromkeys(BIOSAMPLE_SCHEMA, None)
 
