@@ -58,10 +58,8 @@ _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
 
-# fix(#17): lightweight email validation for NCBI Entrez contact email.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-# fix(#21): only retry on errors that are genuinely transient.
 _TRANSIENT_EXCEPTIONS = (
     urllib.error.URLError,
     http.client.HTTPException,
@@ -229,7 +227,6 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
 
 
 def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd.DataFrame:
-    # fix(#25): require an explicit valid email before any Entrez API call.
     resolved_email = email or (None if ENTREZ_EMAIL == _DEFAULT_EMAIL else ENTREZ_EMAIL)
     if not resolved_email:
         raise ValueError(
@@ -247,6 +244,15 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
     Entrez.api_key = ENTREZ_API_KEY
 
     ids = _load_ids(source)
+
+    # fix(#35): warn and return early on empty input rather than silently
+    # returning an empty DataFrame with no indication of what happened.
+    if not ids:
+        logger.warning(
+            "ingest() called with an empty accession list. Returning empty DataFrame."
+        )
+        return pd.DataFrame(columns=BIOSAMPLE_SCHEMA)
+
     ids = _deduplicate(ids)
     gcx, samn, unrecognized = _classify_ids(ids)
 
@@ -264,7 +270,6 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
         samn = list(set(samn + resolved))
 
     if not samn:
-        # fix(#16): provide actionable breakdown instead of a generic error.
         reasons = []
         if unrecognized:
             reasons.append(
@@ -623,11 +628,6 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
 
 
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
-    """
-    Fetch one efetch batch and parse it.  Retries on transient network errors
-    only (fix #21).  ET.ParseError (malformed/truncated NCBI response) is
-    caught immediately and returns [] without consuming retry budget.
-    """
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -722,10 +722,13 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             hn = (attr.get("harmonized_name") or "").strip()
             an = (attr.get("attribute_name") or "").strip()
             raw_key = hn or an or "unknown"
+            # fix(#27): always pass through _normalize_null regardless of whether
+            # the XML text node is None or empty.  Previously `if val is None:
+            # continue` bypassed writing the column entirely, meaning the
+            # null-normalization contract was only applied to non-empty values.
+            # Now null/empty attributes explicitly write None to the schema column
+            # (or are omitted from extras), consistent with all other fields.
             val = _normalize_null(attr.text)
-
-            if val is None:
-                continue
 
             resolved = None
             if hn and hn in BIOSAMPLE_SCHEMA_SET:
@@ -744,16 +747,19 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     raw_key = candidate
 
             if resolved is not None:
+                # Write None explicitly so the column reflects the NCBI submission
+                # state rather than staying at the schema initialisation default.
                 if record.get(resolved) is None:
                     record[resolved] = val
-                else:
+                elif val is not None:
                     existing = extras.get(raw_key)
                     extras[raw_key] = f"{existing}|{val}" if existing else val
                     logger.debug(
                         "Attribute collision on '%s' (biosample=%s): primary value kept, duplicate stored in _extra_attributes.",
                         resolved, record.get("biosample_accession"),
                     )
-            else:
+            elif val is not None:
+                # Only store non-null unknowns in extras to keep _extra_attributes lean.
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
 
