@@ -4,20 +4,17 @@
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
 
-A Python package for harmonizing, parsing, and standardizing NCBI BioSample metadata for large-scale genomic epidemiology.
+A Python package for fetching, parsing, and standardizing NCBI BioSample metadata for large-scale genomic epidemiology.
 
-## Overview
+---
 
-The NCBI BioSample database is the central repository for genomic metadata. Because submissions are predominantly free-text and crowd-sourced, the metadata is highly unstructured across thousands of submitters. **BioMetaHarmonizer** resolves this by providing a lightweight, pip-installable pipeline that:
+## What it does
 
-- Fetches BioSample XML records directly from NCBI Entrez for any list of BioSample or assembly accessions
-- Resolves BioProject and assembly accessions (GCF_ / GCA_) from NCBI assembly summary flat files
-- Produces a **deterministic output schema** — every run outputs the same columns in the same order, regardless of what attributes individual submitters included
-- Maps raw free-text attribute variants to standard keys using the **official NCBI BioSample `harmonized_name` XML attribute** as the primary signal, with a two-layer synonym lookup (`unified.json` + NCBI attribute table) as fallback
-- Preserves any attribute that does not resolve to a known output column losslessly in `_extra_attributes` as a JSON string — no data is ever discarded
-- Normalizes common null-like submitter values (`missing`, `not applicable`, `unknown`, `N/A`, `missing: ...`, etc.) to true missing values during ingestion so downstream parsing operates on clean metadata
-- Parses dates (40+ formats → ISO 8601), resolves ISO-3166 country/region geography, and classifies isolation source into One Health categories (Human / Animal / Food / Environmental / Lab)
-- Writes harmonized output to CSV, TSV, Excel, or Parquet
+NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, or Parquet.
+
+Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
+
+---
 
 ## Installation
 
@@ -27,7 +24,11 @@ cd BioMetaHarmonizer
 pip install -e .
 ```
 
-## Quick Start
+Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
+
+---
+
+## Quick start
 
 ### Command line
 
@@ -38,144 +39,274 @@ biometaharmonizer run \
     --output harmonized.csv
 ```
 
-Optional flags:
-
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--api-key KEY` | — | NCBI API key (raises rate limit to 10 req/s) |
-| `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Assembly summary cache directory |
-| `--format FORMAT` | inferred from extension | `csv`, `tsv`, `excel`, `parquet` (case-insensitive) |
-| `--summary FILE` | — | Write per-column fill-rate CSV |
-| `--verbose` | off | Enable DEBUG logging |
+|---|---|---|
+| `--input FILE` | required | Path to accession list (one per line) or comma-separated accessions |
+| `--email EMAIL` | required | Valid contact email for NCBI Entrez — must contain `@` and a domain |
+| `--output FILE` | required | Output file path |
+| `--api-key KEY` | — | NCBI API key; raises rate limit from 3 to 10 requests/second |
+| `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Directory for assembly summary flat files |
+| `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet` |
+| `--summary FILE` | — | Write a per-column fill-rate CSV |
+| `--verbose` | off | Enable DEBUG-level logging |
 
 ### Python API
 
 ```python
 from biometaharmonizer.ingestion import set_email, ingest
-from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier, write, write_summary
+from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier
+from biometaharmonizer import write, write_summary
 
-# 1. Ingest — accepts BioSample IDs, assembly accessions, or a mixed file
+# Ingest: accepts a file path, a Python list, or a mix of both accession types
 set_email("your@email.com")
 df = ingest("accessions.txt")
+# or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
 
-# 2. Harmonize column names (for non-ingestion/custom workflows)
-#    Renames raw columns to standard keys, coalesces any duplicates,
-#    and reindexes to the output schema.
+# Key harmonization — renames raw columns to standard keys, coalesces duplicates
+# Needed only if you bring your own DataFrame; ingest() already applies the schema
 mapper = KeyMapper()
 df = mapper.map_columns(df)
 
-# 3. Parse dates -> ISO 8601 truncated (YYYY / YYYY-MM / YYYY-MM-DD)
+# Date parsing: 40+ input formats -> ISO 8601 (YYYY / YYYY-MM / YYYY-MM-DD)
 de = DateEngine()
 date_df = de.parse_with_range(df["collection_date"])
 df["collection_date"] = date_df["collection_date"]
 df["collection_date_range"] = date_df["collection_date_range"]
 
-# 4. Resolve geography -> geo_country, geo_region, geo_locality, etc.
+# Geography: splits geo_loc_name into country, region, locality, ISO code, sea
 ge = GeoEngine()
 geo_df = ge.parse(df["geo_loc_name"])
 for col in geo_df.columns:
     df[col] = geo_df[col]
 
-# 5. Classify One Health category from multiple source fields
+# One Health classification across multiple source columns simultaneously
 oh = OneHealthClassifier()
-src = {col: df[col] for col in ["isolation_source", "env_broad_scale",
-       "env_local_scale", "env_medium", "sample_type", "host"] if col in df.columns}
+src = {col: df[col] for col in
+       ["isolation_source", "env_broad_scale", "env_local_scale",
+        "env_medium", "sample_type", "host"]
+       if col in df.columns}
 oh_df = oh.classify_multi_field(**src)
 for col in oh_df.columns:
     df[col] = oh_df[col]
 
-# 6. Write output
+# Write output
 write(df, "harmonized.csv")
 write_summary(df, "fill_rates.csv")
-
-print(df.shape)
 ```
 
-## Output Schema
+---
 
-Every output file contains exactly the following columns, in this order, regardless of dataset.
-Attributes that are not part of the schema are preserved in `_extra_attributes` as a JSON
-string — including low-frequency NCBI attributes such as `antimicrobial_resistance`, `temp`, `ph`,
-`depth`, `elev`, `samp_size`, and `samp_mat_process`.
+## Output columns
+
+The output DataFrame contains the following 52 columns. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
 | # | Column | Source | Description |
 |---|--------|--------|-------------|
-| 1 | `biosample_accession` | BioSample XML structural field | NCBI BioSample accession (e.g. `SAMN07597573`) — primary record identifier |
-| 2 | `biosample_id` | BioSample XML structural field | NCBI internal numeric BioSample ID (e.g. `400804`) — differs from accession |
-| 3 | `sra_accession` | BioSample XML structural field | Linked SRA run/experiment accession (e.g. `SRS123456`), if deposited |
-| 4 | `bioproject_accession` | BioSample XML / assembly index | Parent BioProject accession (e.g. `PRJNA123456`); resolved from XML or assembly index |
-| 5 | `assembly_accession_refseq` | Assembly index (GCF_) | RefSeq assembly accession (e.g. `GCF_000001405.39`); resolved from NCBI assembly index |
-| 6 | `assembly_accession_genbank` | Assembly index (GCA_) | GenBank assembly accession (e.g. `GCA_000001405.29`); resolved from NCBI assembly index |
-| 7 | `sample_name_id` | BioSample XML structural field | Submitter-assigned sample name or lab ID (from `<Id db_label="Sample name">`) |
-| 8 | `taxonomy_id` | BioSample XML structural field | NCBI Taxonomy numeric ID (taxid) for the organism (e.g. `1396` for *Bacillus cereus*) |
-| 9 | `taxonomy_name` | BioSample XML structural field | Taxon name stored by NCBI for the assigned `taxonomy_id`; reflects the name of that specific taxid, which for strain-level entries may include strain designators (e.g. `Bacillus cereus NC7401`); use `taxonomy_id` for reliable grouping |
-| 10 | `organism_name` | BioSample XML structural field | Organism name as written by the submitter in `<OrganismName>`; may include strain designations or extra qualifiers; falls back to `taxonomy_name` if absent |
-| 11 | `collection_date` | BioSample attribute → DateEngine | Normalized collection date in ISO 8601 format (YYYY, YYYY-MM, or YYYY-MM-DD) |
-| 12 | `collection_date_range` | DateEngine output | Inferred date range when the submitter provided a year or year-month (e.g. `2014-01-01/2014-12-31` for `2014`) |
-| 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted (e.g. `USA: IA`) |
-| 14 | `lat_lon` | BioSample attribute | Decimal latitude/longitude as submitted after null normalization |
-| 15 | `geo_country` | GeoEngine output | Standardized country name resolved from `geo_loc_name` |
-| 16 | `geo_region` | GeoEngine output | Sub-national region (state, province, oblast) resolved from `geo_loc_name` |
-| 17 | `geo_locality` | GeoEngine output | City, locality, or marine sub-location resolved from `geo_loc_name` |
-| 18 | `geo_iso3166` | GeoEngine output | ISO 3166-1 alpha-2 country code (e.g. `US`, `DE`, `GB`); historical/defunct country names are tagged as `HISTORICAL` |
-| 19 | `geo_sea_ocean` | GeoEngine output | Sea or ocean name if `geo_loc_name` refers to a marine location (e.g. `Pacific Ocean`) |
-| 20 | `geo_loc_raw` | GeoEngine output | Preserved raw value when `geo_loc_name` contains coordinates only and no named place could be resolved |
-| 21 | `host` | BioSample attribute → OneHealthClassifier | Host organism name as submitted (e.g. `Homo sapiens`, `Zea mays`, `Gallus gallus`) |
-| 22 | `host_disease` | BioSample attribute | Disease associated with the host at time of sampling |
-| 23 | `host_age` | BioSample attribute | Age of the host at time of sampling |
-| 24 | `host_sex` | BioSample attribute | Biological sex of the host |
-| 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site from which the sample was taken |
-| 26 | `isolation_source` | BioSample attribute → OneHealthClassifier | Free-text description of the material or environment from which the isolate was obtained |
-| 27 | `sample_type` | BioSample attribute | Sample type or specimen classification as submitted |
-| 28 | `one_health_category` | OneHealthClassifier output | One Health classification inferred from multiple source fields: Human, Animal, Food, Environmental, or Lab |
-| 29 | `isolate` | BioSample attribute | Isolate identifier or name assigned by the submitter |
-| 30 | `strain` | BioSample attribute | Microbial strain designation as submitted (e.g. `ATCC 14579`, `H37Rv`) |
-| 31 | `sub_strain` | BioSample attribute | Sub-strain designation, if applicable |
-| 32 | `serotype` | BioSample attribute | Serotype designation (e.g. `O157:H7`) |
-| 33 | `serovar` | BioSample attribute | Serovar designation, used primarily for *Salmonella* and similar organisms |
-| 34 | `genotype` | BioSample attribute | Genotype or sequence type designation (e.g. ST11, cgST) |
-| 35 | `culture_collection` | BioSample attribute | Culture collection identifier (e.g. `ATCC 14579`) |
-| 36 | `outbreak` | BioSample attribute | Outbreak identifier or name associated with the isolate, if any |
-| 37 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO term), used mainly for environmental/metagenomics samples |
-| 38 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO term) |
-| 39 | `env_medium` | BioSample attribute | Environmental medium from which the sample was taken (ENVO term, e.g. soil, water) |
-| 40 | `sequencing_method` | BioSample attribute | Sequencing platform or technology (e.g. `Illumina HiSeq`, `Oxford Nanopore`) |
-| 41 | `assembly_method` | BioSample attribute | Genome assembly software and version (e.g. `SPAdes 3.15`) |
-| 42 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Person or organization that physically collected the sample; explicit BioSample attribute is always preferred over submission owner |
-| 43 | `ncbi_package` | BioSample XML structural field | NCBI BioSample package name defining the required attribute set (e.g. `Microbe.1.0`) |
-| 44 | `submission_date` | BioSample XML structural field | Date the BioSample record was first submitted to NCBI |
-| 45 | `last_update` | BioSample XML structural field | Date the BioSample record was last modified |
-| 46 | `publication_date` | BioSample XML structural field | Date the BioSample record was made publicly available |
-| 47 | `access` | BioSample XML structural field | Access level of the record (`public` or `controlled-access`) |
-| 48 | `status` | BioSample XML structural field | Current record status (e.g. `live`, `suppressed`) |
-| 49 | `status_date` | BioSample XML structural field | Date the current status was assigned |
-| 50 | `title` | BioSample XML structural field | Free-text title of the BioSample record as submitted |
-| 51 | `description_comment` | BioSample XML structural field | Free-text description or comment block from the BioSample record |
-| 52 | `_extra_attributes` | JSON dict of all unresolved submitter attributes | All attributes that could not be mapped to a schema column, serialized as JSON; also contains `submission_owner` and `submission_contact` when both an explicit collector and an `<Owner>` block are present |
+| 1 | `biosample_accession` | BioSample XML | NCBI BioSample accession (e.g. `SAMN07597573`) |
+| 2 | `biosample_id` | BioSample XML | NCBI internal numeric BioSample ID |
+| 3 | `sra_accession` | BioSample XML | Linked SRA accession, if present |
+| 4 | `bioproject_accession` | BioSample XML / assembly index | Parent BioProject accession |
+| 5 | `assembly_accession_refseq` | Assembly index | RefSeq assembly accession (GCF\_) |
+| 6 | `assembly_accession_genbank` | Assembly index | GenBank assembly accession (GCA\_) |
+| 7 | `sample_name_id` | BioSample XML | Submitter sample name from `<Id db_label="Sample name">` |
+| 8 | `taxonomy_id` | BioSample XML | NCBI Taxonomy numeric ID |
+| 9 | `taxonomy_name` | BioSample XML | Taxon name for the assigned taxonomy_id |
+| 10 | `organism_name` | BioSample XML | Organism name from `<OrganismName>`; falls back to taxonomy_name |
+| 11 | `collection_date` | BioSample attribute → DateEngine | Collection date normalized to ISO 8601 |
+| 12 | `collection_date_range` | DateEngine | Inferred date range when only year or year-month was provided |
+| 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
+| 14 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
+| 15 | `geo_country` | GeoEngine | Country resolved from geo_loc_name |
+| 16 | `geo_region` | GeoEngine | Sub-national region (state, province, oblast) |
+| 17 | `geo_locality` | GeoEngine | City or locality |
+| 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
+| 19 | `geo_sea_ocean` | GeoEngine | Sea or ocean name for marine locations |
+| 20 | `geo_loc_raw` | GeoEngine | Preserved raw value when only coordinates were provided |
+| 21 | `host` | BioSample attribute | Host organism name |
+| 22 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
+| 23 | `host_age` | BioSample attribute | Age of host |
+| 24 | `host_sex` | BioSample attribute | Biological sex of host |
+| 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
+| 26 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
+| 27 | `sample_type` | BioSample attribute | Sample type or specimen classification |
+| 28 | `one_health_category` | OneHealthClassifier | Human / Animal / Food / Environmental / Lab |
+| 29 | `isolate` | BioSample attribute | Isolate identifier |
+| 30 | `strain` | BioSample attribute | Strain designation |
+| 31 | `sub_strain` | BioSample attribute | Sub-strain designation |
+| 32 | `serotype` | BioSample attribute | Serotype |
+| 33 | `serovar` | BioSample attribute | Serovar |
+| 34 | `genotype` | BioSample attribute | Genotype or sequence type |
+| 35 | `culture_collection` | BioSample attribute | Culture collection identifier |
+| 36 | `outbreak` | BioSample attribute | Outbreak identifier |
+| 37 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
+| 38 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
+| 39 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 40 | `sequencing_method` | BioSample attribute | Sequencing platform |
+| 41 | `assembly_method` | BioSample attribute | Genome assembly software |
+| 42 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
+| 43 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
+| 44 | `submission_date` | BioSample XML | Date first submitted |
+| 45 | `last_update` | BioSample XML | Date last modified |
+| 46 | `publication_date` | BioSample XML | Date made publicly available |
+| 47 | `access` | BioSample XML | `public` or `controlled-access` |
+| 48 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
+| 49 | `status_date` | BioSample XML | Date current status was assigned |
+| 50 | `title` | BioSample XML | Free-text title of the BioSample record |
+| 51 | `description_comment` | BioSample XML | Free-text description or comment block |
+| 52 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict; also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector |
 
-Columns that have no data for a given dataset are present but filled with `NaN`. No columns are ever added, dropped, or reordered at runtime.
+---
 
-## Architecture
+## Attribute resolution order
 
-```text
+For each `<Attribute>` element in BioSample XML, the column mapping is resolved in this order:
+
+1. **`harmonized_name` direct match** — if the NCBI-assigned `harmonized_name` matches a schema column exactly, it is used without any synonym lookup.
+2. **Synonym lookup on `harmonized_name`** — if not a direct match, the `harmonized_name` is looked up in the synonym table. If the resolved key is in the schema, it is used; otherwise the resolved key is stored in `_extra_attributes`.
+3. **Synonym lookup on `attribute_name`** — if `harmonized_name` is absent or unresolvable, the raw `attribute_name` is tried.
+4. **`_extra_attributes`** — any attribute that could not be resolved by any of the above is written to `_extra_attributes` as a JSON key-value pair.
+
+The synonym table is built from two layers in `synonyms.py` and cached for the lifetime of the process:
+
+- **Layer 1 — `schemas/unified.json`** — manually curated synonym lists for all standard keys.
+- **Layer 2 — `schemas/ncbi_attributes.xml`** — the official NCBI BioSample harmonization table. Optional; loaded only if present. Generate it with `python scripts/build_ncbi_attribute_cache.py`.
+
+Both `ingestion.py` and `key_mapper.py` use the same `build_synonym_lookup()` function.
+
+---
+
+## Null normalization
+
+During XML parsing, placeholder values are converted to `None` before any downstream processing. The full pattern list covers:
+
+- `missing`, `missing: lab stock`, `missing: data agreement established pre-2023`
+- `N/A`, `na`, `null`, `none`, `nil`, `-`, `.`
+- `unknown`, `not provided`, `not collected`, `not applicable`, `not available`, `not determined`, `not recorded`, `not reported`
+- `unavailable`, `unspecified`, `undetermined`, `unidentified`
+- `restricted`, `restricted access`, `withheld`, `confidential`
+- `tbd`, `tba`
+
+Common misspellings (`misssing`, `unkown`, `unknwon`) are also matched. Matching is case-insensitive.
+
+---
+
+## Assembly summary cache
+
+On the first run, `ingest()` downloads two NCBI flat files to resolve assembly accessions and BioProject links:
+
+- `assembly_summary_refseq.txt` (~100–300 MB)
+- `assembly_summary_genbank.txt` (~100–300 MB)
+
+These are cached in `~/.biometaharmonizer/cache/` (overridable with `--cache-dir` or `set_cache_dir()`). Files older than 7 days are automatically deleted and re-downloaded on the next run. To force a refresh manually, delete the cached files.
+
+In Colab:
+
+```python
+from biometaharmonizer.ingestion import set_cache_dir
+set_cache_dir("/content/bmh_cache")
+```
+
+---
+
+## Entrez rate limits
+
+Without an API key, NCBI allows 3 requests per second. With a key, the limit is 10 requests per second. BioMetaHarmonizer enforces inter-request sleep intervals automatically based on whether an API key is set.
+
+Register a free API key at https://www.ncbi.nlm.nih.gov/account/ and pass it as:
+
+```bash
+biometaharmonizer run --input ids.txt --email you@example.com \
+    --api-key YOUR_KEY --output out.csv
+```
+
+or:
+
+```python
+df = ingest("ids.txt", email="you@example.com", api_key="YOUR_KEY")
+```
+
+---
+
+## Geospatial parsing
+
+`GeoEngine` splits `geo_loc_name` into `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, and `geo_loc_raw`.
+
+| Input | Result |
+|---|---|
+| `"USA: California, Los Angeles"` | country=USA, region=California, locality=Los Angeles, iso=US |
+| `"Germany, Bavaria"` | country=Germany, locality=Bavaria, iso=DE |
+| `"France"` | country=France, iso=FR |
+| `"Pacific Ocean"` | sea_ocean=Pacific Ocean |
+| `"Pacific Ocean: Mariana Trench"` | sea_ocean=Pacific Ocean, locality=Mariana Trench |
+| `"40.71 N, 74.00 W"` | geo_loc_raw preserved; country/region/locality empty |
+| `"not applicable"` | all geo columns empty |
+
+Handling notes:
+
+- `England`, `Scotland`, `Wales`, `Northern Ireland` → `United Kingdom`, iso `GB`
+- `Korea` → South Korea (`KR`) with a warning logged
+- Historical country names (`USSR`, `Yugoslavia`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
+- Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded
+
+---
+
+## One Health classification
+
+`OneHealthClassifier` assigns one of five categories: **Human**, **Animal**, **Food**, **Environmental**, **Lab**.
+
+Up to six columns are scored simultaneously: `isolation_source`, `env_broad_scale`, `env_local_scale`, `env_medium`, `sample_type`, `host`. Each column is scored independently against Tier 1 keyword patterns; the highest-confidence match across all columns wins. The CLI pipeline uses multi-field mode automatically.
+
+---
+
+## `collected_by` priority
+
+1. **Explicit BioSample attribute** — any `<Attribute harmonized_name="collected_by">` or synonym is always preferred.
+2. **`<Owner/Name>` fallback** — used only if no explicit collector attribute was found.
+
+When both are present, the submission-side provenance is written to `_extra_attributes`:
+
+- `submission_owner` — `<Owner/Name>` value
+- `submission_contact` — full name from `<Owner/Contacts/Contact>`
+
+---
+
+## Output formats
+
+```python
+from biometaharmonizer import write, write_summary
+
+write(df, "out.csv")                        # CSV
+write(df, "out.tsv", fmt="tsv")             # TSV
+write(df, "out.xlsx", fmt="excel")          # Excel
+write(df, "out.parquet", fmt="parquet")     # Parquet
+
+write_summary(df, "fill_rates.csv")         # column, non_null_count, fill_pct
+```
+
+Format strings are case-insensitive. If `--format` is not specified on the CLI, the format is inferred from the output file extension.
+
+---
+
+## Repository structure
+
+```
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
-│   ├── __init__.py             # version 0.5.0, full public API
-│   ├── cli.py                  # CLI entrypoint: biometaharmonizer run
-│   ├── ingestion.py            # Module 1: output schema, XML parsing, BioProject resolution
-│   ├── synonyms.py             # Shared two-layer synonym lookup (unified.json + NCBI XML)
-│   ├── key_mapper.py           # Module 2: column rename, coalesce, reindex to output schema
-│   ├── date_engine.py          # Module 3: temporal parsing (40+ formats -> ISO 8601)
-│   ├── geo_engine.py           # Module 4: ISO-3166 geospatial resolution
-│   ├── one_health.py           # Module 5: One Health categorization (multi-field, Tier 1 regex)
-│   ├── output.py               # Module 6: write CSV / TSV / Excel / Parquet
+│   ├── __init__.py             # public API, version 0.5.0
+│   ├── cli.py                  # CLI entrypoint
+│   ├── ingestion.py            # Entrez fetching, XML parsing, schema definition
+│   ├── synonyms.py             # two-layer synonym lookup (unified.json + NCBI XML)
+│   ├── key_mapper.py           # column rename, coalesce, reindex
+│   ├── date_engine.py          # date parsing, ISO 8601 output
+│   ├── geo_engine.py           # geo_loc_name splitting, ISO-3166 resolution
+│   ├── one_health.py           # One Health categorization
+│   ├── output.py               # write CSV / TSV / Excel / Parquet
 │   └── schemas/
-│       ├── ncbi_attributes.xml         # NCBI official harmonization table (Layer 2, optional)
-│       └── unified.json                # standard_key definitions + synonym lists (Layer 1)
+│       ├── unified.json                      # standard keys + synonym lists
+│       └── ncbi_attributes.xml               # NCBI harmonization table (optional)
 ├── scripts/
-│   └── build_ncbi_attribute_cache.py   # optional: rebuild ncbi_attributes.xml from NCBI
+│   └── build_ncbi_attribute_cache.py         # regenerate ncbi_attributes.xml
 ├── tests/
-│   ├── conftest.py
 │   ├── test_ingestion.py
 │   ├── test_key_mapper.py
 │   ├── test_date_engine.py
@@ -183,130 +314,22 @@ BioMetaHarmonizer/
 │   ├── test_one_health.py
 │   ├── test_output.py
 │   └── test_pipeline.py
-├── docs/SESSION_PROTOCOL.md
 ├── pyproject.toml
 └── requirements.txt
 ```
 
-## Modules
+---
 
-| Module | File | Status | Notes |
-|---|---|---|---|
-| 1. Ingestion | `ingestion.py` | Complete | Output schema defined here; BioProject and assembly accessions resolved via assembly index; shared null normalization applied across all attributes |
-| Synonym Lookup | `synonyms.py` | Complete | Single shared two-layer lookup used by ingestion + key_mapper; result cached per process |
-| 2. Key Harmonization | `key_mapper.py` | Complete | Rename raw columns to standard keys, coalesce duplicates, reindex to output schema |
-| 3. Temporal Parsing | `date_engine.py` | Complete | 40+ date formats, ISO 8601 output |
-| 4. Geospatial Resolution | `geo_engine.py` | Complete | ISO-3166 country, region, locality, oceans; historical names tagged as `HISTORICAL` |
-| 5. One Health Categorization | `one_health.py` | Complete | Human / Animal / Food / Environmental / Lab; multi-field mode consumes up to 6 source columns |
-| 6. Output | `output.py` | Complete | CSV, TSV, Excel, Parquet; fill-rate summary |
-
-## Attribute Resolution: How It Works
-
-When parsing a live BioSample XML record, each `<Attribute>` element is resolved in the following priority order:
-
-1. **NCBI `harmonized_name` (authoritative)** — if the `harmonized_name` attribute in the XML element matches a known output column directly, it is used without any synonym lookup. This is the signal NCBI itself assigns and is the most reliable mapping available.
-2. **Synonym lookup on `harmonized_name`** — if the `harmonized_name` is not a direct schema column but appears in the unified synonym table, the resolved standard key is used. If the resolved key is not in the schema, the normalized key name is stored in `_extra_attributes`.
-3. **Synonym lookup on `attribute_name`** — if `harmonized_name` is absent or unresolvable, the raw `attribute_name` is looked up in the synonym table.
-4. **`_extra_attributes`** — any attribute that cannot be resolved by any of the above is serialized as a JSON key-value pair into the `_extra_attributes` column. No data is discarded.
-
-The synonym table (`synonyms.py`) is built from two layers on startup and cached for the lifetime of the process:
-
-- **Layer 1 — `unified.json`** — manually curated synonym lists for all standard keys
-- **Layer 2 — `ncbi_attributes.xml`** — the official NCBI BioSample harmonization table; loaded on top of Layer 1 and wins on any conflict
-
-Both `ingestion.py` and `key_mapper.py` import the same `build_synonym_lookup()` function, so the mapping is always identical across both modules.
-
-## Null Normalization
-
-During ingestion, common submitter placeholders for missing values are converted to true missing values (`None` / `NaN`) before any downstream parsing. This applies across structural fields, BioSample attributes, owner/contact provenance, and `lat_lon`.
-
-Examples of values normalized to missing include:
-
-- `missing`, `Missing`, `misssing`
-- `N/A`, `na`, `null`, `none`, `-`
-- `unknown`, `not provided`, `not collected`, `not applicable`, `not available`, `not determined`
-- prefixed forms such as `missing: lab stock` and `missing: data agreement established pre-2023`
-
-This prevents placeholder text from leaking into harmonized columns such as `geo_country`, `host`, `isolation_source`, or `lat_lon`.
-
-## One Health Classification
-
-`OneHealthClassifier` assigns each record one of five categories: **Human**, **Animal**, **Food**, **Environmental**, or **Lab**.
-
-Classification consumes up to six source columns simultaneously (`isolation_source`, `env_broad_scale`, `env_local_scale`, `env_medium`, `sample_type`, `host`). Each column is scored independently against Tier 1 keyword patterns; the highest-confidence match across all fields wins. When no column is present, classification is skipped.
-
-The CLI pipeline always uses multi-field mode automatically — no configuration is needed.
-
-## `collected_by` Priority and Submission Provenance
-
-The `collected_by` column is populated with strict priority:
-
-1. **Explicit BioSample attribute** — any `<Attribute harmonized_name="collected_by">` or synonym thereof is the authoritative source and is always preferred.
-2. **`<Owner/Name>` fallback** — the submitting institution name from the XML `<Owner>` block is used **only** if no explicit collector attribute was found.
-
-When both are present, the submission-side provenance is preserved losslessly in `_extra_attributes` rather than overwriting the biological collector:
-
-| `_extra_attributes` key | Content |
-|---|---|
-| `submission_owner` | `<Owner/Name>` value (e.g. `UNC Chapel Hill`) |
-| `submission_contact` | Full name from `<Owner/Contacts/Contact>` (e.g. `Rachel Marie Bleich`) |
-
-## Geospatial Parsing
-
-`GeoEngine` accepts the standard NCBI `geo_loc_name` field and fills six in-schema columns:
-`geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, and `geo_loc_raw`.
-
-| Input | Parsed as |
-|---|---|
-| `"USA: California, Los Angeles"` | `geo_country=USA`, `geo_region=California`, `geo_locality=Los Angeles`, `geo_iso3166=US` |
-| `"USA: California"` | `geo_country=USA`, `geo_region=California`, `geo_iso3166=US` |
-| `"Germany, Bavaria"` | `geo_country=Germany`, `geo_locality=Bavaria`, `geo_iso3166=DE` |
-| `"France"` | `geo_country=France`, `geo_iso3166=FR` |
-| `"Pacific Ocean"` | `geo_sea_ocean=Pacific Ocean`; country/region/locality left empty |
-| `"Pacific Ocean: Mariana Trench"` | `geo_sea_ocean=Pacific Ocean`, `geo_locality=Mariana Trench` |
-| `"40.71 N, 74.00 W"` or `"40.7128, -74.0060"` | preserved in `geo_loc_raw`; country/region/locality left empty |
-| `"missing: lab stock"` or `"not applicable"` | treated as missing; all geo output columns left empty |
-
-Special handling:
-
-- UK sub-country names (`England`, `Scotland`, `Wales`, `Northern Ireland`) are normalized to `geo_country="United Kingdom"` with `geo_iso3166="GB"`.
-- Ambiguous `"Korea"` defaults to South Korea (`KR`) with a warning logged.
-- Country aliases not handled reliably by `pycountry` are normalized explicitly, including `Turkey -> TR`, `Namibia -> NA`, `Democratic Republic of the Congo -> CD`, and `Burma -> MM`.
-- Historical or defunct country names (e.g. `USSR`, `Yugoslavia`, `Czechoslovakia`) are preserved in `geo_country` and assigned `geo_iso3166="HISTORICAL"`.
-- Coordinate-only strings are not reverse-geocoded; they are preserved in `geo_loc_raw` for optional downstream processing.
-
-## Input Formats
-
-| Format | Example |
-|---|---|
-| BioSample ID file | `SAMN12345678` one per line |
-| Assembly accession file | `GCF_000001405.39` one per line |
-| Mixed file | both types in the same file |
-| Python list | `ingest(["SAMN12345678", "GCF_000001405.39"])` |
-
-## Output
-
-```python
-from biometaharmonizer import write, write_summary
-
-write(df, "harmonized.csv")                  # default: CSV
-write(df, "harmonized.xlsx", fmt="excel")    # Excel
-write(df, "harmonized.parquet", fmt="parquet")
-
-write_summary(df, "fill_rates.csv")          # column_name, non_null_count, fill_pct
-```
-
-Output format strings are case-insensitive (`"CSV"`, `"csv"`, and `"Csv"` are all accepted).
-
-## Running Tests
+## Running tests
 
 ```bash
 pip install pytest
 pytest tests/ -v --tb=short
-pytest tests/ -v --cov=biometaharmonizer --cov-report=term-missing
 ```
 
-All tests are self-contained (no live NCBI calls). Current: **170/170 passing**.
+All tests use synthetic data — no live NCBI calls are made.
+
+---
 
 ## License
 
