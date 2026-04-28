@@ -122,7 +122,12 @@ def _run(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    set_email(args.email)
+    try:
+        set_email(args.email)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
     kwargs = {}
     if args.api_key:
         kwargs["api_key"] = args.api_key

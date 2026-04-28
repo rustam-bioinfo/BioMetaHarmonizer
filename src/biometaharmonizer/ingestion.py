@@ -22,11 +22,14 @@ Working directory note (Colab):
   if you want them in the working directory.
 """
 
+import functools
+import http.client
 import importlib.resources
 import json
 import logging
 import re
 import time
+import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -54,6 +57,16 @@ _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+_TRANSIENT_EXCEPTIONS = (
+    urllib.error.URLError,
+    http.client.HTTPException,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
 
 _NULL_PATTERNS = re.compile(
     r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
@@ -155,6 +168,12 @@ BIOSAMPLE_SCHEMA_SET = set(BIOSAMPLE_SCHEMA)
 
 def set_email(email: str) -> None:
     global ENTREZ_EMAIL
+    email = str(email).strip()
+    if not _EMAIL_RE.match(email):
+        raise ValueError(
+            f"Invalid email address: {email!r}. "
+            "NCBI requires a valid contact email for all Entrez API calls."
+        )
     ENTREZ_EMAIL = email
     Entrez.email = email
 
@@ -168,9 +187,16 @@ def set_api_key(key: str) -> None:
 def set_cache_dir(path) -> None:
     global CACHE_DIR
     CACHE_DIR = Path(path)
+    _read_assembly_summary_cached.cache_clear()
 
 
-def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
+@functools.lru_cache(maxsize=2)
+def _read_assembly_summary_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    """Read and cache one assembly summary file.  Keyed on path + mtime."""
+    return _read_assembly_summary_uncached(Path(path_str))
+
+
+def _read_assembly_summary_uncached(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
     needed = ["assembly_accession", "biosample", "bioproject"] + (extra_cols or [])
 
     with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -188,29 +214,45 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
         low_memory=False,
         dtype=str,
     )
-
     df = df.rename(columns={raw_first_col: "assembly_accession"})
     available = [c for c in needed if c in df.columns]
     return df[available]
 
 
-def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
+def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
+    if extra_cols:
+        return _read_assembly_summary_uncached(cache_path, extra_cols=extra_cols)
+    mtime = cache_path.stat().st_mtime if cache_path.exists() else 0.0
+    return _read_assembly_summary_cached(str(cache_path), mtime)
+
+
+def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd.DataFrame:
+    resolved_email = email or (None if ENTREZ_EMAIL == _DEFAULT_EMAIL else ENTREZ_EMAIL)
+    if not resolved_email:
+        raise ValueError(
+            "An email address is required for NCBI Entrez API calls. "
+            "Pass email='your@email.com' to ingest() or call set_email() beforehand."
+        )
+    set_email(resolved_email)
+
     if api_key is not None:
         set_api_key(api_key)
     if cache_dir is not None:
         set_cache_dir(cache_dir)
 
-    if ENTREZ_EMAIL == _DEFAULT_EMAIL:
-        raise ValueError(
-            "A valid e-mail address is required by NCBI for all Entrez API calls. "
-            "Call set_email('your@real.email') before calling ingest(), "
-            "or pass email via the CLI --email flag."
-        )
-
     Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
 
     ids = _load_ids(source)
+
+    # fix(#35): warn and return early on empty input rather than silently
+    # returning an empty DataFrame with no indication of what happened.
+    if not ids:
+        logger.warning(
+            "ingest() called with an empty accession list. Returning empty DataFrame."
+        )
+        return pd.DataFrame(columns=BIOSAMPLE_SCHEMA)
+
     ids = _deduplicate(ids)
     gcx, samn, unrecognized = _classify_ids(ids)
 
@@ -228,7 +270,21 @@ def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
         samn = list(set(samn + resolved))
 
     if not samn:
-        raise ValueError("No valid BioSample IDs could be resolved from the provided input.")
+        reasons = []
+        if unrecognized:
+            reasons.append(
+                f"{len(unrecognized)} unrecognized IDs (expected SAMN/SAME/SAMD/GCF/GCA prefixes)"
+            )
+        if gcx and unresolved_gcx:
+            reasons.append(
+                f"{len(unresolved_gcx)} assembly accessions not found in the local assembly index "
+                f"(cache dir: {CACHE_DIR}; delete cached assembly_summary_*.txt to force refresh)"
+            )
+        if not reasons:
+            reasons.append(
+                "no BioSample accessions remained after input classification and assembly-to-BioSample resolution"
+            )
+        raise ValueError("No valid BioSample IDs could be resolved. Reasons: " + "; ".join(reasons))
 
     synonym_lookup = build_synonym_lookup()
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
@@ -345,6 +401,7 @@ def _ensure_assembly_summaries() -> None:
                     cache_path.unlink()
                 except OSError:
                     pass
+                _read_assembly_summary_cached.cache_clear()
             else:
                 logger.debug("Assembly index cache OK: %s (%.1f days old)", label, age_days)
 
@@ -404,27 +461,38 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
             hits = df[
                 df["biosample"].isin(biosample_ids)
                 & df["assembly_accession"].notna()
-            ]
+            ].copy()
 
-            for _, row in hits.iterrows():
-                bs = row["biosample"]
-                asm = row["assembly_accession"]
-                bp = row.get("bioproject")
-                if pd.isna(bp):
-                    bp = None
+            if hits.empty:
+                continue
 
+            hits["_is_refseq"] = hits["assembly_accession"].str.startswith("GCF_")
+
+            bp_series = (
+                hits[hits["bioproject"].notna()]
+                .groupby("biosample")["bioproject"]
+                .first()
+            )
+            refseq_series = (
+                hits[hits["_is_refseq"]]
+                .groupby("biosample")["assembly_accession"]
+                .first()
+            )
+            genbank_series = (
+                hits[~hits["_is_refseq"]]
+                .groupby("biosample")["assembly_accession"]
+                .first()
+            )
+
+            for bs in hits["biosample"].unique():
                 if bs not in lookup:
                     lookup[bs] = {"bioproject": None, "refseq": None, "genbank": None}
-
-                if lookup[bs]["bioproject"] is None and bp:
-                    lookup[bs]["bioproject"] = bp
-
-                if asm.startswith("GCF_"):
-                    if lookup[bs]["refseq"] is None:
-                        lookup[bs]["refseq"] = asm
-                elif asm.startswith("GCA_"):
-                    if lookup[bs]["genbank"] is None:
-                        lookup[bs]["genbank"] = asm
+                if lookup[bs]["bioproject"] is None and bs in bp_series.index:
+                    lookup[bs]["bioproject"] = bp_series[bs]
+                if lookup[bs]["refseq"] is None and bs in refseq_series.index:
+                    lookup[bs]["refseq"] = refseq_series[bs]
+                if lookup[bs]["genbank"] is None and bs in genbank_series.index:
+                    lookup[bs]["genbank"] = genbank_series[bs]
 
         except Exception as exc:
             logger.warning(
@@ -453,7 +521,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 result = Entrez.read(handle)
                 handle.close()
                 break
-            except Exception as exc:
+            except _TRANSIENT_EXCEPTIONS as exc:
                 wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
                     "esearch attempt %d/%d failed: %s. Retrying in %ds...",
@@ -479,7 +547,7 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                     summaries = Entrez.read(sum_handle)
                     sum_handle.close()
                     break
-                except Exception as exc:
+                except _TRANSIENT_EXCEPTIONS as exc:
                     wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                     logger.warning(
                         "esummary attempt %d/%d failed: %s. Retrying in %ds...",
@@ -494,6 +562,8 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 acc = doc.get("Accession", "")
                 if acc and uid:
                     acc_to_uid[acc] = uid
+
+            time.sleep(inter_req_sleep)
 
         time.sleep(inter_req_sleep)
 
@@ -569,20 +639,37 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             raw = handle.read()
             handle.close()
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
-        except Exception as exc:
+        except ET.ParseError as exc:
+            logger.error(
+                "XML ParseError on efetch batch (malformed/truncated response): %s", exc
+            )
+            return []
+        except _TRANSIENT_EXCEPTIONS as exc:
             wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
             logger.warning(
-                "Batch fetch attempt %d/%d failed: %s. Retrying in %ds...",
+                "Batch fetch attempt %d/%d failed (transient): %s. Retrying in %ds...",
                 attempt, _MAX_RETRIES, exc, wait,
             )
             time.sleep(wait)
+    logger.error(
+        "efetch failed after %d retries for %d UIDs.", _MAX_RETRIES, len(uid_batch)
+    )
     return None
 
 
 def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
-    records = []
-    root = ET.fromstring(xml_bytes)
+    if not xml_bytes or not xml_bytes.strip():
+        logger.warning("Received empty XML response from NCBI efetch -- skipping batch.")
+        return []
 
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as exc:
+        logger.error("XML ParseError from NCBI response (truncated?): %s", exc)
+        logger.debug("Partial XML content (first 200 bytes): %r", xml_bytes[:200])
+        raise
+
+    records = []
     for sample in root.findall(".//BioSample"):
         record = dict.fromkeys(BIOSAMPLE_SCHEMA, None)
 
@@ -635,10 +722,13 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             hn = (attr.get("harmonized_name") or "").strip()
             an = (attr.get("attribute_name") or "").strip()
             raw_key = hn or an or "unknown"
+            # fix(#27): always pass through _normalize_null regardless of whether
+            # the XML text node is None or empty.  Previously `if val is None:
+            # continue` bypassed writing the column entirely, meaning the
+            # null-normalization contract was only applied to non-empty values.
+            # Now null/empty attributes explicitly write None to the schema column
+            # (or are omitted from extras), consistent with all other fields.
             val = _normalize_null(attr.text)
-
-            if val is None:
-                continue
 
             resolved = None
             if hn and hn in BIOSAMPLE_SCHEMA_SET:
@@ -657,16 +747,19 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     raw_key = candidate
 
             if resolved is not None:
+                # Write None explicitly so the column reflects the NCBI submission
+                # state rather than staying at the schema initialisation default.
                 if record.get(resolved) is None:
                     record[resolved] = val
-                else:
+                elif val is not None:
                     existing = extras.get(raw_key)
                     extras[raw_key] = f"{existing}|{val}" if existing else val
                     logger.debug(
                         "Attribute collision on '%s' (biosample=%s): primary value kept, duplicate stored in _extra_attributes.",
                         resolved, record.get("biosample_accession"),
                     )
-            else:
+            elif val is not None:
+                # Only store non-null unknowns in extras to keep _extra_attributes lean.
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
 
