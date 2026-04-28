@@ -22,6 +22,7 @@ Working directory note (Colab):
   if you want them in the working directory.
 """
 
+import functools
 import importlib.resources
 import json
 import logging
@@ -168,9 +169,31 @@ def set_api_key(key: str) -> None:
 def set_cache_dir(path) -> None:
     global CACHE_DIR
     CACHE_DIR = Path(path)
+    # Invalidate the lru_cache when the cache directory is changed so the
+    # next call re-reads from the new location.
+    _read_assembly_summary_cached.cache_clear()
 
 
-def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# fix(#30): Assembly summary in-memory cache
+#
+# The assembly summary TSVs are ~300 MB each and contain ~2 M rows.  Reading
+# them from disk takes 3-15 s depending on the environment.  In interactive
+# sessions (e.g. a per-organism loop) ingest() was called repeatedly and the
+# files were re-read every time.
+#
+# Solution: cache the parsed DataFrame keyed on (path_str, mtime).  The mtime
+# key ensures automatic invalidation whenever _ensure_assembly_summaries()
+# re-downloads a stale file.  maxsize=2 covers both refseq + genbank.
+# ---------------------------------------------------------------------------
+
+@functools.lru_cache(maxsize=2)
+def _read_assembly_summary_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    """Read and cache one assembly summary file.  Keyed on path + mtime."""
+    return _read_assembly_summary_uncached(Path(path_str))
+
+
+def _read_assembly_summary_uncached(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
     needed = ["assembly_accession", "biosample", "bioproject"] + (extra_cols or [])
 
     with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -188,10 +211,23 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
         low_memory=False,
         dtype=str,
     )
-
     df = df.rename(columns={raw_first_col: "assembly_accession"})
     available = [c for c in needed if c in df.columns]
     return df[available]
+
+
+def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.DataFrame:
+    """
+    Public-facing wrapper: returns a cached DataFrame for *cache_path*.
+    The cache is keyed on (path, mtime) so a freshly downloaded file
+    automatically invalidates the previous entry.
+    """
+    if extra_cols:
+        # Extra columns bypass the cache because the cached frame may not
+        # include them.  This path is rare (only used by optional callers).
+        return _read_assembly_summary_uncached(cache_path, extra_cols=extra_cols)
+    mtime = cache_path.stat().st_mtime if cache_path.exists() else 0.0
+    return _read_assembly_summary_cached(str(cache_path), mtime)
 
 
 def ingest(source, api_key: str = None, cache_dir=None) -> pd.DataFrame:
@@ -345,6 +381,9 @@ def _ensure_assembly_summaries() -> None:
                     cache_path.unlink()
                 except OSError:
                     pass
+                # Invalidate the in-memory cache for this file so the
+                # freshly downloaded version is read on the next access.
+                _read_assembly_summary_cached.cache_clear()
             else:
                 logger.debug("Assembly index cache OK: %s (%.1f days old)", label, age_days)
 
@@ -393,6 +432,19 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
 
 
 def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
+    """
+    Build a biosample -> {bioproject, refseq, genbank} lookup dict.
+
+    fix(#20): replaced iterrows() with a fully vectorised approach.
+    iterrows() on the 2 M-row assembly summary DataFrame was the dominant
+    cost for large datasets (7k+ genomes).  The new implementation:
+      1. Filters the DataFrame to matching rows with .isin() (unchanged).
+      2. Selects the first GCF_ and first GCA_ accession per biosample
+         using vectorised str.startswith() + groupby-first, then merges
+         into a dict via a single to_dict() call.
+    This reduces the per-record overhead from O(columns) Python loop
+    iterations to O(1) dict lookups.
+    """
     lookup: dict = {}
 
     for label in ["refseq", "genbank"]:
@@ -404,27 +456,42 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
             hits = df[
                 df["biosample"].isin(biosample_ids)
                 & df["assembly_accession"].notna()
-            ]
+            ].copy()
 
-            for _, row in hits.iterrows():
-                bs = row["biosample"]
-                asm = row["assembly_accession"]
-                bp = row.get("bioproject")
-                if pd.isna(bp):
-                    bp = None
+            if hits.empty:
+                continue
 
+            # Vectorised: assign GCF/GCA prefix column once, then groupby.
+            hits["_is_refseq"] = hits["assembly_accession"].str.startswith("GCF_")
+
+            # First bioproject per biosample (any row).
+            bp_series = (
+                hits[hits["bioproject"].notna()]
+                .groupby("biosample")["bioproject"]
+                .first()
+            )
+
+            # First RefSeq and GenBank accession per biosample.
+            refseq_series = (
+                hits[hits["_is_refseq"]]
+                .groupby("biosample")["assembly_accession"]
+                .first()
+            )
+            genbank_series = (
+                hits[~hits["_is_refseq"]]
+                .groupby("biosample")["assembly_accession"]
+                .first()
+            )
+
+            for bs in hits["biosample"].unique():
                 if bs not in lookup:
                     lookup[bs] = {"bioproject": None, "refseq": None, "genbank": None}
-
-                if lookup[bs]["bioproject"] is None and bp:
-                    lookup[bs]["bioproject"] = bp
-
-                if asm.startswith("GCF_"):
-                    if lookup[bs]["refseq"] is None:
-                        lookup[bs]["refseq"] = asm
-                elif asm.startswith("GCA_"):
-                    if lookup[bs]["genbank"] is None:
-                        lookup[bs]["genbank"] = asm
+                if lookup[bs]["bioproject"] is None and bs in bp_series.index:
+                    lookup[bs]["bioproject"] = bp_series[bs]
+                if lookup[bs]["refseq"] is None and bs in refseq_series.index:
+                    lookup[bs]["refseq"] = refseq_series[bs]
+                if lookup[bs]["genbank"] is None and bs in genbank_series.index:
+                    lookup[bs]["genbank"] = genbank_series[bs]
 
         except Exception as exc:
             logger.warning(
@@ -471,6 +538,11 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
+        # fix(#18): add rate-limit sleep after every esummary call in the
+        # inner loop.  Previously sleep() fired only at the end of the outer
+        # esearch loop, leaving consecutive esummary calls with no delay.
+        # Without an API key NCBI permits 3 req/s; back-to-back esearch +
+        # esummary on the same iteration exceeded this and triggered HTTP 429.
         for uid_start in range(0, len(uids), _ESEARCH_BATCH):
             uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
             for attempt in range(1, _MAX_RETRIES + 1):
@@ -494,6 +566,9 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
                 acc = doc.get("Accession", "")
                 if acc and uid:
                     acc_to_uid[acc] = uid
+
+            # Rate-limit sleep after each esummary sub-batch (fix #18).
+            time.sleep(inter_req_sleep)
 
         time.sleep(inter_req_sleep)
 
