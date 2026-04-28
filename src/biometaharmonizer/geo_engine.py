@@ -181,9 +181,13 @@ class GeoEngine:
             return self._UK_SUBCOUNTRY[lower]
 
         if lower == "korea":
-            logger.warning(
-                "Ambiguous 'Korea' -- defaulting to South Korea (KR). "
-                "Use 'North Korea' or 'South Korea' for precision."
+            # Defaulting to South Korea is correct for the vast majority of NCBI
+            # metadata — bare 'Korea' almost always means ROK.  This is not a
+            # warning-worthy event; use INFO so it stays accessible without
+            # flooding the log on large South Korean datasets.
+            logger.info(
+                "'Korea' without qualifier resolved to South Korea (KR). "
+                "Use 'North Korea' for DPRK."
             )
             return "KR"
 
