@@ -26,6 +26,8 @@ pip install -e .
 
 Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
 
+The package ships with pre-built schema files (`unified.json`, `one_health_dictionaries.json`, `ncbi_attributes.xml`). The rebuild scripts in `scripts/` are only needed when you want to refresh those files from upstream sources — see [Rebuilding schema files](#rebuilding-schema-files).
+
 ---
 
 ## Quick start
@@ -116,12 +118,12 @@ The output DataFrame contains the following 52 columns. Columns with no data for
 | 12 | `collection_date_range` | DateEngine | Inferred date range when only year or year-month was provided |
 | 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
 | 14 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
-| 15 | `geo_country` | GeoEngine | Country resolved from geo_loc_name |
-| 16 | `geo_region` | GeoEngine | Sub-national region (state, province, oblast) |
-| 17 | `geo_locality` | GeoEngine | City or locality |
+| 15 | `geo_country` | GeoEngine | Country resolved from `geo_loc_name` |
+| 16 | `geo_region` | GeoEngine | Sub-national region parsed from the colon-delimited format `"Country: Region, Locality"`; `NaN` for comma-only inputs |
+| 17 | `geo_locality` | GeoEngine | Locality parsed after the region in colon format, or the part after the first comma in comma-only inputs |
 | 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
 | 19 | `geo_sea_ocean` | GeoEngine | Sea or ocean name for marine locations |
-| 20 | `geo_loc_raw` | GeoEngine | Preserved raw value when only coordinates were provided |
+| 20 | `geo_loc_raw` | GeoEngine | Preserved raw string for coordinate-only inputs (e.g. `"40.71 N, 74.00 W"`); `NaN` for all other inputs |
 | 21 | `host` | BioSample attribute | Host organism name |
 | 22 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
 | 23 | `host_age` | BioSample attribute | Age of host |
@@ -169,7 +171,7 @@ For each `<Attribute>` element in BioSample XML, the column mapping is resolved 
 The synonym table is built from two layers in `synonyms.py` and cached for the lifetime of the process:
 
 - **Layer 1 — `schemas/unified.json`** — manually curated synonym lists for all standard keys.
-- **Layer 2 — `schemas/ncbi_attributes.xml`** — the official NCBI BioSample harmonization table. Optional; loaded only if present. Generate it with `python scripts/build_ncbi_attribute_cache.py`.
+- **Layer 2 — `schemas/ncbi_attributes.xml`** — the official NCBI BioSample harmonization table. Optional; loaded only if present.
 
 Both `ingestion.py` and `key_mapper.py` use the same `build_synonym_lookup()` function.
 
@@ -231,22 +233,29 @@ df = ingest("ids.txt", email="you@example.com", api_key="YOUR_KEY")
 
 `GeoEngine` splits `geo_loc_name` into `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, and `geo_loc_raw`.
 
+The parser recognizes two input formats:
+
+- **Colon format** `"Country: Region, Locality"` — the part before `:` becomes `geo_country`, the first segment after `:` becomes `geo_region`, and any remainder after the comma becomes `geo_locality`.
+- **Comma-only format** `"Country, Locality"` — the part before the first `,` becomes `geo_country` and the remainder becomes `geo_locality`. `geo_region` is left `NaN`.
+
 | Input | Result |
 |---|---|
 | `"USA: California, Los Angeles"` | country=USA, region=California, locality=Los Angeles, iso=US |
+| `"USA: California"` | country=USA, region=California, iso=US |
 | `"Germany, Bavaria"` | country=Germany, locality=Bavaria, iso=DE |
 | `"France"` | country=France, iso=FR |
-| `"Pacific Ocean"` | sea_ocean=Pacific Ocean |
-| `"Pacific Ocean: Mariana Trench"` | sea_ocean=Pacific Ocean, locality=Mariana Trench |
-| `"40.71 N, 74.00 W"` | geo_loc_raw preserved; country/region/locality empty |
-| `"not applicable"` | all geo columns empty |
+| `"Pacific Ocean"` | sea\_ocean=Pacific Ocean |
+| `"Pacific Ocean: Mariana Trench"` | sea\_ocean=Pacific Ocean, locality=Mariana Trench |
+| `"40.71 N, 74.00 W"` | geo\_loc\_raw preserved; all other geo columns NaN |
+| `"not applicable"` | all geo columns NaN |
 
 Handling notes:
 
 - `England`, `Scotland`, `Wales`, `Northern Ireland` → `United Kingdom`, iso `GB`
-- `Korea` → South Korea (`KR`) with a warning logged
-- Historical country names (`USSR`, `Yugoslavia`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
-- Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded
+- `Korea` (bare, no qualifier) → South Korea (`KR`); logged at INFO level
+- Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
+- Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded; all other geo columns are `NaN`
+- `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo` and several aliases are resolved via a hardcoded table before pycountry fuzzy lookup
 
 ---
 
@@ -287,6 +296,40 @@ Format strings are case-insensitive. If `--format` is not specified on the CLI, 
 
 ---
 
+## Rebuilding schema files
+
+The package ships with pre-built schema files. Rebuild them only when you want to incorporate upstream ontology or NCBI updates.
+
+### `one_health_dictionaries.json`
+
+Generated by `scripts/build_dictionaries.py`. It queries OLS4 (ENVO, FoodOn, UBERON, Plant Ontology), downloads the NCBI Taxonomy dump, and optionally queries the UMLS API for synonym expansion. Hand-curated entries in the base file always win over ontology-derived ones.
+
+```bash
+# Full rebuild (downloads taxdmp.zip ~65 MB from NCBI)
+python scripts/build_dictionaries.py \
+    --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
+    --output src/biometaharmonizer/schemas/one_health_dictionaries.json
+
+# Use a pre-downloaded taxdmp.zip
+python scripts/build_dictionaries.py --taxdmp /path/to/taxdmp.zip
+
+# Skip NCBI Taxonomy entirely
+python scripts/build_dictionaries.py --skip-ncbi
+
+# Add UMLS synonym expansion (requires a free UMLS API key)
+python scripts/build_dictionaries.py --umls-key YOUR_UMLS_KEY
+```
+
+### `ncbi_attributes.xml`
+
+Generated by `scripts/build_ncbi_attribute_cache.py`. Downloads the official NCBI BioSample attribute harmonization table and stores it as `schemas/ncbi_attributes.xml`, which becomes Layer 2 of the synonym lookup.
+
+```bash
+python scripts/build_ncbi_attribute_cache.py
+```
+
+---
+
 ## Repository structure
 
 ```
@@ -303,9 +346,11 @@ BioMetaHarmonizer/
 │   ├── output.py               # write CSV / TSV / Excel / Parquet
 │   └── schemas/
 │       ├── unified.json                      # standard keys + synonym lists
+│       ├── one_health_dictionaries.json      # One Health keyword/ontology dict
 │       └── ncbi_attributes.xml               # NCBI harmonization table (optional)
 ├── scripts/
-│   └── build_ncbi_attribute_cache.py         # regenerate ncbi_attributes.xml
+│   ├── build_dictionaries.py               # rebuild one_health_dictionaries.json
+│   └── build_ncbi_attribute_cache.py       # rebuild ncbi_attributes.xml
 ├── tests/
 │   ├── test_ingestion.py
 │   ├── test_key_mapper.py
