@@ -52,15 +52,16 @@ ASSEMBLY_SUMMARY_REFSEQ = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
 _BATCH_SIZE = 200
+_EPOST_BATCH = 500   # EPost is cheap; larger batches reduce round-trips
 _ESEARCH_BATCH = 100
 _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
 
-# Alphabetic prefixes of native BioSample accessions.  The numeric UID used
-# by Entrez efetch is obtained by stripping this prefix from the accession
-# string.  e.g. SAMN12345678 -> UID 12345678.
+# Prefixes that identify native BioSample accessions (INSDC standard).
+# EPost db=biosample accepts these strings directly and maps them to
+# internal UIDs on the History Server; EFetch then retrieves via WebEnv.
 _BIOSAMPLE_PREFIXES = ("SAMN", "SAME", "SAMD")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -508,8 +509,8 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
 def _resolve_accessions_to_uids(accessions: list) -> dict:
     """Resolve non-BioSample accessions to numeric UIDs via esearch + esummary.
 
-    This path is only used for accession types that cannot be converted by
-    simple prefix stripping (i.e. anything that is not SAMN/SAME/SAMD).
+    Used only for accession types that are not SAMN/SAME/SAMD (e.g. legacy
+    SRA run accessions that somehow ended up in the input list).
     """
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
@@ -578,55 +579,133 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
     return acc_to_uid
 
 
-def _biosample_accession_to_uid(acc: str) -> str:
-    """Strip the alphabetic prefix from a BioSample accession to obtain the
-    numeric UID required by Entrez efetch.
+def _epost_biosample_accessions(accessions: list) -> tuple:
+    """Upload a list of BioSample accessions to the Entrez History Server
+    via EPost and return (WebEnv, query_key, count).
 
-    SAMN12345678 -> '12345678'
-    SAME12345678 -> '12345678'
-    SAMD12345678 -> '12345678'
-
-    The numeric suffix is always identical to the internal NCBI UID for
-    BioSample records.  This avoids esearch + esummary round-trips entirely.
+    EPost db=biosample accepts SAMN/SAME/SAMD accession strings directly
+    and resolves them to internal numeric UIDs server-side.  The returned
+    WebEnv + query_key can be passed straight to EFetch for retrieval.
+    This is the correct NCBI-recommended pipeline for bulk BioSample
+    retrieval without going through esearch.
     """
-    upper = acc.upper()
-    for prefix in _BIOSAMPLE_PREFIXES:
-        if upper.startswith(prefix):
-            return acc[len(prefix):]
-    return acc
+    inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
+
+    web_env = None
+    query_key = None
+    total_posted = 0
+
+    for start in range(0, len(accessions), _EPOST_BATCH):
+        batch = accessions[start:start + _EPOST_BATCH]
+        id_str = ",".join(batch)
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                kwargs = {"db": "biosample", "id": id_str}
+                if web_env is not None:
+                    kwargs["WebEnv"] = web_env
+                handle = Entrez.epost(**kwargs)
+                result = Entrez.read(handle)
+                handle.close()
+                break
+            except _TRANSIENT_EXCEPTIONS as exc:
+                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                logger.warning(
+                    "epost attempt %d/%d failed (batch %d-%d): %s. Retrying in %ds...",
+                    attempt, _MAX_RETRIES, start, start + len(batch), exc, wait,
+                )
+                time.sleep(wait)
+        else:
+            logger.error(
+                "epost failed after %d retries for batch %d-%d; these %d accessions skipped.",
+                _MAX_RETRIES, start, start + len(batch), len(batch),
+            )
+            continue
+
+        web_env = result["WebEnv"]
+        query_key = result["QueryKey"]
+        total_posted += len(batch)
+        logger.debug(
+            "epost: uploaded %d/%d accessions (WebEnv set, query_key=%s)",
+            total_posted, len(accessions), query_key,
+        )
+        if start + _EPOST_BATCH < len(accessions):
+            time.sleep(inter_req_sleep)
+
+    if web_env is None or query_key is None:
+        raise ValueError(
+            "EPost failed for all batches -- no BioSample accessions could be uploaded "
+            "to the Entrez History Server."
+        )
+
+    logger.info(
+        "EPost complete: %d accessions uploaded to History Server "
+        "(WebEnv=%.20s... query_key=%s).",
+        total_posted, web_env, query_key,
+    )
+    return web_env, query_key, total_posted
 
 
 def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     requested_set = set(samn_ids)
 
-    # Split input into two groups:
-    #   direct_ids       - SAMN/SAME/SAMD accessions whose numeric UID is
-    #                      derived by prefix stripping; no API calls needed.
-    #   needs_resolution - any other accession type that must go through
-    #                      esearch + esummary to obtain a numeric UID.
     direct_ids = [a for a in samn_ids if a.upper().startswith(_BIOSAMPLE_PREFIXES)]
     needs_resolution = [a for a in samn_ids if not a.upper().startswith(_BIOSAMPLE_PREFIXES)]
 
-    # acc -> numeric UID string
-    acc_to_uid = {}
+    records = []
+    failed_batches = []
 
+    # --- Path 1: SAMN/SAME/SAMD -- use EPost -> EFetch via History Server ---
     if direct_ids:
-        for acc in direct_ids:
-            acc_to_uid[acc] = _biosample_accession_to_uid(acc)
         logger.info(
-            "Derived numeric UIDs for %d BioSample accessions by prefix stripping "
-            "(no esearch/esummary needed).",
+            "Uploading %d BioSample accessions to Entrez History via EPost...",
             len(direct_ids),
         )
+        web_env, query_key, total_posted = _epost_biosample_accessions(direct_ids)
 
+        total = total_posted
+        n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
+        logger.info("Fetching %d records via EFetch (WebEnv/query_key)...", total)
+
+        for batch_i, retstart in enumerate(range(0, total, _BATCH_SIZE)):
+            batch_records = _fetch_batch_via_history(
+                web_env, query_key, retstart, _BATCH_SIZE,
+                synonym_lookup=synonym_lookup,
+            )
+
+            if batch_records is None:
+                logger.error(
+                    "Batch %d/%d (retstart=%d) failed after %d retries. Records excluded.",
+                    batch_i + 1, n_batches, retstart, _MAX_RETRIES,
+                )
+                failed_batches.append((retstart, _BATCH_SIZE))
+            else:
+                for rec in batch_records:
+                    acc = rec.get("biosample_accession") or ""
+                    if acc in requested_set:
+                        records.append(rec)
+                    else:
+                        logger.warning(
+                            "Unexpected record returned by NCBI and discarded: "
+                            "biosample_accession=%r (not in requested input set)", acc,
+                        )
+
+            fetched = min(retstart + _BATCH_SIZE, total)
+            logger.info(
+                "Fetched %d / %d (%d/%d batches)",
+                fetched, total, batch_i + 1, n_batches,
+            )
+            if batch_i < n_batches - 1:
+                time.sleep(inter_batch_sleep)
+
+    # --- Path 2: non-standard accessions -- legacy esearch+esummary+efetch ---
     if needs_resolution:
         logger.info(
             "Resolving %d non-BioSample accessions to NCBI UIDs via esearch...",
             len(needs_resolution),
         )
-        resolved = _resolve_accessions_to_uids(needs_resolution)
-        acc_to_uid.update(resolved)
+        acc_to_uid = _resolve_accessions_to_uids(needs_resolution)
         unresolved = [a for a in needs_resolution if a not in acc_to_uid]
         if unresolved:
             logger.warning(
@@ -634,50 +713,86 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
                 len(unresolved), unresolved[:5],
             )
 
-    uid_list = list(acc_to_uid.values())
-    if not uid_list:
-        raise ValueError("No UIDs could be resolved from the provided BioSample accessions.")
-
-    logger.info("Fetching metadata for %d UIDs...", len(uid_list))
-
-    records = []
-    failed_ids = []
-    total = len(uid_list)
-    n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
-
-    for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
-        uid_batch = uid_list[start:start + _BATCH_SIZE]
-        batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
-
-        if batch_records is None:
-            logger.error(
-                "Batch %d/%d failed after %d retries. %d records excluded.",
-                batch_i + 1, n_batches, _MAX_RETRIES, len(uid_batch),
+        uid_list = list(acc_to_uid.values())
+        if uid_list:
+            total = len(uid_list)
+            n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
+            logger.info(
+                "Fetching metadata for %d resolved UIDs (legacy path)...", total
             )
-            failed_ids.extend(uid_batch)
-        else:
-            for rec in batch_records:
-                acc = rec.get("biosample_accession") or ""
-                if acc in requested_set:
-                    records.append(rec)
-                else:
-                    logger.warning(
-                        "Unexpected record returned by NCBI and discarded: "
-                        "biosample_accession=%r (not in requested input set)", acc,
+            for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
+                uid_batch = uid_list[start:start + _BATCH_SIZE]
+                batch_records = _fetch_batch_with_retry(
+                    uid_batch, synonym_lookup=synonym_lookup
+                )
+                if batch_records is None:
+                    logger.error(
+                        "Legacy batch %d/%d failed after %d retries.",
+                        batch_i + 1, n_batches, _MAX_RETRIES,
                     )
+                else:
+                    for rec in batch_records:
+                        acc = rec.get("biosample_accession") or ""
+                        if acc in requested_set:
+                            records.append(rec)
+                if batch_i < n_batches - 1:
+                    time.sleep(inter_batch_sleep)
 
-        fetched = min(start + _BATCH_SIZE, total)
-        logger.info("Fetched %d / %d (%d/%d batches)", fetched, total, batch_i + 1, n_batches)
-        if batch_i < n_batches - 1:
-            time.sleep(inter_batch_sleep)
-
-    if failed_ids:
-        logger.warning("%d UIDs could not be fetched: %s", len(failed_ids), failed_ids[:10])
+    if not records and not failed_batches:
+        logger.warning("No records were returned for the provided accessions.")
 
     return pd.DataFrame(records).reindex(columns=BIOSAMPLE_SCHEMA)
 
 
+def _fetch_batch_via_history(
+    web_env: str,
+    query_key: str,
+    retstart: int,
+    retmax: int,
+    synonym_lookup: dict = None,
+):
+    """Fetch one page of BioSample records from the Entrez History Server.
+
+    Uses WebEnv + query_key (populated by EPost) so that efetch receives
+    proper numeric UIDs without any accession-to-UID translation in client
+    code.
+    """
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            handle = Entrez.efetch(
+                db="biosample",
+                WebEnv=web_env,
+                query_key=query_key,
+                retstart=retstart,
+                retmax=retmax,
+                rettype="full",
+                retmode="xml",
+            )
+            raw = handle.read()
+            handle.close()
+            return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
+        except ET.ParseError as exc:
+            logger.error(
+                "XML ParseError on efetch (retstart=%d): %s", retstart, exc
+            )
+            return []
+        except _TRANSIENT_EXCEPTIONS as exc:
+            wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+            logger.warning(
+                "efetch attempt %d/%d failed (retstart=%d, transient): %s. "
+                "Retrying in %ds...",
+                attempt, _MAX_RETRIES, retstart, exc, wait,
+            )
+            time.sleep(wait)
+    logger.error(
+        "efetch failed after %d retries (retstart=%d, retmax=%d).",
+        _MAX_RETRIES, retstart, retmax,
+    )
+    return None
+
+
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
+    """Fetch BioSample records by explicit numeric UID list (legacy path)."""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
