@@ -231,7 +231,37 @@ def _read_assembly_summary(cache_path: Path, extra_cols: list = None) -> pd.Data
     return _read_assembly_summary_cached(str(cache_path), mtime)
 
 
-def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd.DataFrame:
+def ingest(
+    source,
+    email: str = None,
+    api_key: str = None,
+    cache_dir=None,
+    fetch_batch_size: int = None,
+    esearch_batch_size: int = None,
+) -> pd.DataFrame:
+    """Fetch and return harmonized BioSample metadata as a DataFrame.
+
+    Parameters
+    ----------
+    source:
+        Path to a file of accessions (one per line), or a list of accession
+        strings. Accepted prefixes: SAMN/SAME/SAMD or GCF_/GCA_.
+    email:
+        Contact email for NCBI Entrez. Required if not set via set_email().
+    api_key:
+        NCBI API key (optional, raises rate limit from 3 to 10 req/s).
+    cache_dir:
+        Directory for assembly summary flat-file cache. Defaults to
+        ~/.biometaharmonizer/cache/.
+    fetch_batch_size:
+        Number of BioSample accessions per efetch request. Defaults to
+        the module-level _BATCH_SIZE (200). Higher values mean fewer HTTP
+        round trips but larger XML payloads per response.
+    esearch_batch_size:
+        Number of accessions per esearch/elink/esummary request used in the
+        legacy UID-resolution path and the Entrez elink GCF/GCA fallback.
+        Defaults to the module-level _ESEARCH_BATCH (100).
+    """
     resolved_email = email or (None if ENTREZ_EMAIL == _DEFAULT_EMAIL else ENTREZ_EMAIL)
     if not resolved_email:
         raise ValueError(
@@ -247,6 +277,10 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
 
     Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
+
+    # Resolve effective batch sizes: caller value > module default.
+    eff_batch_size = int(fetch_batch_size) if fetch_batch_size is not None else _BATCH_SIZE
+    eff_esearch_batch = int(esearch_batch_size) if esearch_batch_size is not None else _ESEARCH_BATCH
 
     ids = _load_ids(source)
 
@@ -279,7 +313,9 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
                 "%d assembly accessions not in local index -- trying Entrez elink fallback...",
                 len(unresolved_gcx),
             )
-            fallback_resolved, unresolved_gcx = _resolve_gcx_via_entrez(unresolved_gcx)
+            fallback_resolved, unresolved_gcx = _resolve_gcx_via_entrez(
+                unresolved_gcx, esearch_batch=eff_esearch_batch
+            )
             n_resolved_via_entrez = len(fallback_resolved)
             resolved = resolved + fallback_resolved
             if unresolved_gcx:
@@ -311,7 +347,12 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
 
     synonym_lookup = build_synonym_lookup()
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
-    df = _fetch_biosample_metadata(samn, synonym_lookup=synonym_lookup)
+    df = _fetch_biosample_metadata(
+        samn,
+        synonym_lookup=synonym_lookup,
+        batch_size=eff_batch_size,
+        esearch_batch=eff_esearch_batch,
+    )
 
     biosample_set = set(df["biosample_accession"].dropna())
 
@@ -354,6 +395,8 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
                 len(unresolved_gcx),
             )
             logger.warning("    Unresolved: %s", unresolved_gcx)
+    logger.info("  fetch_batch_size    : %d", eff_batch_size)
+    logger.info("  esearch_batch_size  : %d", eff_esearch_batch)
     logger.info("  Records in output   : %d", len(df))
     logger.info("  bioproject_accession filled : %d / %d",
                 df["bioproject_accession"].notna().sum(), len(df))
@@ -473,7 +516,7 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
     return resolved, unresolved
 
 
-def _resolve_gcx_via_entrez(gcx_ids: list) -> tuple:
+def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
     """Fallback: resolve GCF/GCA accessions to BioSample via Entrez elink.
 
     Uses elink with db=biosample, dbfrom=assembly to traverse the
@@ -481,14 +524,23 @@ def _resolve_gcx_via_entrez(gcx_ids: list) -> tuple:
     assembly numeric UIDs via esearch, then elink converts those UIDs to
     biosample UIDs, and finally esummary retrieves the SAMN accessions.
 
+    Parameters
+    ----------
+    gcx_ids:
+        List of GCF_/GCA_ accessions to resolve.
+    esearch_batch:
+        Batch size for esearch/elink/esummary calls. Defaults to
+        the module-level _ESEARCH_BATCH.
+
     Returns (resolved_biosample_list, still_unresolved_gcx_list).
     """
+    batch_size = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     resolved = []
     remaining = set(gcx_ids)
 
-    for start in range(0, len(gcx_ids), _ESEARCH_BATCH):
-        batch = gcx_ids[start:start + _ESEARCH_BATCH]
+    for start in range(0, len(gcx_ids), batch_size):
+        batch = gcx_ids[start:start + batch_size]
         term = " OR ".join(f"{acc}[Assembly Accession]" for acc in batch)
 
         # Step 1: esearch assembly db to get numeric UIDs
@@ -562,8 +614,8 @@ def _resolve_gcx_via_entrez(gcx_ids: list) -> tuple:
             continue
 
         # Step 3: esummary biosample UIDs -> SAMN accessions
-        for uid_start in range(0, len(bs_uids), _ESEARCH_BATCH):
-            uid_batch = bs_uids[uid_start:uid_start + _ESEARCH_BATCH]
+        for uid_start in range(0, len(bs_uids), batch_size):
+            uid_batch = bs_uids[uid_start:uid_start + batch_size]
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     sum_handle = Entrez.esummary(
@@ -587,23 +639,14 @@ def _resolve_gcx_via_entrez(gcx_ids: list) -> tuple:
                 acc = doc.get("Accession", "")
                 if acc and acc.upper().startswith(_BIOSAMPLE_PREFIXES):
                     resolved.append(acc)
-                    # Mark each original GCX accession that contributed to this
-                    # biosample as resolved.  We can't do a 1:1 mapping here
-                    # because elink returns biosample UIDs aggregated over the
-                    # whole batch, so we discard all batch members from remaining
-                    # only after the full batch succeeds.
 
             time.sleep(inter_req_sleep)
 
-        # Remove the entire batch from remaining -- any that truly had no
-        # biosample link stay in unresolved after the set difference below.
         for acc in batch:
             remaining.discard(acc)
 
         time.sleep(inter_req_sleep)
 
-    # remaining now holds only accessions for which every step above either
-    # failed or returned no biosample links.
     unresolved = [a for a in gcx_ids if a in remaining]
     if unresolved:
         logger.warning(
@@ -667,7 +710,12 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
     return lookup
 
 
-def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
+def _fetch_biosample_metadata(
+    samn_ids: list,
+    synonym_lookup: dict = None,
+    batch_size: int = None,
+    esearch_batch: int = None,
+) -> pd.DataFrame:
     """Fetch BioSample XML records for a list of accessions.
 
     For SAMN/SAME/SAMD accessions the pipeline is:
@@ -677,7 +725,18 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
     Each batch produces its own fresh WebEnv+query_key that covers exactly
     the accessions in that batch.  This avoids the cross-batch accumulation
     bug where the last query_key only indexes the last batch.
+
+    Parameters
+    ----------
+    batch_size:
+        Records per efetch request. Defaults to module-level _BATCH_SIZE.
+    esearch_batch:
+        Records per esearch/esummary request in the legacy UID-resolution
+        path. Defaults to module-level _ESEARCH_BATCH.
     """
+    eff_batch = batch_size if batch_size is not None else _BATCH_SIZE
+    eff_esearch = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
+
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     requested_set = set(samn_ids)
 
@@ -686,11 +745,11 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
 
     records = []
     total = len(direct_ids)
-    n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
+    n_batches = (total + eff_batch - 1) // eff_batch
 
     # --- Path 1: SAMN/SAME/SAMD -- esearch(usehistory=y) + efetch per batch ---
-    for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
-        batch = direct_ids[start:start + _BATCH_SIZE]
+    for batch_i, start in enumerate(range(0, total, eff_batch)):
+        batch = direct_ids[start:start + eff_batch]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
         web_env = None
@@ -758,7 +817,7 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
                         "biosample_accession=%r (not in requested input set)", acc,
                     )
 
-        fetched_so_far = min(start + _BATCH_SIZE, total)
+        fetched_so_far = min(start + eff_batch, total)
         logger.info(
             "Fetched %d / %d (%d/%d batches)",
             fetched_so_far, total, batch_i + 1, n_batches,
@@ -772,7 +831,7 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
             "Resolving %d non-BioSample accessions to NCBI UIDs via esearch...",
             len(needs_resolution),
         )
-        acc_to_uid = _resolve_accessions_to_uids(needs_resolution)
+        acc_to_uid = _resolve_accessions_to_uids(needs_resolution, esearch_batch=eff_esearch)
         unresolved = [a for a in needs_resolution if a not in acc_to_uid]
         if unresolved:
             logger.warning(
@@ -783,10 +842,10 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
         uid_list = list(acc_to_uid.values())
         if uid_list:
             leg_total = len(uid_list)
-            leg_batches = (leg_total + _BATCH_SIZE - 1) // _BATCH_SIZE
+            leg_batches = (leg_total + eff_batch - 1) // eff_batch
             logger.info("Fetching metadata for %d resolved UIDs (legacy path)...", leg_total)
-            for batch_i, start in enumerate(range(0, leg_total, _BATCH_SIZE)):
-                uid_batch = uid_list[start:start + _BATCH_SIZE]
+            for batch_i, start in enumerate(range(0, leg_total, eff_batch)):
+                uid_batch = uid_list[start:start + eff_batch]
                 batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
                 if batch_records is None:
                     logger.error(
@@ -804,13 +863,14 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
     return pd.DataFrame(records).reindex(columns=BIOSAMPLE_SCHEMA)
 
 
-def _resolve_accessions_to_uids(accessions: list) -> dict:
+def _resolve_accessions_to_uids(accessions: list, esearch_batch: int = None) -> dict:
     """Resolve non-BioSample accessions to numeric UIDs via esearch + esummary."""
+    batch_size = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
 
-    for start in range(0, len(accessions), _ESEARCH_BATCH):
-        batch = accessions[start:start + _ESEARCH_BATCH]
+    for start in range(0, len(accessions), batch_size):
+        batch = accessions[start:start + batch_size]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -842,8 +902,8 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
-        for uid_start in range(0, len(uids), _ESEARCH_BATCH):
-            uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
+        for uid_start in range(0, len(uids), batch_size):
+            uid_batch = uids[uid_start:uid_start + batch_size]
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     sum_handle = Entrez.esummary(db="biosample", id=",".join(uid_batch))

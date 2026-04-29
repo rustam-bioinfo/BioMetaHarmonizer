@@ -126,7 +126,6 @@ def _run(args: argparse.Namespace) -> int:
     fmt = args.format or _infer_format(output_path)
 
     try:
-        from biometaharmonizer import ingestion as _ingestion
         from biometaharmonizer.ingestion import set_email, ingest
         from biometaharmonizer.key_mapper import KeyMapper
         from biometaharmonizer.date_engine import DateEngine
@@ -143,10 +142,6 @@ def _run(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    # Apply user-supplied batch size overrides to the ingestion module globals.
-    _ingestion._BATCH_SIZE = args.fetch_batch_size
-    _ingestion._ESEARCH_BATCH = args.esearch_batch_size
-
     kwargs = {}
     if args.api_key:
         kwargs["api_key"] = args.api_key
@@ -160,7 +155,12 @@ def _run(args: argparse.Namespace) -> int:
     )
     t0 = time.perf_counter()
     try:
-        df = ingest(source, **kwargs)
+        df = ingest(
+            source,
+            fetch_batch_size=args.fetch_batch_size,
+            esearch_batch_size=args.esearch_batch_size,
+            **kwargs,
+        )
     except Exception as exc:
         print(f"ERROR during ingestion: {exc}", file=sys.stderr)
         logger.debug("", exc_info=True)
