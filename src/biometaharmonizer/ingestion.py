@@ -58,6 +58,10 @@ _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
 
+# Accession prefixes that are native BioSample identifiers and can be passed
+# directly to Entrez.efetch() without going through esearch/esummary first.
+_BIOSAMPLE_PREFIXES = ("SAMN", "SAME", "SAMD")
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 _TRANSIENT_EXCEPTIONS = (
@@ -574,21 +578,45 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     requested_set = set(samn_ids)
 
-    logger.info("Resolving %d accessions to NCBI UIDs...", len(samn_ids))
-    acc_to_uid = _resolve_accessions_to_uids(samn_ids)
+    # Split input into two groups:
+    #   direct_ids      - native BioSample accessions (SAMN/SAME/SAMD) that
+    #                     efetch accepts directly; no UID resolution needed.
+    #   needs_resolution - any other accession type that must go through
+    #                     esearch + esummary to obtain a numeric UID first.
+    direct_ids = [a for a in samn_ids if a.upper().startswith(_BIOSAMPLE_PREFIXES)]
+    needs_resolution = [a for a in samn_ids if not a.upper().startswith(_BIOSAMPLE_PREFIXES)]
 
-    unresolved = [a for a in samn_ids if a not in acc_to_uid]
-    if unresolved:
-        logger.warning(
-            "%d accessions could not be resolved to UIDs and will be skipped: %s",
-            len(unresolved), unresolved[:5],
+    acc_to_uid = {}
+
+    if needs_resolution:
+        logger.info(
+            "Resolving %d non-BioSample accessions to NCBI UIDs...",
+            len(needs_resolution),
+        )
+        acc_to_uid = _resolve_accessions_to_uids(needs_resolution)
+        unresolved = [a for a in needs_resolution if a not in acc_to_uid]
+        if unresolved:
+            logger.warning(
+                "%d accessions could not be resolved to UIDs and will be skipped: %s",
+                len(unresolved), unresolved[:5],
+            )
+
+    # BioSample accessions are passed directly to efetch as-is.
+    for acc in direct_ids:
+        acc_to_uid[acc] = acc
+
+    if direct_ids:
+        logger.info(
+            "Skipping UID resolution for %d BioSample accessions (SAMN/SAME/SAMD) -- "
+            "passing directly to efetch.",
+            len(direct_ids),
         )
 
     uid_list = list(acc_to_uid.values())
     if not uid_list:
         raise ValueError("No UIDs could be resolved from the provided BioSample accessions.")
 
-    logger.info("Fetching metadata for %d resolved UIDs...", len(uid_list))
+    logger.info("Fetching metadata for %d accessions...", len(uid_list))
 
     records = []
     failed_ids = []
@@ -722,12 +750,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             hn = (attr.get("harmonized_name") or "").strip()
             an = (attr.get("attribute_name") or "").strip()
             raw_key = hn or an or "unknown"
-            # fix(#27): always pass through _normalize_null regardless of whether
-            # the XML text node is None or empty.  Previously `if val is None:
-            # continue` bypassed writing the column entirely, meaning the
-            # null-normalization contract was only applied to non-empty values.
-            # Now null/empty attributes explicitly write None to the schema column
-            # (or are omitted from extras), consistent with all other fields.
             val = _normalize_null(attr.text)
 
             resolved = None
@@ -747,8 +769,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     raw_key = candidate
 
             if resolved is not None:
-                # Write None explicitly so the column reflects the NCBI submission
-                # state rather than staying at the schema initialisation default.
                 if record.get(resolved) is None:
                     record[resolved] = val
                 elif val is not None:
@@ -759,7 +779,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                         resolved, record.get("biosample_accession"),
                     )
             elif val is not None:
-                # Only store non-null unknowns in extras to keep _extra_attributes lean.
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
 
