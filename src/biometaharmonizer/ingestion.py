@@ -52,7 +52,7 @@ ASSEMBLY_SUMMARY_REFSEQ = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
 _BATCH_SIZE = 200
-_ESEARCH_UID_BATCH = 100
+_ESEARCH_BATCH = 100
 _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
@@ -529,7 +529,6 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
         batch = direct_ids[start:start + _BATCH_SIZE]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
-        # Step A: esearch with usehistory=y to resolve accessions -> History slot
         web_env = None
         query_key = None
         found = 0
@@ -574,7 +573,6 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
                 time.sleep(inter_batch_sleep)
             continue
 
-        # Step B: efetch the History slot (retstart=0 always; slot covers this batch only)
         batch_records = _fetch_batch_via_history(
             web_env, query_key, retstart=0, retmax=found,
             synonym_lookup=synonym_lookup,
@@ -647,8 +645,8 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
 
-    for start in range(0, len(accessions), _ESEARCH_UID_BATCH):
-        batch = accessions[start:start + _ESEARCH_UID_BATCH]
+    for start in range(0, len(accessions), _ESEARCH_BATCH):
+        batch = accessions[start:start + _ESEARCH_BATCH]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -680,8 +678,8 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
-        for uid_start in range(0, len(uids), _ESEARCH_UID_BATCH):
-            uid_batch = uids[uid_start:uid_start + _ESEARCH_UID_BATCH]
+        for uid_start in range(0, len(uids), _ESEARCH_BATCH):
+            uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     sum_handle = Entrez.esummary(db="biosample", id=",".join(uid_batch))
