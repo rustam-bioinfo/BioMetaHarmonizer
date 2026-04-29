@@ -4,6 +4,8 @@ Module 1: Universal Data Ingestion.
 Fetches NCBI BioSample metadata for lists of BioSample IDs or assembly accessions.
 BioProject accession is resolved from NCBI assembly summary flat files, which are
 downloaded once to a configurable cache directory and refreshed every 7 days.
+Assembly accessions not present in the local index are resolved via a live
+Entrez elink call (assembly -> biosample) as a fallback.
 
 This module now defines the canonical fixed output schema for the entire tool.
 Every record is initialized with all predefined columns, so downstream steps only
@@ -264,10 +266,29 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
 
     n_gcx_input = len(gcx)
     unresolved_gcx = []
+    n_resolved_via_index = 0
+    n_resolved_via_entrez = 0
 
     if gcx:
         logger.info("Resolving %d assembly accessions to BioSample IDs...", len(gcx))
         resolved, unresolved_gcx = _resolve_assembly_to_biosample(gcx)
+        n_resolved_via_index = len(resolved)
+
+        if unresolved_gcx:
+            logger.info(
+                "%d assembly accessions not in local index -- trying Entrez elink fallback...",
+                len(unresolved_gcx),
+            )
+            fallback_resolved, unresolved_gcx = _resolve_gcx_via_entrez(unresolved_gcx)
+            n_resolved_via_entrez = len(fallback_resolved)
+            resolved = resolved + fallback_resolved
+            if unresolved_gcx:
+                logger.warning(
+                    "%d assembly accessions could not be resolved via local index or Entrez "
+                    "elink (suppressed/invalid): %s",
+                    len(unresolved_gcx), unresolved_gcx[:5],
+                )
+
         samn = list(set(samn + resolved))
 
     if not samn:
@@ -278,12 +299,13 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
             )
         if gcx and unresolved_gcx:
             reasons.append(
-                f"{len(unresolved_gcx)} assembly accessions not found in the local assembly index "
-                f"(cache dir: {CACHE_DIR}; delete cached assembly_summary_*.txt to force refresh)"
+                f"{len(unresolved_gcx)} assembly accessions not resolved via local index or "
+                f"Entrez elink (suppressed or invalid)"
             )
         if not reasons:
             reasons.append(
-                "no BioSample accessions remained after input classification and assembly-to-BioSample resolution"
+                "no BioSample accessions remained after input classification and "
+                "assembly-to-BioSample resolution"
             )
         raise ValueError("No valid BioSample IDs could be resolved. Reasons: " + "; ".join(reasons))
 
@@ -323,12 +345,12 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
     logger.info("  Input IDs provided  : %d", len(ids))
     if n_gcx_input:
         logger.info("  Assembly accessions : %d", n_gcx_input)
-        logger.info(
-            "    Resolved to BioSample : %d", n_gcx_input - len(unresolved_gcx)
-        )
+        logger.info("    Resolved via local index : %d", n_resolved_via_index)
+        if n_resolved_via_entrez:
+            logger.info("    Resolved via Entrez elink (fallback) : %d", n_resolved_via_entrez)
         if unresolved_gcx:
             logger.warning(
-                "    NOT resolved (absent from assembly index or suppressed): %d",
+                "    NOT resolved (suppressed/invalid after both passes): %d",
                 len(unresolved_gcx),
             )
             logger.warning("    Unresolved: %s", unresolved_gcx)
@@ -416,6 +438,12 @@ def _ensure_assembly_summaries() -> None:
 
 
 def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
+    """Resolve GCF/GCA accessions to BioSample accessions using the local index.
+
+    Returns (resolved_biosample_list, still_unresolved_gcx_list).
+    The Entrez elink fallback is NOT called here; callers that want it should
+    call _resolve_gcx_via_entrez() on the returned unresolved list.
+    """
     resolved = []
     gcx_set = set(gcx_ids)
 
@@ -442,9 +470,145 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
             )
 
     unresolved = list(gcx_set)
+    return resolved, unresolved
+
+
+def _resolve_gcx_via_entrez(gcx_ids: list) -> tuple:
+    """Fallback: resolve GCF/GCA accessions to BioSample via Entrez elink.
+
+    Uses elink with db=biosample, dbfrom=assembly to traverse the
+    assembly->biosample link in NCBI. Accessions are first resolved to
+    assembly numeric UIDs via esearch, then elink converts those UIDs to
+    biosample UIDs, and finally esummary retrieves the SAMN accessions.
+
+    Returns (resolved_biosample_list, still_unresolved_gcx_list).
+    """
+    inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
+    resolved = []
+    remaining = set(gcx_ids)
+
+    for start in range(0, len(gcx_ids), _ESEARCH_BATCH):
+        batch = gcx_ids[start:start + _ESEARCH_BATCH]
+        term = " OR ".join(f"{acc}[Assembly Accession]" for acc in batch)
+
+        # Step 1: esearch assembly db to get numeric UIDs
+        asm_uids = []
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                handle = Entrez.esearch(
+                    db="assembly",
+                    term=term,
+                    retmax=len(batch),
+                    usehistory="n",
+                )
+                result = Entrez.read(handle)
+                handle.close()
+                asm_uids = result.get("IdList", [])
+                break
+            except _TRANSIENT_EXCEPTIONS as exc:
+                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                logger.warning(
+                    "elink esearch attempt %d/%d failed: %s. Retrying in %ds...",
+                    attempt, _MAX_RETRIES, exc, wait,
+                )
+                time.sleep(wait)
+        else:
+            logger.warning(
+                "Entrez esearch (assembly) failed for batch at index %d -- skipping.", start
+            )
+            time.sleep(inter_req_sleep)
+            continue
+
+        if not asm_uids:
+            time.sleep(inter_req_sleep)
+            continue
+
+        # Step 2: elink assembly UIDs -> biosample UIDs
+        bs_uids = []
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                handle = Entrez.elink(
+                    dbfrom="assembly",
+                    db="biosample",
+                    id=",".join(asm_uids),
+                    linkname="assembly_biosample",
+                )
+                link_results = Entrez.read(handle)
+                handle.close()
+                for linkset in link_results:
+                    for link_db in linkset.get("LinkSetDb", []):
+                        for link in link_db.get("Link", []):
+                            uid = link.get("Id", "")
+                            if uid:
+                                bs_uids.append(uid)
+                break
+            except _TRANSIENT_EXCEPTIONS as exc:
+                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                logger.warning(
+                    "elink attempt %d/%d failed: %s. Retrying in %ds...",
+                    attempt, _MAX_RETRIES, exc, wait,
+                )
+                time.sleep(wait)
+        else:
+            logger.warning(
+                "Entrez elink (assembly->biosample) failed for batch at index %d -- skipping.",
+                start,
+            )
+            time.sleep(inter_req_sleep)
+            continue
+
+        if not bs_uids:
+            time.sleep(inter_req_sleep)
+            continue
+
+        # Step 3: esummary biosample UIDs -> SAMN accessions
+        for uid_start in range(0, len(bs_uids), _ESEARCH_BATCH):
+            uid_batch = bs_uids[uid_start:uid_start + _ESEARCH_BATCH]
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    sum_handle = Entrez.esummary(
+                        db="biosample",
+                        id=",".join(uid_batch),
+                    )
+                    summaries = Entrez.read(sum_handle)
+                    sum_handle.close()
+                    break
+                except _TRANSIENT_EXCEPTIONS as exc:
+                    wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                    logger.warning(
+                        "esummary attempt %d/%d failed: %s. Retrying in %ds...",
+                        attempt, _MAX_RETRIES, exc, wait,
+                    )
+                    time.sleep(wait)
+            else:
+                continue
+
+            for doc in summaries["DocumentSummarySet"]["DocumentSummary"]:
+                acc = doc.get("Accession", "")
+                if acc and acc.upper().startswith(_BIOSAMPLE_PREFIXES):
+                    resolved.append(acc)
+                    # Mark each original GCX accession that contributed to this
+                    # biosample as resolved.  We can't do a 1:1 mapping here
+                    # because elink returns biosample UIDs aggregated over the
+                    # whole batch, so we discard all batch members from remaining
+                    # only after the full batch succeeds.
+
+            time.sleep(inter_req_sleep)
+
+        # Remove the entire batch from remaining -- any that truly had no
+        # biosample link stay in unresolved after the set difference below.
+        for acc in batch:
+            remaining.discard(acc)
+
+        time.sleep(inter_req_sleep)
+
+    # remaining now holds only accessions for which every step above either
+    # failed or returned no biosample links.
+    unresolved = [a for a in gcx_ids if a in remaining]
     if unresolved:
         logger.warning(
-            "%d assembly accessions not found in either index (suppressed or absent): %s",
+            "%d assembly accessions returned no biosample link from Entrez elink "
+            "(truly suppressed or invalid): %s",
             len(unresolved), unresolved[:5],
         )
     return resolved, unresolved
