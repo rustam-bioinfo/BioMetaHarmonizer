@@ -47,6 +47,20 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--format", "-f", choices=["csv", "tsv", "excel", "parquet"], default=None, metavar="FORMAT")
     run_p.add_argument("--summary", metavar="FILE", default=None)
     run_p.add_argument("--verbose", "-v", action="store_true", default=False)
+    run_p.add_argument(
+        "--fetch-batch-size",
+        metavar="N",
+        type=int,
+        default=200,
+        help="Number of records per efetch request (default: 200).",
+    )
+    run_p.add_argument(
+        "--esearch-batch-size",
+        metavar="N",
+        type=int,
+        default=200,
+        help="Number of accessions per esearch term when loading History Server (default: 200).",
+    )
 
     parser.add_argument("--version", action="version", version="%(prog)s " + _get_version())
     return parser
@@ -112,6 +126,7 @@ def _run(args: argparse.Namespace) -> int:
     fmt = args.format or _infer_format(output_path)
 
     try:
+        from biometaharmonizer import ingestion as _ingestion
         from biometaharmonizer.ingestion import set_email, ingest
         from biometaharmonizer.key_mapper import KeyMapper
         from biometaharmonizer.date_engine import DateEngine
@@ -128,6 +143,10 @@ def _run(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    # Apply user-supplied batch size overrides to the ingestion module globals.
+    _ingestion._BATCH_SIZE = args.fetch_batch_size
+    _ingestion._ESEARCH_BATCH = args.esearch_batch_size
+
     kwargs = {}
     if args.api_key:
         kwargs["api_key"] = args.api_key
@@ -135,6 +154,10 @@ def _run(args: argparse.Namespace) -> int:
         kwargs["cache_dir"] = args.cache_dir
 
     logger.info("Step 1/5  Ingestion")
+    logger.info(
+        "         fetch_batch_size=%d  esearch_batch_size=%d",
+        args.fetch_batch_size, args.esearch_batch_size,
+    )
     t0 = time.perf_counter()
     try:
         df = ingest(source, **kwargs)
