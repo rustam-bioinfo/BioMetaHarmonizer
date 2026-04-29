@@ -58,8 +58,9 @@ _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
 
-# Accession prefixes that are native BioSample identifiers and can be passed
-# directly to Entrez.efetch() without going through esearch/esummary first.
+# Alphabetic prefixes of native BioSample accessions.  The numeric UID used
+# by Entrez efetch is obtained by stripping this prefix from the accession
+# string.  e.g. SAMN12345678 -> UID 12345678.
 _BIOSAMPLE_PREFIXES = ("SAMN", "SAME", "SAMD")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -249,8 +250,6 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
 
     ids = _load_ids(source)
 
-    # fix(#35): warn and return early on empty input rather than silently
-    # returning an empty DataFrame with no indication of what happened.
     if not ids:
         logger.warning(
             "ingest() called with an empty accession list. Returning empty DataFrame."
@@ -507,6 +506,11 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
 
 
 def _resolve_accessions_to_uids(accessions: list) -> dict:
+    """Resolve non-BioSample accessions to numeric UIDs via esearch + esummary.
+
+    This path is only used for accession types that cannot be converted by
+    simple prefix stripping (i.e. anything that is not SAMN/SAME/SAMD).
+    """
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
 
@@ -574,26 +578,55 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
     return acc_to_uid
 
 
+def _biosample_accession_to_uid(acc: str) -> str:
+    """Strip the alphabetic prefix from a BioSample accession to obtain the
+    numeric UID required by Entrez efetch.
+
+    SAMN12345678 -> '12345678'
+    SAME12345678 -> '12345678'
+    SAMD12345678 -> '12345678'
+
+    The numeric suffix is always identical to the internal NCBI UID for
+    BioSample records.  This avoids esearch + esummary round-trips entirely.
+    """
+    upper = acc.upper()
+    for prefix in _BIOSAMPLE_PREFIXES:
+        if upper.startswith(prefix):
+            return acc[len(prefix):]
+    return acc
+
+
 def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
     inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     requested_set = set(samn_ids)
 
     # Split input into two groups:
-    #   direct_ids      - native BioSample accessions (SAMN/SAME/SAMD) that
-    #                     efetch accepts directly; no UID resolution needed.
+    #   direct_ids       - SAMN/SAME/SAMD accessions whose numeric UID is
+    #                      derived by prefix stripping; no API calls needed.
     #   needs_resolution - any other accession type that must go through
-    #                     esearch + esummary to obtain a numeric UID first.
+    #                      esearch + esummary to obtain a numeric UID.
     direct_ids = [a for a in samn_ids if a.upper().startswith(_BIOSAMPLE_PREFIXES)]
     needs_resolution = [a for a in samn_ids if not a.upper().startswith(_BIOSAMPLE_PREFIXES)]
 
+    # acc -> numeric UID string
     acc_to_uid = {}
+
+    if direct_ids:
+        for acc in direct_ids:
+            acc_to_uid[acc] = _biosample_accession_to_uid(acc)
+        logger.info(
+            "Derived numeric UIDs for %d BioSample accessions by prefix stripping "
+            "(no esearch/esummary needed).",
+            len(direct_ids),
+        )
 
     if needs_resolution:
         logger.info(
-            "Resolving %d non-BioSample accessions to NCBI UIDs...",
+            "Resolving %d non-BioSample accessions to NCBI UIDs via esearch...",
             len(needs_resolution),
         )
-        acc_to_uid = _resolve_accessions_to_uids(needs_resolution)
+        resolved = _resolve_accessions_to_uids(needs_resolution)
+        acc_to_uid.update(resolved)
         unresolved = [a for a in needs_resolution if a not in acc_to_uid]
         if unresolved:
             logger.warning(
@@ -601,22 +634,11 @@ def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd
                 len(unresolved), unresolved[:5],
             )
 
-    # BioSample accessions are passed directly to efetch as-is.
-    for acc in direct_ids:
-        acc_to_uid[acc] = acc
-
-    if direct_ids:
-        logger.info(
-            "Skipping UID resolution for %d BioSample accessions (SAMN/SAME/SAMD) -- "
-            "passing directly to efetch.",
-            len(direct_ids),
-        )
-
     uid_list = list(acc_to_uid.values())
     if not uid_list:
         raise ValueError("No UIDs could be resolved from the provided BioSample accessions.")
 
-    logger.info("Fetching metadata for %d accessions...", len(uid_list))
+    logger.info("Fetching metadata for %d UIDs...", len(uid_list))
 
     records = []
     failed_ids = []
