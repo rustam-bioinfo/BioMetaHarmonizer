@@ -46,6 +46,10 @@ class GeoEngine:
         re.IGNORECASE,
     )
 
+    # Strips a trailing parenthetical qualifier from a country string, e.g.
+    # 'United Kingdom (England, Wales & N. Ireland)' -> 'United Kingdom'.
+    _PAREN_RE = re.compile(r"\s*\(.*\)\s*$")
+
     _UK_SUBCOUNTRY = {
         "england": "GB",
         "scotland": "GB",
@@ -55,7 +59,7 @@ class GeoEngine:
 
     _COUNTRY_ALIASES = {
         "turkey": "TR",
-        "türkiye": "TR",
+        "t\u00fcrkiye": "TR",
         "namibia": "NA",
         "democratic republic of the congo": "CD",
         "dr congo": "CD",
@@ -63,6 +67,15 @@ class GeoEngine:
         "congo-kinshasa": "CD",
         "burma": "MM",
         "myanmar (burma)": "MM",
+        # Palestinian territories -- ISO 3166-1 alpha-2 PS covers both
+        # Gaza Strip and the West Bank as part of the State of Palestine.
+        "palestine": "PS",
+        "palestinian territories": "PS",
+        "palestinian territory": "PS",
+        "occupied palestinian territory": "PS",
+        "gaza strip": "PS",
+        "gaza": "PS",
+        "west bank": "PS",
     }
 
     _HISTORICAL_COUNTRIES = {
@@ -74,7 +87,6 @@ class GeoEngine:
         "socialist federal republic of yugoslavia",
         "czechoslovakia",
         "cssr",
-        "czechoslovakia",
         "german democratic republic",
         "east germany",
         "west germany",
@@ -102,16 +114,32 @@ class GeoEngine:
         r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
     )
 
-    def parse(self, series):
-        results = series.apply(self._parse_single)
-        return pd.DataFrame(results.tolist(), index=series.index)
-
-    def _parse_single(self, value):
-        empty = {
+    def _empty(self):
+        return {
             "geo_country": np.nan, "geo_region": np.nan,
             "geo_locality": np.nan, "geo_iso3166": np.nan,
             "geo_sea_ocean": np.nan, "geo_loc_raw": np.nan,
         }
+
+    def parse(self, series):
+        empty = self._empty()
+
+        unique_vals = series.dropna().unique()
+        logger.debug(
+            "GeoEngine: %d rows, %d unique non-null values to resolve.",
+            len(series), len(unique_vals),
+        )
+
+        cache = {v: self._parse_single(v) for v in unique_vals}
+
+        results = [
+            cache[v] if pd.notna(v) and v in cache else empty
+            for v in series
+        ]
+        return pd.DataFrame(results, index=series.index)
+
+    def _parse_single(self, value):
+        empty = self._empty()
         if pd.isna(value):
             return empty
 
@@ -133,16 +161,21 @@ class GeoEngine:
                 result["geo_locality"] = region_str if not locality_str else f"{region_str}, {locality_str}"
             return result
 
-        lower_country = country_str.lower().strip()
+        # Strip trailing parenthetical qualifiers before display-name and ISO
+        # resolution, e.g. 'United Kingdom (England, Wales & N. Ireland)'
+        # becomes 'United Kingdom'.
+        country_str_clean = self._PAREN_RE.sub("", country_str).strip()
+
+        lower_country = country_str_clean.lower()
         if lower_country in self._UK_SUBCOUNTRY:
             display_country = "United Kingdom"
         else:
-            display_country = country_str
+            display_country = country_str_clean
 
-        iso_code = self._resolve_iso(country_str)
+        iso_code = self._resolve_iso(country_str_clean)
 
         return {
-            "geo_country": display_country if country_str else np.nan,
+            "geo_country": display_country if country_str_clean else np.nan,
             "geo_region": region_str if region_str else np.nan,
             "geo_locality": locality_str if locality_str else np.nan,
             "geo_iso3166": iso_code,
@@ -151,6 +184,14 @@ class GeoEngine:
         }
 
     def _split_geo_string(self, value):
+        """Split a geo_loc_name string into (country, region, locality).
+
+        Handles 'Country: Region, Locality' and fallback 'Country, Locality'.
+        When the country token contains a parenthesised qualifier with a comma
+        inside (e.g. 'United Kingdom (England, Wales & N. Ireland)') the naive
+        comma-split would break the country name, so the whole value is treated
+        as the country token in that case.
+        """
         country_str = region_str = locality_str = ""
         if ":" in value:
             parts = value.split(":", 1)
@@ -163,7 +204,9 @@ class GeoEngine:
             else:
                 region_str = remainder
         else:
-            if "," in value:
+            # If a comma exists but is enclosed inside parentheses, treat the
+            # whole value as the country token to avoid splitting the name.
+            if "," in value and not re.search(r"\([^)]*,[^)]*\)", value):
                 parts = value.split(",", 1)
                 country_str = parts[0].strip()
                 locality_str = parts[1].strip()
@@ -181,10 +224,6 @@ class GeoEngine:
             return self._UK_SUBCOUNTRY[lower]
 
         if lower == "korea":
-            # Defaulting to South Korea is correct for the vast majority of NCBI
-            # metadata — bare 'Korea' almost always means ROK.  This is not a
-            # warning-worthy event; use INFO so it stays accessible without
-            # flooding the log on large South Korean datasets.
             logger.info(
                 "'Korea' without qualifier resolved to South Korea (KR). "
                 "Use 'North Korea' for DPRK."

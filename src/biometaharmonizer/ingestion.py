@@ -52,11 +52,14 @@ ASSEMBLY_SUMMARY_REFSEQ = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS
 ASSEMBLY_SUMMARY_GENBANK = "https://ftp.ncbi.nlm.nih.gov/genomes/ASSEMBLY_REPORTS/assembly_summary_genbank.txt"
 
 _BATCH_SIZE = 200
-_ESEARCH_BATCH = 100
+_ESEARCH_UID_BATCH = 100
 _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
+
+# Prefixes that identify native BioSample accessions (INSDC standard).
+_BIOSAMPLE_PREFIXES = ("SAMN", "SAME", "SAMD")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -245,8 +248,6 @@ def ingest(source, email: str = None, api_key: str = None, cache_dir=None) -> pd
 
     ids = _load_ids(source)
 
-    # fix(#35): warn and return early on empty input rather than silently
-    # returning an empty DataFrame with no indication of what happened.
     if not ids:
         logger.warning(
             "ingest() called with an empty accession list. Returning empty DataFrame."
@@ -502,12 +503,152 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
     return lookup
 
 
+def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
+    """Fetch BioSample XML records for a list of accessions.
+
+    For SAMN/SAME/SAMD accessions the pipeline is:
+      esearch(term=batch[Accession] OR ..., usehistory=y)  -- one call per batch
+      efetch(WebEnv=..., query_key=..., retstart=0, retmax=batch_size) -- one call per batch
+
+    Each batch produces its own fresh WebEnv+query_key that covers exactly
+    the accessions in that batch.  This avoids the cross-batch accumulation
+    bug where the last query_key only indexes the last batch.
+    """
+    inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
+    requested_set = set(samn_ids)
+
+    direct_ids = [a for a in samn_ids if a.upper().startswith(_BIOSAMPLE_PREFIXES)]
+    needs_resolution = [a for a in samn_ids if not a.upper().startswith(_BIOSAMPLE_PREFIXES)]
+
+    records = []
+    total = len(direct_ids)
+    n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
+
+    # --- Path 1: SAMN/SAME/SAMD -- esearch(usehistory=y) + efetch per batch ---
+    for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
+        batch = direct_ids[start:start + _BATCH_SIZE]
+        term = " OR ".join(f"{acc}[Accession]" for acc in batch)
+
+        # Step A: esearch with usehistory=y to resolve accessions -> History slot
+        web_env = None
+        query_key = None
+        found = 0
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                handle = Entrez.esearch(
+                    db="biosample",
+                    term=term,
+                    retmax=0,
+                    usehistory="y",
+                )
+                result = Entrez.read(handle)
+                handle.close()
+                web_env = result["WebEnv"]
+                query_key = result["QueryKey"]
+                found = int(result.get("Count", 0))
+                break
+            except _TRANSIENT_EXCEPTIONS as exc:
+                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+                logger.warning(
+                    "esearch attempt %d/%d failed (batch %d/%d): %s. Retrying in %ds...",
+                    attempt, _MAX_RETRIES, batch_i + 1, n_batches, exc, wait,
+                )
+                time.sleep(wait)
+        else:
+            logger.error(
+                "esearch failed after %d retries for batch %d/%d (%d accessions skipped).",
+                _MAX_RETRIES, batch_i + 1, n_batches, len(batch),
+            )
+            if batch_i < n_batches - 1:
+                time.sleep(inter_batch_sleep)
+            continue
+
+        if found == 0:
+            logger.warning(
+                "esearch returned 0 results for batch %d/%d -- these accessions may be "
+                "suppressed or invalid: %s",
+                batch_i + 1, n_batches, batch[:3],
+            )
+            if batch_i < n_batches - 1:
+                time.sleep(inter_batch_sleep)
+            continue
+
+        # Step B: efetch the History slot (retstart=0 always; slot covers this batch only)
+        batch_records = _fetch_batch_via_history(
+            web_env, query_key, retstart=0, retmax=found,
+            synonym_lookup=synonym_lookup,
+        )
+
+        if batch_records is None:
+            logger.error(
+                "efetch failed for batch %d/%d after %d retries (%d records excluded).",
+                batch_i + 1, n_batches, _MAX_RETRIES, found,
+            )
+        else:
+            for rec in batch_records:
+                acc = rec.get("biosample_accession") or ""
+                if acc in requested_set:
+                    records.append(rec)
+                else:
+                    logger.warning(
+                        "Unexpected record returned by NCBI and discarded: "
+                        "biosample_accession=%r (not in requested input set)", acc,
+                    )
+
+        fetched_so_far = min(start + _BATCH_SIZE, total)
+        logger.info(
+            "Fetched %d / %d (%d/%d batches)",
+            fetched_so_far, total, batch_i + 1, n_batches,
+        )
+        if batch_i < n_batches - 1:
+            time.sleep(inter_batch_sleep)
+
+    # --- Path 2: non-standard accessions -- legacy esearch+esummary+efetch ---
+    if needs_resolution:
+        logger.info(
+            "Resolving %d non-BioSample accessions to NCBI UIDs via esearch...",
+            len(needs_resolution),
+        )
+        acc_to_uid = _resolve_accessions_to_uids(needs_resolution)
+        unresolved = [a for a in needs_resolution if a not in acc_to_uid]
+        if unresolved:
+            logger.warning(
+                "%d accessions could not be resolved to UIDs and will be skipped: %s",
+                len(unresolved), unresolved[:5],
+            )
+
+        uid_list = list(acc_to_uid.values())
+        if uid_list:
+            leg_total = len(uid_list)
+            leg_batches = (leg_total + _BATCH_SIZE - 1) // _BATCH_SIZE
+            logger.info("Fetching metadata for %d resolved UIDs (legacy path)...", leg_total)
+            for batch_i, start in enumerate(range(0, leg_total, _BATCH_SIZE)):
+                uid_batch = uid_list[start:start + _BATCH_SIZE]
+                batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
+                if batch_records is None:
+                    logger.error(
+                        "Legacy batch %d/%d failed after %d retries.",
+                        batch_i + 1, leg_batches, _MAX_RETRIES,
+                    )
+                else:
+                    for rec in batch_records:
+                        acc = rec.get("biosample_accession") or ""
+                        if acc in requested_set:
+                            records.append(rec)
+                if batch_i < leg_batches - 1:
+                    time.sleep(inter_batch_sleep)
+
+    return pd.DataFrame(records).reindex(columns=BIOSAMPLE_SCHEMA)
+
+
 def _resolve_accessions_to_uids(accessions: list) -> dict:
+    """Resolve non-BioSample accessions to numeric UIDs via esearch + esummary."""
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
 
-    for start in range(0, len(accessions), _ESEARCH_BATCH):
-        batch = accessions[start:start + _ESEARCH_BATCH]
+    for start in range(0, len(accessions), _ESEARCH_UID_BATCH):
+        batch = accessions[start:start + _ESEARCH_UID_BATCH]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
 
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -539,8 +680,8 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
         if not uids:
             continue
 
-        for uid_start in range(0, len(uids), _ESEARCH_BATCH):
-            uid_batch = uids[uid_start:uid_start + _ESEARCH_BATCH]
+        for uid_start in range(0, len(uids), _ESEARCH_UID_BATCH):
+            uid_batch = uids[uid_start:uid_start + _ESEARCH_UID_BATCH]
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     sum_handle = Entrez.esummary(db="biosample", id=",".join(uid_batch))
@@ -570,64 +711,48 @@ def _resolve_accessions_to_uids(accessions: list) -> dict:
     return acc_to_uid
 
 
-def _fetch_biosample_metadata(samn_ids: list, synonym_lookup: dict = None) -> pd.DataFrame:
-    inter_batch_sleep = 0.12 if ENTREZ_API_KEY else 0.34
-    requested_set = set(samn_ids)
-
-    logger.info("Resolving %d accessions to NCBI UIDs...", len(samn_ids))
-    acc_to_uid = _resolve_accessions_to_uids(samn_ids)
-
-    unresolved = [a for a in samn_ids if a not in acc_to_uid]
-    if unresolved:
-        logger.warning(
-            "%d accessions could not be resolved to UIDs and will be skipped: %s",
-            len(unresolved), unresolved[:5],
-        )
-
-    uid_list = list(acc_to_uid.values())
-    if not uid_list:
-        raise ValueError("No UIDs could be resolved from the provided BioSample accessions.")
-
-    logger.info("Fetching metadata for %d resolved UIDs...", len(uid_list))
-
-    records = []
-    failed_ids = []
-    total = len(uid_list)
-    n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
-
-    for batch_i, start in enumerate(range(0, total, _BATCH_SIZE)):
-        uid_batch = uid_list[start:start + _BATCH_SIZE]
-        batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
-
-        if batch_records is None:
-            logger.error(
-                "Batch %d/%d failed after %d retries. %d records excluded.",
-                batch_i + 1, n_batches, _MAX_RETRIES, len(uid_batch),
+def _fetch_batch_via_history(
+    web_env: str,
+    query_key: str,
+    retstart: int,
+    retmax: int,
+    synonym_lookup: dict = None,
+):
+    """Fetch one page of BioSample records from an Entrez History slot."""
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            handle = Entrez.efetch(
+                db="biosample",
+                WebEnv=web_env,
+                query_key=query_key,
+                retstart=retstart,
+                retmax=retmax,
+                rettype="full",
+                retmode="xml",
             )
-            failed_ids.extend(uid_batch)
-        else:
-            for rec in batch_records:
-                acc = rec.get("biosample_accession") or ""
-                if acc in requested_set:
-                    records.append(rec)
-                else:
-                    logger.warning(
-                        "Unexpected record returned by NCBI and discarded: "
-                        "biosample_accession=%r (not in requested input set)", acc,
-                    )
-
-        fetched = min(start + _BATCH_SIZE, total)
-        logger.info("Fetched %d / %d (%d/%d batches)", fetched, total, batch_i + 1, n_batches)
-        if batch_i < n_batches - 1:
-            time.sleep(inter_batch_sleep)
-
-    if failed_ids:
-        logger.warning("%d UIDs could not be fetched: %s", len(failed_ids), failed_ids[:10])
-
-    return pd.DataFrame(records).reindex(columns=BIOSAMPLE_SCHEMA)
+            raw = handle.read()
+            handle.close()
+            return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
+        except ET.ParseError as exc:
+            logger.error("XML ParseError on efetch (retstart=%d): %s", retstart, exc)
+            return []
+        except _TRANSIENT_EXCEPTIONS as exc:
+            wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+            logger.warning(
+                "efetch attempt %d/%d failed (retstart=%d, transient): %s. "
+                "Retrying in %ds...",
+                attempt, _MAX_RETRIES, retstart, exc, wait,
+            )
+            time.sleep(wait)
+    logger.error(
+        "efetch failed after %d retries (retstart=%d, retmax=%d).",
+        _MAX_RETRIES, retstart, retmax,
+    )
+    return None
 
 
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
+    """Fetch BioSample records by explicit numeric UID list (legacy path)."""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -710,7 +835,9 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 record["organism_name"] = _normalize_null(organism.get("taxonomy_name"))
 
         package_el = sample.find(".//Package")
-        record["ncbi_package"] = _normalize_null(package_el.text if package_el is not None else None)
+        record["ncbi_package"] = _normalize_null(
+            package_el.text if package_el is not None else None
+        )
 
         status_el = sample.find(".//Status")
         if status_el is not None:
@@ -722,12 +849,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             hn = (attr.get("harmonized_name") or "").strip()
             an = (attr.get("attribute_name") or "").strip()
             raw_key = hn or an or "unknown"
-            # fix(#27): always pass through _normalize_null regardless of whether
-            # the XML text node is None or empty.  Previously `if val is None:
-            # continue` bypassed writing the column entirely, meaning the
-            # null-normalization contract was only applied to non-empty values.
-            # Now null/empty attributes explicitly write None to the schema column
-            # (or are omitted from extras), consistent with all other fields.
             val = _normalize_null(attr.text)
 
             resolved = None
@@ -747,19 +868,17 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     raw_key = candidate
 
             if resolved is not None:
-                # Write None explicitly so the column reflects the NCBI submission
-                # state rather than staying at the schema initialisation default.
                 if record.get(resolved) is None:
                     record[resolved] = val
                 elif val is not None:
                     existing = extras.get(raw_key)
                     extras[raw_key] = f"{existing}|{val}" if existing else val
                     logger.debug(
-                        "Attribute collision on '%s' (biosample=%s): primary value kept, duplicate stored in _extra_attributes.",
+                        "Attribute collision on '%s' (biosample=%s): primary value kept, "
+                        "duplicate stored in _extra_attributes.",
                         resolved, record.get("biosample_accession"),
                     )
             elif val is not None:
-                # Only store non-null unknowns in extras to keep _extra_attributes lean.
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
 
