@@ -1,6 +1,6 @@
 # BioMetaHarmonizer
 
-[![version](https://img.shields.io/badge/version-0.5.0-blue)](#)
+[![version](https://img.shields.io/badge/version-0.6.0-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
 
@@ -50,6 +50,8 @@ biometaharmonizer run \
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Directory for assembly summary flat files |
 | `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet` |
 | `--summary FILE` | — | Write a per-column fill-rate CSV |
+| `--fetch-batch-size N` | `200` | Number of records per efetch request |
+| `--esearch-batch-size N` | `200` | Number of accessions per esearch term |
 | `--verbose` | off | Enable DEBUG-level logging |
 
 ### Python API
@@ -255,15 +257,21 @@ The parser recognizes two input formats:
 | `"Pacific Ocean"` | sea\_ocean=Pacific Ocean |
 | `"Pacific Ocean: Mariana Trench"` | sea\_ocean=Pacific Ocean, locality=Mariana Trench |
 | `"40.71 N, 74.00 W"` | geo\_loc\_raw preserved; all other geo columns NaN |
+| `"Gaza Strip"` | country=Gaza Strip, iso=PS |
+| `"West Bank"` | country=West Bank, iso=PS |
+| `"United Kingdom (England, Wales & N. Ireland)"` | country=United Kingdom, iso=GB |
 | `"not applicable"` | all geo columns NaN |
 
 Handling notes:
 
 - `England`, `Scotland`, `Wales`, `Northern Ireland` → `United Kingdom`, iso `GB`
+- `United Kingdom (England, Wales & N. Ireland)` and similar compound UK variants → `United Kingdom`, iso `GB`
+- `Gaza Strip`, `West Bank`, `Gaza`, `Palestine`, `Palestinian territories` → iso `PS`
 - `Korea` (bare, no qualifier) → South Korea (`KR`); logged at INFO level
 - Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
 - Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded; all other geo columns are `NaN`
 - `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo` and several aliases are resolved via a hardcoded table before pycountry fuzzy lookup
+- All unique `geo_loc_name` values are resolved once and cached; pycountry fuzzy lookup runs at most once per unique country string regardless of row count
 
 ---
 
@@ -367,7 +375,7 @@ python scripts/build_ncbi_attribute_cache.py
 ```
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
-│   ├── __init__.py             # public API, version 0.5.0
+│   ├── __init__.py             # public API, version 0.6.0
 │   ├── cli.py                  # CLI entrypoint
 │   ├── ingestion.py            # Entrez fetching, XML parsing, schema definition
 │   ├── synonyms.py             # two-layer synonym lookup (unified.json + NCBI XML)
@@ -391,8 +399,7 @@ BioMetaHarmonizer/
 │   ├── test_one_health.py
 │   ├── test_output.py
 │   └── test_pipeline.py
-├── pyproject.toml
-└── requirements.txt
+└── pyproject.toml
 ```
 
 ---
