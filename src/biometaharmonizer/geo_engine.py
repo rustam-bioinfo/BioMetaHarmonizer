@@ -102,16 +102,32 @@ class GeoEngine:
         r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
     )
 
-    def parse(self, series):
-        results = series.apply(self._parse_single)
-        return pd.DataFrame(results.tolist(), index=series.index)
-
-    def _parse_single(self, value):
-        empty = {
+    def _empty(self):
+        return {
             "geo_country": np.nan, "geo_region": np.nan,
             "geo_locality": np.nan, "geo_iso3166": np.nan,
             "geo_sea_ocean": np.nan, "geo_loc_raw": np.nan,
         }
+
+    def parse(self, series):
+        empty = self._empty()
+
+        unique_vals = series.dropna().unique()
+        logger.debug(
+            "GeoEngine: %d rows, %d unique non-null values to resolve.",
+            len(series), len(unique_vals),
+        )
+
+        cache = {v: self._parse_single(v) for v in unique_vals}
+
+        results = [
+            cache[v] if pd.notna(v) and v in cache else empty
+            for v in series
+        ]
+        return pd.DataFrame(results, index=series.index)
+
+    def _parse_single(self, value):
+        empty = self._empty()
         if pd.isna(value):
             return empty
 
@@ -181,10 +197,6 @@ class GeoEngine:
             return self._UK_SUBCOUNTRY[lower]
 
         if lower == "korea":
-            # Defaulting to South Korea is correct for the vast majority of NCBI
-            # metadata — bare 'Korea' almost always means ROK.  This is not a
-            # warning-worthy event; use INFO so it stays accessible without
-            # flooding the log on large South Korean datasets.
             logger.info(
                 "'Korea' without qualifier resolved to South Korea (KR). "
                 "Use 'North Korea' for DPRK."
