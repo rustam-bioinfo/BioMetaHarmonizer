@@ -67,8 +67,6 @@ class GeoEngine:
         "congo-kinshasa": "CD",
         "burma": "MM",
         "myanmar (burma)": "MM",
-        # Palestinian territories -- ISO 3166-1 alpha-2 PS covers both
-        # Gaza Strip and the West Bank as part of the State of Palestine.
         "palestine": "PS",
         "palestinian territories": "PS",
         "palestinian territory": "PS",
@@ -154,19 +152,23 @@ class GeoEngine:
 
         country_str, region_str, locality_str = self._split_geo_string(value)
 
-        if country_str.lower() in self._OCEAN_SEA:
+        # Strip trailing parenthetical qualifiers FIRST, before any membership
+        # checks. This ensures inputs like "Pacific Ocean (NE)" and
+        # "United Kingdom (England, Wales & N. Ireland)" are normalised to
+        # "Pacific Ocean" and "United Kingdom" before lookup.
+        country_str_clean = self._PAREN_RE.sub("", country_str).strip()
+        lower_country = country_str_clean.lower()
+
+        # Ocean / sea: use the cleaned name for lookup AND for storage.
+        if lower_country in self._OCEAN_SEA:
             result = dict(empty)
-            result["geo_sea_ocean"] = country_str
+            result["geo_sea_ocean"] = country_str_clean
             if region_str:
-                result["geo_locality"] = region_str if not locality_str else f"{region_str}, {locality_str}"
+                result["geo_locality"] = (
+                    region_str if not locality_str else f"{region_str}, {locality_str}"
+                )
             return result
 
-        # Strip trailing parenthetical qualifiers before display-name and ISO
-        # resolution, e.g. 'United Kingdom (England, Wales & N. Ireland)'
-        # becomes 'United Kingdom'.
-        country_str_clean = self._PAREN_RE.sub("", country_str).strip()
-
-        lower_country = country_str_clean.lower()
         if lower_country in self._UK_SUBCOUNTRY:
             display_country = "United Kingdom"
         else:

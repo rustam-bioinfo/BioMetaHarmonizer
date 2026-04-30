@@ -94,6 +94,16 @@ class DateEngine:
     )
 
     @staticmethod
+    def _empty_row():
+        """Return a fresh dict for a missing/unresolvable date entry.
+
+        A factory is used (rather than a shared module-level constant) to
+        ensure every call site gets an independent object, preventing aliasing
+        if caller code mutates rows before the DataFrame is fully materialised.
+        """
+        return {"collection_date": np.nan, "collection_date_range": np.nan}
+
+    @staticmethod
     def _detect_range(value):
         """
         Return True if *value* represents a date range or approximate date
@@ -143,10 +153,9 @@ class DateEngine:
         """
         if isinstance(series, pd.DataFrame):
             series = series.iloc[:, 0]
-        empty = {"collection_date": np.nan, "collection_date_range": np.nan}
         unique_vals = series.dropna().unique()
         cache = {v: self._parse_single_with_range(v) for v in unique_vals}
-        results = series.map(lambda v: cache.get(v, empty))
+        results = series.map(lambda v: cache.get(v) if pd.notna(v) else self._empty_row())
         return pd.DataFrame(results.tolist(), index=series.index)
 
     # ------------------------------------------------------------------
@@ -157,16 +166,14 @@ class DateEngine:
         return self._parse_single_with_range(value)["collection_date"]
 
     def _parse_single_with_range(self, value):
-        empty = {"collection_date": np.nan, "collection_date_range": np.nan}
-
         if pd.isna(value):
-            return empty
+            return self._empty_row()
 
         value = str(value).strip()
         if not value:
-            return empty
+            return self._empty_row()
         if self.NULL_PATTERNS.match(value):
-            return empty
+            return self._empty_row()
 
         # Gate: any range or approximate date -> collection_date is NaN, always.
         # This must run before TWO_DIGIT_YEAR and before dateutil to prevent
@@ -180,7 +187,7 @@ class DateEngine:
         # Reject bare two-digit strings
         if self.TWO_DIGIT_YEAR.match(value):
             logger.warning("Rejecting two-digit year string: '%s'", value)
-            return empty
+            return self._empty_row()
 
         parsed = self._parse_date_string(value)
         return {"collection_date": parsed, "collection_date_range": np.nan}
