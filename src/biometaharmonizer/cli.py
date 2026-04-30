@@ -59,7 +59,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=200,
-        help="Number of accessions per esearch term when loading History Server (default: 200).",
+        help="Number of accessions per esearch term (default: 200).",
+    )
+    run_p.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Force re-download of assembly summary flat files, ignoring their age. "
+            "Use when NCBI has added new assemblies since the last run."
+        ),
     )
 
     parser.add_argument("--version", action="version", version="%(prog)s " + _get_version())
@@ -150,8 +159,8 @@ def _run(args: argparse.Namespace) -> int:
 
     logger.info("Step 1/5  Ingestion")
     logger.info(
-        "         fetch_batch_size=%d  esearch_batch_size=%d",
-        args.fetch_batch_size, args.esearch_batch_size,
+        "         fetch_batch_size=%d  esearch_batch_size=%d  refresh_cache=%s",
+        args.fetch_batch_size, args.esearch_batch_size, args.refresh_cache,
     )
     t0 = time.perf_counter()
     try:
@@ -159,6 +168,7 @@ def _run(args: argparse.Namespace) -> int:
             source,
             fetch_batch_size=args.fetch_batch_size,
             esearch_batch_size=args.esearch_batch_size,
+            refresh_cache=args.refresh_cache,
             **kwargs,
         )
     except Exception as exc:

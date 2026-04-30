@@ -88,6 +88,20 @@ _NULL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# All XML attribute fields defined in the NCBI antibiogram schema.
+_ANTIBIOGRAM_FIELDS = (
+    "antibiotic_name",
+    "resistance_phenotype",
+    "measurement_sign",
+    "measurement",
+    "measurement_units",
+    "laboratory_typing_method",
+    "laboratory_typing_platform",
+    "vendor",
+    "laboratory_typing_method_version_or_reagent",
+    "testing_standard",
+)
+
 
 def _normalize_null(value):
     if value is None:
@@ -238,6 +252,7 @@ def ingest(
     cache_dir=None,
     fetch_batch_size: int = None,
     esearch_batch_size: int = None,
+    refresh_cache: bool = False,
 ) -> pd.DataFrame:
     """Fetch and return harmonized BioSample metadata as a DataFrame.
 
@@ -261,6 +276,10 @@ def ingest(
         Number of accessions per esearch/elink/esummary request used in the
         legacy UID-resolution path and the Entrez elink GCF/GCA fallback.
         Defaults to the module-level _ESEARCH_BATCH (100).
+    refresh_cache:
+        When True, delete and re-download the assembly summary flat files
+        unconditionally, regardless of their age. Useful when NCBI has added
+        new assemblies since the last download. Defaults to False.
     """
     resolved_email = email or (None if ENTREZ_EMAIL == _DEFAULT_EMAIL else ENTREZ_EMAIL)
     if not resolved_email:
@@ -296,7 +315,7 @@ def ingest(
     if unrecognized:
         logger.warning("%d unrecognized IDs skipped: %s", len(unrecognized), unrecognized[:5])
 
-    _ensure_assembly_summaries()
+    _ensure_assembly_summaries(refresh=refresh_cache)
 
     n_gcx_input = len(gcx)
     unresolved_gcx = []
@@ -448,13 +467,33 @@ def _classify_ids(ids: list) -> tuple:
     return gcx, samn, unrecognized
 
 
-def _ensure_assembly_summaries() -> None:
+def _ensure_assembly_summaries(refresh: bool = False) -> None:
+    """Download assembly summary flat files to CACHE_DIR if missing or stale.
+
+    Parameters
+    ----------
+    refresh:
+        When True, delete existing cache files and re-download unconditionally,
+        bypassing the TTL check. Use this when NCBI has added new assemblies
+        since the last download.
+    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for url, label in [
         (ASSEMBLY_SUMMARY_REFSEQ, "refseq"),
         (ASSEMBLY_SUMMARY_GENBANK, "genbank"),
     ]:
         cache_path = CACHE_DIR / f"assembly_summary_{label}.txt"
+
+        if refresh and cache_path.exists():
+            logger.info(
+                "refresh_cache=True -- removing existing assembly index (%s) for re-download.",
+                label,
+            )
+            try:
+                cache_path.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove cache file %s: %s", cache_path, exc)
+            _read_assembly_summary_cached.cache_clear()
 
         if cache_path.exists():
             age_days = (time.time() - cache_path.stat().st_mtime) / (24 * 3600)
@@ -708,6 +747,34 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
             )
 
     return lookup
+
+
+def _parse_antibiogram(sample_elem) -> list | None:
+    """Extract the <Antibiogram> section from a BioSample XML element.
+
+    Returns a list of dicts (one per antibiotic row) if the section is present
+    and contains at least one row, or None if the element is absent or empty.
+    Empty-string / null-pattern values are excluded from each row dict so that
+    the JSON payload stays compact.
+
+    The returned list is intended to be serialised to a compact JSON string and
+    stored in _extra_attributes["antibiogram"].
+    """
+    antibiogram = sample_elem.find(".//Antibiogram/BioSampleAntibiogram")
+    if antibiogram is None:
+        return None
+
+    rows = []
+    for ab in antibiogram.findall("Antibiotic"):
+        row = {}
+        for field in _ANTIBIOGRAM_FIELDS:
+            val = _normalize_null(ab.get(field))
+            if val is not None:
+                row[field] = val
+        if row:
+            rows.append(row)
+
+    return rows if rows else None
 
 
 def _fetch_biosample_metadata(
@@ -1129,6 +1196,17 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 extras["submission_contact"] = (
                     f"{existing}|{contact_name}" if existing else contact_name
                 )
+
+        # Antibiogram section (pathogen packages: Pathogen.cl.1.0, Pathogen.env.1.0, etc.)
+        # The <Antibiogram> element is a sibling of <Attributes>, not a child of it.
+        # Parse and serialise to a compact JSON list stored in _extra_attributes["antibiogram"].
+        antibiogram_rows = _parse_antibiogram(sample)
+        if antibiogram_rows is not None:
+            extras["antibiogram"] = json.dumps(antibiogram_rows, separators=(",", ":"))
+            logger.debug(
+                "Antibiogram parsed for biosample=%s: %d antibiotic rows.",
+                record.get("biosample_accession"), len(antibiogram_rows),
+            )
 
         record["_extra_attributes"] = json.dumps(extras) if extras else None
         records.append(record)
