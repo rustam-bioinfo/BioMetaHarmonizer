@@ -36,3 +36,16 @@ biometaharmonizer = ["schemas/*.json", "schemas/*.xml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=2.0",
+    "sphinx-autodoc-typehints>=1.24",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=2.0",
+]
