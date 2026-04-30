@@ -760,7 +760,7 @@ def _parse_antibiogram(sample_elem) -> list | None:
     The returned list is intended to be serialised to a compact JSON string and
     stored in _extra_attributes["antibiogram"].
     """
-    antibiogram = sample_elem.find(".//Antibiogram/BioSampleAntibiogram")
+    antibiogram = sample_elem.find("BioSampleAntibiogram")
     if antibiogram is None:
         return None
 
