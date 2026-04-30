@@ -15,7 +15,6 @@ Columns not in the final schema are expected to be preserved upstream in
 
 import json
 import logging
-import re
 from pathlib import Path
 
 import pandas as pd
@@ -28,9 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 _PROTECTED_COLUMNS = frozenset(BIOSAMPLE_SCHEMA)
-
-_PERSON_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]+(?:\s[A-Z]\.?)?\s[A-Z][a-z]+$')
-_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 _SCHEMAS_DIR = _schemas_dir()
 

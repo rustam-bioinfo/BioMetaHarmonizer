@@ -59,7 +59,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=200,
-        help="Number of accessions per esearch term when loading History Server (default: 200).",
+        help="Number of accessions per esearch term (default: 200).",
+    )
+    run_p.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Force re-download of assembly summary flat files, ignoring their age. "
+            "Use when NCBI has added new assemblies since the last run."
+        ),
     )
 
     parser.add_argument("--version", action="version", version="%(prog)s " + _get_version())
@@ -126,7 +135,6 @@ def _run(args: argparse.Namespace) -> int:
     fmt = args.format or _infer_format(output_path)
 
     try:
-        from biometaharmonizer import ingestion as _ingestion
         from biometaharmonizer.ingestion import set_email, ingest
         from biometaharmonizer.key_mapper import KeyMapper
         from biometaharmonizer.date_engine import DateEngine
@@ -143,10 +151,6 @@ def _run(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    # Apply user-supplied batch size overrides to the ingestion module globals.
-    _ingestion._BATCH_SIZE = args.fetch_batch_size
-    _ingestion._ESEARCH_BATCH = args.esearch_batch_size
-
     kwargs = {}
     if args.api_key:
         kwargs["api_key"] = args.api_key
@@ -155,12 +159,18 @@ def _run(args: argparse.Namespace) -> int:
 
     logger.info("Step 1/5  Ingestion")
     logger.info(
-        "         fetch_batch_size=%d  esearch_batch_size=%d",
-        args.fetch_batch_size, args.esearch_batch_size,
+        "         fetch_batch_size=%d  esearch_batch_size=%d  refresh_cache=%s",
+        args.fetch_batch_size, args.esearch_batch_size, args.refresh_cache,
     )
     t0 = time.perf_counter()
     try:
-        df = ingest(source, **kwargs)
+        df = ingest(
+            source,
+            fetch_batch_size=args.fetch_batch_size,
+            esearch_batch_size=args.esearch_batch_size,
+            refresh_cache=args.refresh_cache,
+            **kwargs,
+        )
     except Exception as exc:
         print(f"ERROR during ingestion: {exc}", file=sys.stderr)
         logger.debug("", exc_info=True)

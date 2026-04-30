@@ -1,6 +1,6 @@
 # BioMetaHarmonizer
 
-[![version](https://img.shields.io/badge/version-0.5.0-blue)](#)
+[![version](https://img.shields.io/badge/version-0.6.0-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
 
@@ -13,6 +13,8 @@ A Python package for fetching, parsing, and standardizing NCBI BioSample metadat
 NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, or Parquet.
 
 Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
+
+Records submitted under NCBI pathogen packages (e.g. `Pathogen.cl.1.0`, `Pathogen.env.1.0`) often carry a structured `<Antibiogram>` section alongside standard attributes. BioMetaHarmonizer parses the antibiogram and serializes it as a compact JSON list in `_extra_attributes["antibiogram"]` so that MIC and phenotype data are never silently discarded.
 
 ---
 
@@ -50,6 +52,9 @@ biometaharmonizer run \
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Directory for assembly summary flat files |
 | `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet` |
 | `--summary FILE` | — | Write a per-column fill-rate CSV |
+| `--fetch-batch-size N` | `200` | Number of records per efetch request |
+| `--esearch-batch-size N` | `200` | Number of accessions per esearch term |
+| `--refresh-cache` | off | Force re-download of assembly summary flat files regardless of age |
 | `--verbose` | off | Enable DEBUG-level logging |
 
 ### Python API
@@ -63,6 +68,9 @@ from biometaharmonizer import write, write_summary
 set_email("your@email.com")
 df = ingest("accessions.txt")
 # or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
+
+# Force re-download of assembly summary flat files (bypasses 7-day TTL):
+# df = ingest("accessions.txt", refresh_cache=True)
 
 # Key harmonization — renames raw columns to standard keys, coalesces duplicates
 # Needed only if you bring your own DataFrame; ingest() already applies the schema
@@ -163,7 +171,58 @@ The first 52 columns come from ingestion. The final 5 are added by `OneHealthCla
 | 55 | `status_date` | BioSample XML | Date current status was assigned |
 | 56 | `title` | BioSample XML | Free-text title of the BioSample record |
 | 57 | `description_comment` | BioSample XML | Free-text description or comment block |
-| 58 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict; also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector |
+| 58 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
+
+---
+
+## Antibiogram data
+
+BioSample records submitted under NCBI pathogen packages (`Pathogen.cl.1.0`, `Pathogen.env.1.0`, etc.) may include a structured `<Antibiogram>` section that is a sibling of `<Attributes>` in the XML — not a child. Standard attribute parsers that only iterate `<Attributes>` silently drop this section. BioMetaHarmonizer parses it explicitly.
+
+When an antibiogram is present, `_extra_attributes["antibiogram"]` contains a compact JSON-encoded list of dicts, one per antibiotic row. Each dict includes whichever of the following fields NCBI populated for that row:
+
+| Field | Description |
+|---|---|
+| `antibiotic_name` | Antibiotic name (e.g. `amikacin`) |
+| `resistance_phenotype` | `susceptible`, `resistant`, or `intermediate` |
+| `measurement_sign` | `==`, `<=`, `>=`, `<`, `>` |
+| `measurement` | Numeric MIC or disk diffusion value |
+| `measurement_units` | `mg/L`, `mm`, etc. |
+| `laboratory_typing_method` | `MIC`, `disk diffusion`, etc. |
+| `laboratory_typing_platform` | Instrument or method platform |
+| `vendor` | Reagent/kit vendor |
+| `laboratory_typing_method_version_or_reagent` | Version or reagent identifier |
+| `testing_standard` | `CLSI`, `EUCAST`, etc. |
+
+Fields with null or missing values are omitted from each row dict so the JSON payload stays compact. Rows where all fields resolved to null are excluded entirely.
+
+**Extracting antibiogram data from a result DataFrame:**
+
+```python
+import json
+import pandas as pd
+
+def extract_antibiogram(df):
+    rows = []
+    for _, rec in df.iterrows():
+        extras = rec.get("_extra_attributes")
+        if not extras:
+            continue
+        try:
+            d = json.loads(extras)
+        except (ValueError, TypeError):
+            continue
+        ab = d.get("antibiogram")
+        if not ab:
+            continue
+        ab_rows = json.loads(ab) if isinstance(ab, str) else ab
+        for row in ab_rows:
+            row["biosample_accession"] = rec["biosample_accession"]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+antibiogram_df = extract_antibiogram(df)
+```
 
 ---
 
@@ -207,7 +266,18 @@ On the first run, `ingest()` downloads two NCBI flat files to resolve assembly a
 - `assembly_summary_refseq.txt` (~100–300 MB)
 - `assembly_summary_genbank.txt` (~100–300 MB)
 
-These are cached in `~/.biometaharmonizer/cache/` (overridable with `--cache-dir` or `set_cache_dir()`). Files older than 7 days are automatically deleted and re-downloaded on the next run. To force a refresh manually, delete the cached files.
+These are cached in `~/.biometaharmonizer/cache/` (overridable with `--cache-dir` or `set_cache_dir()`). Files older than 7 days are automatically deleted and re-downloaded on the next run.
+
+To force a refresh before the 7-day TTL expires — for example, immediately after a large batch of new assemblies is added to NCBI — pass `refresh_cache=True` to `ingest()` or use `--refresh-cache` on the CLI:
+
+```bash
+biometaharmonizer run --input ids.txt --email you@example.com \
+    --output out.csv --refresh-cache
+```
+
+```python
+df = ingest("ids.txt", email="you@example.com", refresh_cache=True)
+```
 
 In Colab:
 
@@ -246,6 +316,8 @@ The parser recognizes two input formats:
 - **Colon format** `"Country: Region, Locality"` — the part before `:` becomes `geo_country`, the first segment after `:` becomes `geo_region`, and any remainder after the comma becomes `geo_locality`.
 - **Comma-only format** `"Country, Locality"` — the part before the first `,` becomes `geo_country` and the remainder becomes `geo_locality`. `geo_region` is left `NaN`.
 
+Parenthetical qualifiers (e.g. `"United Kingdom (England, Wales & N. Ireland)"`, `"Pacific Ocean (NE)"`) are stripped from the country token before any lookup. This means ocean and sea names with qualifiers are still correctly routed to `geo_sea_ocean` rather than falling through to the country resolver.
+
 | Input | Result |
 |---|---|
 | `"USA: California, Los Angeles"` | country=USA, region=California, locality=Los Angeles, iso=US |
@@ -253,17 +325,25 @@ The parser recognizes two input formats:
 | `"Germany, Bavaria"` | country=Germany, locality=Bavaria, iso=DE |
 | `"France"` | country=France, iso=FR |
 | `"Pacific Ocean"` | sea\_ocean=Pacific Ocean |
+| `"Pacific Ocean (NE)"` | sea\_ocean=Pacific Ocean |
 | `"Pacific Ocean: Mariana Trench"` | sea\_ocean=Pacific Ocean, locality=Mariana Trench |
+| `"Red Sea (sampling site 3): surface"` | sea\_ocean=Red Sea, locality=surface |
 | `"40.71 N, 74.00 W"` | geo\_loc\_raw preserved; all other geo columns NaN |
+| `"Gaza Strip"` | country=Gaza Strip, iso=PS |
+| `"West Bank"` | country=West Bank, iso=PS |
+| `"United Kingdom (England, Wales & N. Ireland)"` | country=United Kingdom, iso=GB |
 | `"not applicable"` | all geo columns NaN |
 
 Handling notes:
 
 - `England`, `Scotland`, `Wales`, `Northern Ireland` → `United Kingdom`, iso `GB`
+- `United Kingdom (England, Wales & N. Ireland)` and similar compound UK variants → `United Kingdom`, iso `GB`
+- `Gaza Strip`, `West Bank`, `Gaza`, `Palestine`, `Palestinian territories` → iso `PS`
 - `Korea` (bare, no qualifier) → South Korea (`KR`); logged at INFO level
 - Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
 - Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded; all other geo columns are `NaN`
 - `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo` and several aliases are resolved via a hardcoded table before pycountry fuzzy lookup
+- All unique `geo_loc_name` values are resolved once and cached; pycountry fuzzy lookup runs at most once per unique country string regardless of row count
 
 ---
 
@@ -367,7 +447,7 @@ python scripts/build_ncbi_attribute_cache.py
 ```
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
-│   ├── __init__.py             # public API, version 0.5.0
+│   ├── __init__.py             # public API, version 0.6.0
 │   ├── cli.py                  # CLI entrypoint
 │   ├── ingestion.py            # Entrez fetching, XML parsing, schema definition
 │   ├── synonyms.py             # two-layer synonym lookup (unified.json + NCBI XML)
@@ -391,8 +471,7 @@ BioMetaHarmonizer/
 │   ├── test_one_health.py
 │   ├── test_output.py
 │   └── test_pipeline.py
-├── pyproject.toml
-└── requirements.txt
+└── pyproject.toml
 ```
 
 ---

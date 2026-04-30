@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biometaharmonizer"
-version = "0.5.0"
+dynamic = ["version"]
 description = "Harmonize messy NCBI BioSample metadata at scale"
 readme = "README.md"
 license = {text = "MIT"}
@@ -24,6 +24,9 @@ dependencies = [
 [project.scripts]
 biometaharmonizer = "biometaharmonizer.cli:main"
 
+[tool.setuptools.dynamic]
+version = {attr = "biometaharmonizer.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -32,3 +35,4 @@ biometaharmonizer = ["schemas/*.json", "schemas/*.xml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
