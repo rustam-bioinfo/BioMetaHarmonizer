@@ -184,11 +184,15 @@ class TestParseBioSampleXmlAntibiogram:
         extras = json.loads(rec["_extra_attributes"])
         assert "antibiogram" in extras
 
-    def test_antibiogram_json_is_valid_list(self):
+    def test_antibiogram_is_list_not_string(self):
+        """antibiogram must be a native list inside _extra_attributes JSON,
+        not a double-encoded string-within-JSON."""
         records = _parse_biosample_xml(_ANTIBIOGRAM_XML)
         extras = json.loads(records[0]["_extra_attributes"])
-        rows = json.loads(extras["antibiogram"])
-        assert isinstance(rows, list)
+        rows = extras["antibiogram"]
+        assert isinstance(rows, list), (
+            f"expected list, got {type(rows).__name__}: {rows!r}"
+        )
         assert len(rows) == 3
         assert rows[0]["antibiotic_name"] == "amikacin"
 

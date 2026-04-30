@@ -775,10 +775,12 @@ def _parse_antibiogram(sample_elem) -> list | None:
 
     Returns a list of dicts (one per antibiotic row) if the section is present
     and contains at least one non-empty row, or None otherwise. Empty cells
-    are excluded from each row dict to keep the JSON payload compact.
+    are excluded from each row dict to keep the payload compact.
 
-    The returned list is intended to be JSON-serialised and stored in
-    _extra_attributes["antibiogram"].
+    The returned list is stored directly as a native Python object in the
+    extras dict so that the single json.dumps(extras) call at the end of
+    _parse_biosample_xml serializes everything in one pass without
+    double-encoding.
     """
     table = sample_elem.find('.//Comment/Table[@class="Antibiogram.1.0"]')
     if table is None:
@@ -1229,9 +1231,11 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
         # Antibiogram: stored as <Description><Comment><Table class="Antibiogram.1.0">
         # with a <Header> row and <Body><Row><Cell> data rows. Present only in
         # records from NCBI pathogen packages (Pathogen.cl.1.0, Pathogen.env.1.0, etc.).
+        # The list is assigned directly so that the single json.dumps(extras) below
+        # serializes it in one pass without double-encoding.
         antibiogram_rows = _parse_antibiogram(sample)
         if antibiogram_rows is not None:
-            extras["antibiogram"] = json.dumps(antibiogram_rows, separators=(",", ":"))
+            extras["antibiogram"] = antibiogram_rows
             logger.debug(
                 "Antibiogram parsed for biosample=%s: %d antibiotic rows.",
                 record.get("biosample_accession"), len(antibiogram_rows),
