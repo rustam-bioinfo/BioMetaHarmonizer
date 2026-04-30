@@ -88,7 +88,7 @@ _NULL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# All XML attribute fields defined in the NCBI antibiogram schema.
+# Canonical field names for antibiogram columns.
 _ANTIBIOGRAM_FIELDS = (
     "antibiotic_name",
     "resistance_phenotype",
@@ -101,6 +101,21 @@ _ANTIBIOGRAM_FIELDS = (
     "laboratory_typing_method_version_or_reagent",
     "testing_standard",
 )
+
+# Maps the human-readable <Header><Cell> labels (lowercase) in the NCBI
+# Antibiogram table to canonical field key names used in the output dict.
+_ANTIBIOGRAM_HEADER_MAP = {
+    "antibiotic":                                   "antibiotic_name",
+    "resistance phenotype":                         "resistance_phenotype",
+    "measurement sign":                             "measurement_sign",
+    "measurement":                                  "measurement",
+    "measurement units":                            "measurement_units",
+    "laboratory typing method":                     "laboratory_typing_method",
+    "laboratory typing platform":                   "laboratory_typing_platform",
+    "vendor":                                       "vendor",
+    "laboratory typing method version or reagent":  "laboratory_typing_method_version_or_reagent",
+    "testing standard":                             "testing_standard",
+}
 
 
 def _normalize_null(value):
@@ -750,29 +765,43 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
 
 
 def _parse_antibiogram(sample_elem) -> list | None:
-    """Extract the <Antibiogram> section from a BioSample XML element.
+    """Extract the antibiogram table from a BioSample XML element.
+
+    NCBI BioSample pathogen records (Pathogen.cl.1.0, Pathogen.env.1.0, etc.)
+    store antibiogram data as a generic HTML-like table nested inside
+    <Description><Comment><Table class="Antibiogram.1.0">. The table has a
+    <Header> row with human-readable column names and a <Body> section with
+    one <Row> per antibiotic, each containing positional <Cell> elements.
 
     Returns a list of dicts (one per antibiotic row) if the section is present
-    and contains at least one row, or None if the element is absent or empty.
-    Empty-string / null-pattern values are excluded from each row dict so that
-    the JSON payload stays compact.
+    and contains at least one non-empty row, or None otherwise. Empty cells
+    are excluded from each row dict to keep the JSON payload compact.
 
-    The returned list is intended to be serialised to a compact JSON string and
-    stored in _extra_attributes["antibiogram"].
+    The returned list is intended to be JSON-serialised and stored in
+    _extra_attributes["antibiogram"].
     """
-    antibiogram = sample_elem.find("BioSampleAntibiogram")
-    if antibiogram is None:
+    table = sample_elem.find('.//Comment/Table[@class="Antibiogram.1.0"]')
+    if table is None:
         return None
 
+    header_cells = table.findall("Header/Cell")
+    if not header_cells:
+        return None
+
+    col_keys = [
+        _ANTIBIOGRAM_HEADER_MAP.get((cell.text or "").strip().lower(), (cell.text or "").strip())
+        for cell in header_cells
+    ]
+
     rows = []
-    for ab in antibiogram.findall("Antibiotic"):
-        row = {}
-        for field in _ANTIBIOGRAM_FIELDS:
-            val = _normalize_null(ab.get(field))
-            if val is not None:
-                row[field] = val
-        if row:
-            rows.append(row)
+    for row in table.findall("Body/Row"):
+        entry = {}
+        for key, cell in zip(col_keys, row.findall("Cell")):
+            val = _normalize_null(cell.text)
+            if val is not None and key in _ANTIBIOGRAM_FIELDS:
+                entry[key] = val
+        if entry:
+            rows.append(entry)
 
     return rows if rows else None
 
@@ -1197,9 +1226,9 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     f"{existing}|{contact_name}" if existing else contact_name
                 )
 
-        # Antibiogram section (pathogen packages: Pathogen.cl.1.0, Pathogen.env.1.0, etc.)
-        # The <Antibiogram> element is a sibling of <Attributes>, not a child of it.
-        # Parse and serialise to a compact JSON list stored in _extra_attributes["antibiogram"].
+        # Antibiogram: stored as <Description><Comment><Table class="Antibiogram.1.0">
+        # with a <Header> row and <Body><Row><Cell> data rows. Present only in
+        # records from NCBI pathogen packages (Pathogen.cl.1.0, Pathogen.env.1.0, etc.).
         antibiogram_rows = _parse_antibiogram(sample)
         if antibiogram_rows is not None:
             extras["antibiogram"] = json.dumps(antibiogram_rows, separators=(",", ":"))
