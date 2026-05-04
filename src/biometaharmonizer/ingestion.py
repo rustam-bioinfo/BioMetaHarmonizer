@@ -27,16 +27,18 @@ Thread-safety note:
   ENTREZ_EMAIL, ENTREZ_API_KEY, and CACHE_DIR are module-level globals. Concurrent
   calls to ingest() from different threads with different credentials will overwrite
   each other's state. Do not use this module from multiple threads simultaneously.
+  If thread-safe credential isolation is required, use a subprocess-per-worker
+  architecture or a multiprocessing pool instead.
 """
 
 import functools
 import http.client
-import importlib.resources
 import json
 import logging
 import re
 import time
 import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -44,7 +46,9 @@ import pandas as pd
 import requests
 from Bio import Entrez
 
-from biometaharmonizer.synonyms import build_synonym_lookup
+# MED-2: delegate _schemas_dir to the single canonical implementation in synonyms.py
+# rather than duplicating it here.
+from biometaharmonizer.synonyms import build_synonym_lookup, _schemas_dir
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,9 @@ _TRANSIENT_EXCEPTIONS = (
     TimeoutError,
     OSError,
 )
+
+# MED-7: HTTP 429 (rate limit) needs to be detected separately for aggressive backoff.
+_HTTP_429_WAIT_S = 60  # default wait on NCBI 429 before retry
 
 _NULL_PATTERNS = re.compile(
     r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
@@ -143,12 +150,34 @@ def _normalize_null(value):
     return value
 
 
-def _schemas_dir() -> Path:
-    try:
-        ref = importlib.resources.files("biometaharmonizer") / "schemas"
-        return Path(str(ref))
-    except (TypeError, ModuleNotFoundError):
-        return Path(__file__).parent / "schemas"
+def _is_http_429(exc) -> bool:
+    """Return True if exc represents an HTTP 429 Too Many Requests response."""
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+        return True
+    # requests library raises requests.exceptions.HTTPError; not used in this
+    # module's retry paths but guard here for completeness.
+    return False
+
+
+def _retry_sleep(attempt: int, exc) -> float:
+    """MED-7 / LOW-6: compute sleep duration and sleep, skipping sleep on last attempt.
+
+    - HTTP 429: use _HTTP_429_WAIT_S regardless of attempt number.
+    - Other transient: exponential backoff capped at _RETRY_MAX_S.
+    - Last attempt (_MAX_RETRIES): skip sleep entirely (LOW-6).
+    """
+    if attempt >= _MAX_RETRIES:
+        return 0.0  # LOW-6: don't sleep before giving up
+    if _is_http_429(exc):
+        logger.warning(
+            "HTTP 429 (rate limit) from NCBI. Waiting %ds before retry %d/%d...",
+            _HTTP_429_WAIT_S, attempt + 1, _MAX_RETRIES,
+        )
+        time.sleep(_HTTP_429_WAIT_S)
+        return float(_HTTP_429_WAIT_S)
+    wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
+    time.sleep(wait)
+    return float(wait)
 
 
 def _load_final_schema() -> list:
@@ -329,7 +358,6 @@ def ingest(
     Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
 
-    # Clamp fetch_batch_size to NCBI-recommended maximum.
     eff_batch_size = int(fetch_batch_size) if fetch_batch_size is not None else _BATCH_SIZE
     if eff_batch_size > _NCBI_EFETCH_MAX:
         logger.warning(
@@ -583,10 +611,6 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
     """Fallback: resolve GCF/GCA accessions to BioSample via Entrez elink.
 
     Returns (resolved_biosample_list, still_unresolved_gcx_list).
-    Only GCF/GCA accessions for which the full esearch+elink+esummary
-    pipeline completed successfully are removed from `remaining`.
-    Accessions whose requests failed at any step are preserved in
-    `remaining` and returned as unresolved.
     """
     batch_size = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
@@ -597,7 +621,6 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
         batch = gcx_ids[start:start + batch_size]
         term = " OR ".join(f"{acc}[Assembly Accession]" for acc in batch)
 
-        # Step 1: esearch assembly db to get numeric UIDs
         asm_uids = []
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -612,13 +635,11 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
                 asm_uids = result.get("IdList", [])
                 break
             except _TRANSIENT_EXCEPTIONS as exc:
-                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
-                    "elink esearch attempt %d/%d failed: %s. Retrying in %ds...",
-                    attempt, _MAX_RETRIES, exc, wait,
+                    "elink esearch attempt %d/%d failed: %s.",
+                    attempt, _MAX_RETRIES, exc,
                 )
-                if attempt < _MAX_RETRIES:
-                    time.sleep(wait)
+                _retry_sleep(attempt, exc)
         else:
             logger.warning(
                 "Entrez esearch (assembly) failed for batch at index %d -- skipping.", start
@@ -630,7 +651,6 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
             time.sleep(inter_req_sleep)
             continue
 
-        # Step 2: elink assembly UIDs -> biosample UIDs
         bs_uids = []
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -650,13 +670,11 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
                                 bs_uids.append(uid)
                 break
             except _TRANSIENT_EXCEPTIONS as exc:
-                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
-                    "elink attempt %d/%d failed: %s. Retrying in %ds...",
-                    attempt, _MAX_RETRIES, exc, wait,
+                    "elink attempt %d/%d failed: %s.",
+                    attempt, _MAX_RETRIES, exc,
                 )
-                if attempt < _MAX_RETRIES:
-                    time.sleep(wait)
+                _retry_sleep(attempt, exc)
         else:
             logger.warning(
                 "Entrez elink (assembly->biosample) failed for batch at index %d -- skipping.",
@@ -666,16 +684,11 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
             continue
 
         if not bs_uids:
-            # elink returned no biosample links for this batch; accessions are
-            # genuinely unlinked (suppressed). Mark as processed so they are
-            # reported as unresolved rather than silently dropped.
             for acc in batch:
                 remaining.discard(acc)
             time.sleep(inter_req_sleep)
             continue
 
-        # Step 3: esummary biosample UIDs -> SAMN accessions
-        # Track whether at least one esummary sub-call succeeded for this batch.
         esummary_succeeded = False
         for uid_start in range(0, len(bs_uids), batch_size):
             uid_batch = bs_uids[uid_start:uid_start + batch_size]
@@ -689,15 +702,12 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
                     sum_handle.close()
                     break
                 except _TRANSIENT_EXCEPTIONS as exc:
-                    wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                     logger.warning(
-                        "esummary attempt %d/%d failed: %s. Retrying in %ds...",
-                        attempt, _MAX_RETRIES, exc, wait,
+                        "esummary attempt %d/%d failed: %s.",
+                        attempt, _MAX_RETRIES, exc,
                     )
-                    if attempt < _MAX_RETRIES:
-                        time.sleep(wait)
+                    _retry_sleep(attempt, exc)
             else:
-                # This uid sub-batch failed; skip it but do NOT mark batch as resolved.
                 continue
 
             esummary_succeeded = True
@@ -708,7 +718,6 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
 
             time.sleep(inter_req_sleep)
 
-        # Only remove from remaining if the full pipeline succeeded for this batch.
         if esummary_succeeded:
             for acc in batch:
                 remaining.discard(acc)
@@ -847,13 +856,11 @@ def _fetch_biosample_metadata(
                 found = int(result.get("Count", 0))
                 break
             except _TRANSIENT_EXCEPTIONS as exc:
-                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
-                    "esearch attempt %d/%d failed (batch %d/%d): %s. Retrying in %ds...",
-                    attempt, _MAX_RETRIES, batch_i + 1, n_batches, exc, wait,
+                    "esearch attempt %d/%d failed (batch %d/%d): %s.",
+                    attempt, _MAX_RETRIES, batch_i + 1, n_batches, exc,
                 )
-                if attempt < _MAX_RETRIES:
-                    time.sleep(wait)
+                _retry_sleep(attempt, exc)
         else:
             logger.error(
                 "esearch failed after %d retries for batch %d/%d (%d accessions skipped).",
@@ -960,13 +967,11 @@ def _resolve_accessions_to_uids(accessions: list, esearch_batch: int = None) -> 
                 handle.close()
                 break
             except _TRANSIENT_EXCEPTIONS as exc:
-                wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                 logger.warning(
-                    "esearch attempt %d/%d failed: %s. Retrying in %ds...",
-                    attempt, _MAX_RETRIES, exc, wait,
+                    "esearch attempt %d/%d failed: %s.",
+                    attempt, _MAX_RETRIES, exc,
                 )
-                if attempt < _MAX_RETRIES:
-                    time.sleep(wait)
+                _retry_sleep(attempt, exc)
         else:
             logger.warning(
                 "esearch failed for batch starting at index %d. These accessions will be skipped.",
@@ -987,13 +992,11 @@ def _resolve_accessions_to_uids(accessions: list, esearch_batch: int = None) -> 
                     sum_handle.close()
                     break
                 except _TRANSIENT_EXCEPTIONS as exc:
-                    wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
                     logger.warning(
-                        "esummary attempt %d/%d failed: %s. Retrying in %ds...",
-                        attempt, _MAX_RETRIES, exc, wait,
+                        "esummary attempt %d/%d failed: %s.",
+                        attempt, _MAX_RETRIES, exc,
                     )
-                    if attempt < _MAX_RETRIES:
-                        time.sleep(wait)
+                    _retry_sleep(attempt, exc)
             else:
                 continue
 
@@ -1032,14 +1035,11 @@ def _fetch_batch_via_history(
             handle.close()
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
         except _TRANSIENT_EXCEPTIONS as exc:
-            wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
             logger.warning(
-                "efetch attempt %d/%d failed (retstart=%d, transient): %s. "
-                "Retrying in %ds...",
-                attempt, _MAX_RETRIES, retstart, exc, wait,
+                "efetch attempt %d/%d failed (retstart=%d): %s.",
+                attempt, _MAX_RETRIES, retstart, exc,
             )
-            if attempt < _MAX_RETRIES:
-                time.sleep(wait)
+            _retry_sleep(attempt, exc)
     logger.error(
         "efetch failed after %d retries (retstart=%d, retmax=%d).",
         _MAX_RETRIES, retstart, retmax,
@@ -1060,13 +1060,11 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             handle.close()
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
         except _TRANSIENT_EXCEPTIONS as exc:
-            wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
             logger.warning(
-                "Batch fetch attempt %d/%d failed (transient): %s. Retrying in %ds...",
-                attempt, _MAX_RETRIES, exc, wait,
+                "Batch fetch attempt %d/%d failed (transient): %s.",
+                attempt, _MAX_RETRIES, exc,
             )
-            if attempt < _MAX_RETRIES:
-                time.sleep(wait)
+            _retry_sleep(attempt, exc)
     logger.error(
         "efetch failed after %d retries for %d UIDs.", _MAX_RETRIES, len(uid_batch)
     )
@@ -1081,7 +1079,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as exc:
-        # Handle entirely here; do not re-raise so callers never see double log lines.
         logger.error(
             "XML ParseError from NCBI efetch response (truncated XML?): %s. "
             "First 200 bytes: %r", exc, xml_bytes[:200]
@@ -1165,12 +1162,15 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                 if record.get(resolved) is None:
                     record[resolved] = val
                 elif val is not None:
-                    existing = extras.get(raw_key)
-                    extras[raw_key] = f"{existing}|{val}" if existing else val
+                    # LOW-3: store duplicates under predictable _dup_<standard_key> prefix
+                    # so downstream code can reliably find all duplicates for a given field.
+                    dup_key = f"_dup_{resolved}"
+                    existing = extras.get(dup_key)
+                    extras[dup_key] = f"{existing}|{val}" if existing else val
                     logger.debug(
                         "Attribute collision on '%s' (biosample=%s): primary value kept, "
-                        "duplicate stored in _extra_attributes.",
-                        resolved, record.get("biosample_accession"),
+                        "duplicate stored in _extra_attributes as '%s'.",
+                        resolved, record.get("biosample_accession"), dup_key,
                     )
             elif val is not None:
                 existing = extras.get(raw_key)
