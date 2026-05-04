@@ -47,15 +47,24 @@ class KeyMapper:
         """
         Harmonize column names for custom/non-ingestion workflows.
 
-        In the fixed-schema pipeline, dropping columns is intentionally disabled:
-        the tool must preserve all information. Any attributes outside the final
-        schema should already be stored in `_extra_attributes` by ingestion.
+        Renames columns whose lowercased names match a synonym in the unified
+        schema, then coalesces any duplicate column names that result from
+        renaming, and finally reindexes to the canonical BIOSAMPLE_SCHEMA.
+
+        WARNING: reindex() silently drops any column not present in
+        BIOSAMPLE_SCHEMA. If you have extra computed columns you want to
+        preserve, encode them into _extra_attributes before calling
+        map_columns().
         """
         rename_map = {}
         for col in df.columns:
-            col_lower = col.lower().strip()
-            if col_lower in _PROTECTED_COLUMNS:
+            # LOW-2: guard against mixed-case protected column names --
+            # check original col name, not col_lower, so e.g.
+            # 'BiOsAmPlE_AcCeSSiOn' (already canonical content, wrong case)
+            # is skipped rather than incorrectly matched as a synonym target.
+            if col in _PROTECTED_COLUMNS:
                 continue
+            col_lower = col.lower().strip()
             if col_lower in self._exact:
                 target = self._exact[col_lower]
                 if target in _PROTECTED_COLUMNS and target != col:
@@ -63,6 +72,18 @@ class KeyMapper:
 
         df = df.rename(columns=rename_map)
         df = self._coalesce_duplicates(df)
+
+        # HIGH-6: warn about columns that will be dropped by reindex.
+        schema_set = _PROTECTED_COLUMNS
+        extra_cols = [c for c in df.columns if c not in schema_set]
+        if extra_cols:
+            logger.warning(
+                "map_columns(): %d column(s) not in BIOSAMPLE_SCHEMA will be dropped "
+                "by reindex: %s. Encode them into _extra_attributes before calling "
+                "map_columns() to preserve them.",
+                len(extra_cols), extra_cols[:10],
+            )
+
         df = df.reindex(columns=BIOSAMPLE_SCHEMA)
         return df
 
