@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import re
@@ -35,15 +36,6 @@ def _load_dictionaries(path):
     """
     Load one_health_dictionaries.json from *path* (if given and exists),
     or from the bundled schemas/ location.
-
-    Raises
-    ------
-    FileNotFoundError
-        If neither the caller-supplied path nor the bundled file exists.
-    ValueError
-        If the file cannot be parsed as JSON, or if required top-level
-        keys are absent.  The error message names the problematic file
-        and instructs the user how to regenerate it.
     """
     candidate = None
     if path is not None:
@@ -87,9 +79,6 @@ def _load_dictionaries(path):
     return data
 
 
-# ---------------------------------------------------------------------------
-# Institution / organisation guard for the host field
-# ---------------------------------------------------------------------------
 _INSTITUTION_KEYWORD_RE = re.compile(
     r"\b(?:"
     r"university|universit[ae]t|universite|universidad|universidade"
@@ -110,11 +99,17 @@ _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
 
-# Laboratory / collection-context terms that should be stripped from any field
-# before tier1 matching.  These describe the handling/provenance of the sample,
-# not its biological origin.
 _LAB_CONTEXT_RE = re.compile(
     r"\b(?:laboratory|laboratories|lab\b|in\s+vitro|in\s+vivo)\b",
+    re.IGNORECASE,
+)
+
+# MED-10: matches culture collection accession numbers (digits only, or
+# letter-prefix + digits, e.g. "25922", "BAA-1705", "ATCC-25922").
+# Used after stripping institution prefixes to decide if residual is a
+# collection number (-> Lab) rather than a biological term (-> continue).
+_COLLECTION_NUMBER_RE = re.compile(
+    r"^\s*[A-Z]{0,4}-?\d+[A-Z]?\s*$",
     re.IGNORECASE,
 )
 
@@ -127,9 +122,6 @@ def _is_institution_host(text):
     return False
 
 
-# ---------------------------------------------------------------------------
-# Host name normalisation
-# ---------------------------------------------------------------------------
 _HOST_PAREN_RE = re.compile(r"\s*\(.*?\)\s*")
 _HOST_SUFFIX_RE = re.compile(
     r"\s+(?:"
@@ -164,23 +156,16 @@ def _tier1_to_pattern(value):
     return re.compile(pattern, re.IGNORECASE)
 
 
-# ---------------------------------------------------------------------------
-# Confidence helpers
-# ---------------------------------------------------------------------------
-
-#: Field weights reflect how reliably each NCBI field encodes the
-#: biological origin of the isolate.
 _FIELD_WEIGHTS = {
     "isolation_source":  1.00,
-    "host":              1.00,   # dict hit; text hit uses 0.90 multiplier (see code)
+    "host":              1.00,
     "env_medium":        0.85,
     "env_local_scale":   0.80,
     "sample_type":       0.70,
     "env_broad_scale":   0.50,
-    "setting_inference": None,   # uses setting_confidence dict value directly
+    "setting_inference": None,
 }
 
-#: Discretization thresholds (inclusive lower bound).
 _CONFIDENCE_LEVELS = [
     (0.85, "high"),
     (0.60, "medium"),
@@ -189,17 +174,6 @@ _CONFIDENCE_LEVELS = [
 
 
 def _term_specificity(term_str, source):
-    """
-    Return a specificity score in [0, 1] for a matched term.
-
-    source values:
-      "unambiguous"  -> 1.0  (from unambiguous_human/animal lists)
-      "host_dict"    -> 1.0  (explicit host_to_category lookup)
-      "tier1"        -> length-graded: >=8 chars 0.90, 4-7 chars 0.75, <4 chars 0.50
-      "fuzzy"        -> caller passes WRatio / 100 directly
-      "ambiguous"    -> 0.3
-      "none"         -> 0.0
-    """
     if source in ("unambiguous", "host_dict"):
         return 1.0
     if source == "ambiguous":
@@ -220,12 +194,6 @@ def discretize_confidence(score):
     """
     Convert a numeric confidence score to a human-readable evidence level.
 
-    Thresholds:
-      >= 0.85  -> "high"
-      >= 0.60  -> "medium"
-      >= 0.30  -> "low"
-      <  0.30  -> "unresolved"
-
     Returns one of: "high", "medium", "low", "unresolved".
     """
     for threshold, label in _CONFIDENCE_LEVELS:
@@ -234,9 +202,6 @@ def discretize_confidence(score):
     return "unresolved"
 
 
-# ---------------------------------------------------------------------------
-# Expected output schema
-# ---------------------------------------------------------------------------
 _CLASSIFY_TEXT_KEYS = frozenset({
     "one_health_category",
     "one_health_term",
@@ -263,51 +228,13 @@ class OneHealthClassifier:
     """
     Module 5: One Health Categorization.
 
-    Classifies records into standardized One Health tiers using
-    deterministic, multi-layer semantic decomposition across six
-    metadata fields without any hardcoded biological terms.
+    Classifies records into standardized One Health tiers using deterministic,
+    multi-layer semantic decomposition. All biological knowledge is loaded from
+    one_health_dictionaries.json.
 
-    All biological knowledge (patterns, terms, categories, rules) is
-    loaded exclusively from one_health_dictionaries.json.
-
-    Confidence model
-    ----------------
-    one_health_confidence is a float in [0, 1] computed as:
-
-        confidence = min(1.0, term_specificity * field_weight + corroboration)
-
-    where:
-      term_specificity  reflects how specific the matched term is:
-                          unambiguous list / host dict hit -> 1.0
-                          tier1 phrase >= 8 chars          -> 0.90
-                          tier1 term 4-7 chars             -> 0.75
-                          tier1 term < 4 chars             -> 0.50
-                          fuzzy match                      -> WRatio / 100
-                          ambiguous term                   -> 0.30
-      field_weight      reflects how reliably the source field encodes
-                        biological origin:
-                          isolation_source / host dict     -> 1.00
-                          host text hit                    -> 0.90
-                          env_medium                       -> 0.85
-                          env_local_scale                  -> 0.80
-                          sample_type                      -> 0.70
-                          env_broad_scale                  -> 0.50
-      corroboration     +0.10 bonus when a second independent field
-                        agrees with the same category, capped at 1.0
-
-    one_health_evidence_level discretizes the score:
-      >= 0.85  -> "high"
-      >= 0.60  -> "medium"
-      >= 0.30  -> "low"
-      <  0.30  -> "unresolved"
-
-    Public API
-    ----------
-    classify(series)                 -> pd.Series  (legacy)
-    classify_joint(iso, host)        -> pd.Series  (legacy)
-    classify_with_confidence(series) -> pd.DataFrame 3 cols (legacy)
-    classify_multi_field(**fields)   -> pd.DataFrame 7 cols (extended)
-    discretize_confidence(score)     -> str  (module-level helper)
+    MED-4: _classify_text results are memoized per instance via an LRU cache
+    (maxsize=4096) to avoid redundant pattern matching when the same text value
+    appears in many records (e.g. "blood", "human", "clinical").
     """
 
     _FIELD_PRIORITY = [
@@ -324,7 +251,17 @@ class OneHealthClassifier:
     _SPECIMEN_FIELDS = {"isolation_source", "env_medium", "env_local_scale"}
 
     NULL_PATTERNS = re.compile(
-        r"^(missing|unknown|n/?a|not provided|not collected|not applicable|na|none|--)$",
+        r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
+        r"missing|misssing|missng|mising|"
+        r"unknown|unkown|unknwon|unknow|"
+        r"not\s+provided|not\s+collected|not\s+applicable|not\s+available|"
+        r"not\s+determined|not\s+recorded|not\s+reported|not\s+known|"
+        r"not\s+given|not\s+stated|not\s+specified|"
+        r"not\s+done|not\s+tested|not\s+sequenced|not\s+typed|"
+        r"unavailable|unspecified|undetermined|unidentified|"
+        r"restricted|restricted\s+access|withheld|confidential|"
+        r"tbd|tba|"
+        r"missing\s*:.*|not\s+applicable\s*:.*|data\s+agreement\s+established\s+pre-?2023)$",
         re.IGNORECASE,
     )
 
@@ -431,6 +368,12 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
 
+        # MED-4: per-instance LRU cache for _classify_text to avoid redundant
+        # pattern matching when the same text value appears in many records.
+        # maxsize=4096 covers the long tail of common isolation_source values
+        # (e.g. "blood", "human", "clinical") without unbounded memory growth.
+        self._classify_text = functools.lru_cache(maxsize=4096)(self._classify_text_uncached)
+
     # ------------------------------------------------------------------
     # Legacy public API
     # ------------------------------------------------------------------
@@ -485,9 +428,6 @@ class OneHealthClassifier:
           one_health_category, one_health_term, one_health_confidence,
           one_health_evidence_level, one_health_processing,
           one_health_setting, one_health_source_field
-
-        one_health_category is always a string, never NaN.
-        one_health_evidence_level is one of: high, medium, low, unresolved.
         """
         known = set(self._FIELD_PRIORITY)
         for k in fields:
@@ -566,9 +506,6 @@ class OneHealthClassifier:
             if not val_str or self.NULL_PATTERNS.match(val_str):
                 continue
 
-            # ----------------------------------------------------------
-            # host field: institution guard then host_to_category lookup
-            # ----------------------------------------------------------
             if field == "host":
                 if _is_institution_host(val_str):
                     continue
@@ -600,7 +537,6 @@ class OneHealthClassifier:
                         out["one_health_setting"] = layer["one_health_setting"]
                     continue
 
-                # No dict hit: fall through to _classify_text
                 layer = self._classify_text(val_str)
                 if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
                     out["one_health_processing"] = layer["one_health_processing"]
@@ -620,7 +556,7 @@ class OneHealthClassifier:
                 spec = _term_specificity(term_lower, tsource)
                 if tsource == "fuzzy":
                     spec = layer.get("one_health_confidence", 0.0)
-                fw = _FIELD_WEIGHTS["host"] * 0.90  # text hit, slightly lower than dict
+                fw = _FIELD_WEIGHTS["host"] * 0.90
                 if domain_category is None:
                     domain_category     = cat
                     domain_term         = layer.get("one_health_term") or val_str
@@ -631,9 +567,6 @@ class OneHealthClassifier:
                     corroborated = True
                 continue
 
-            # ----------------------------------------------------------
-            # All other fields
-            # ----------------------------------------------------------
             layer = self._classify_text(val_str)
 
             if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
@@ -643,10 +576,6 @@ class OneHealthClassifier:
 
             cat = layer.get("one_health_category")
 
-            # Lab from _classify_text is only meaningful for host/specimen
-            # fields where a culture collection prefix (ATCC, DSM, etc.)
-            # was the sole content.  For supporting/domain fields the Lab
-            # signal should not override real biological evidence.
             if cat == "Lab":
                 continue
 
@@ -661,7 +590,6 @@ class OneHealthClassifier:
 
             fw = _FIELD_WEIGHTS.get(field, 0.70)
 
-            # env_broad_scale: supporting signal only
             if field in self._SUPPORTING_FIELDS:
                 if term_lower not in self._ambiguous_category_set:
                     if supporting_category is None:
@@ -673,7 +601,6 @@ class OneHealthClassifier:
                         corroborated = True
                 continue
 
-            # sample_type: domain field
             if field in self._DOMAIN_FIELDS:
                 if term_lower in self._ambiguous_category_set:
                     if evidence_term is None:
@@ -690,7 +617,6 @@ class OneHealthClassifier:
                     corroborated = True
                 continue
 
-            # specimen fields (isolation_source, env_medium, env_local_scale)
             if term_lower in self._ambiguous_category_set:
                 if evidence_term is None:
                     evidence_term = term_lower
@@ -729,9 +655,6 @@ class OneHealthClassifier:
                 elif specimen_category == cat:
                     corroborated = True
 
-        # ------------------------------------------------------------------
-        # Pass 2: resolve category and compute confidence
-        # ------------------------------------------------------------------
         corroboration_bonus = 0.10 if corroborated else 0.0
 
         if domain_category is not None:
@@ -799,30 +722,21 @@ class OneHealthClassifier:
         return result
 
     # ------------------------------------------------------------------
-    # Core single-value classification engine
+    # Core single-value classification engine (wrapped by LRU cache in __init__)
     # ------------------------------------------------------------------
 
-    def _classify_text(self, value):
+    def _classify_text_uncached(self, value):
         """
-        Classify a single text value.
+        Classify a single text value. Called via self._classify_text which is
+        an LRU-cached wrapper created in __init__ (MED-4).
 
         Returns dict with keys:
           one_health_category, one_health_term, one_health_confidence,
           one_health_term_source, one_health_processing, one_health_setting
 
-        one_health_term_source indicates match mechanism:
-          "unambiguous"  from unambiguous_human/animal lists
-          "host_dict"    from host_to_category lookup
-          "tier1"        from tier1_patterns regex
-          "fuzzy"        from rapidfuzz fallback
-          "institution"  from culture collection prefix guard only
-          "none"         no match
-
-        Lab category is returned ONLY when a culture collection prefix
-        (ATCC, DSM, NCTC, etc.) is the sole meaningful content of the
-        field after stripping.  Broad institution keywords (laboratory,
-        hospital, university) are stripped and classification continues
-        on the residual text rather than returning Lab directly.
+        Lab category is returned ONLY when a culture collection prefix (ATCC,
+        DSM, NCTC, etc.) is the sole meaningful content after stripping,
+        determined by _COLLECTION_NUMBER_RE (MED-10).
         """
         unclassified = {
             "one_health_category":    "Unclassified",
@@ -840,23 +754,16 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
-        # ------------------------------------------------------------------
         # Institution guard — two levels:
-        #
-        # Level 1: culture collection prefixes (ATCC, DSM, NCTC, ...) via
-        #   self._INSTITUTION_RE.  If the residual after stripping these is
-        #   <4 chars the field is a culture collection reference -> Lab.
-        #
-        # Level 2: broad institution keywords (laboratory, university, ...) via
-        #   _INSTITUTION_KEYWORD_RE.  These describe provenance / handling
-        #   context, not biological origin.  Strip them and continue
-        #   classification on the residual.  Do NOT return Lab from this path
-        #   because "laboratory sample", "environmental laboratory sample", etc.
-        #   carry real biological signal in the remaining words.
-        # ------------------------------------------------------------------
+        # Level 1: culture collection prefixes (ATCC, DSM, NCTC, ...)
+        #   Strip them; if residual is empty or matches _COLLECTION_NUMBER_RE
+        #   (digits / letter-prefix+digits like "25922" or "BAA-1705") -> Lab.
+        # Level 2: broad institution keywords -> strip and continue.
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
             stripped = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
-            if len(stripped) < 4:
+            # MED-10: use regex to match collection accession numbers of any
+            # length rather than the old hard-coded < 4 char threshold.
+            if not stripped or _COLLECTION_NUMBER_RE.match(stripped):
                 return {
                     "one_health_category":    "Lab",
                     "one_health_term":        text[:60],
@@ -866,9 +773,6 @@ class OneHealthClassifier:
                     "one_health_setting":     np.nan,
                 }
 
-        # Strip broad institution keywords and lab-context words before
-        # further processing.  The residual may still contain biological
-        # signal (e.g. "Environmental laboratory sample" -> "Environmental sample").
         text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
         text = _LAB_CONTEXT_RE.sub("", text).strip()
         if not text:
