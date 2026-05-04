@@ -10,6 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 classifiers = [
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -31,6 +32,12 @@ dependencies = [
     "pyarrow>=12.0",
     "rapidfuzz>=3.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rustam-bioinfo/BioMetaHarmonizer"
+Documentation = "https://biometaharmonizer.readthedocs.io"
+"Bug Tracker" = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/issues"
+Changelog = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/releases"
 
 [project.scripts]
 biometaharmonizer = "biometaharmonizer.cli:main"
