@@ -182,6 +182,7 @@ def _retry_sleep(attempt: int, exc) -> float:
 
 def _load_final_schema() -> list:
     return [
+        # BLOCK 1 — Record identity
         "biosample_accession",
         "biosample_id",
         "sra_accession",
@@ -189,11 +190,31 @@ def _load_final_schema() -> list:
         "assembly_accession_refseq",
         "assembly_accession_genbank",
         "sample_name_id",
+        # BLOCK 2 — Taxonomy
         "taxonomy_id",
         "taxonomy_name",
         "organism_name",
-        "collection_date",
-        "collection_date_range",
+        # BLOCK 3 — Specimen identity
+        "isolate",
+        "strain",
+        "sub_strain",
+        "serotype",
+        "serovar",
+        "genotype",
+        "culture_collection",
+        # BLOCK 4 — Host
+        "host",
+        "host_disease",
+        "host_age",
+        "host_sex",
+        "host_tissue_sampled",
+        # BLOCK 5 — Isolation source + environmental context
+        "isolation_source",
+        "sample_type",
+        "env_broad_scale",
+        "env_local_scale",
+        "env_medium",
+        # BLOCK 6 — Geography
         "geo_loc_name",
         "lat_lon",
         "geo_country",
@@ -202,28 +223,25 @@ def _load_final_schema() -> list:
         "geo_iso3166",
         "geo_sea_ocean",
         "geo_loc_raw",
-        "host",
-        "host_disease",
-        "host_age",
-        "host_sex",
-        "host_tissue_sampled",
-        "isolation_source",
-        "sample_type",
+        # BLOCK 7 — Temporal
+        "collection_date",
+        "collection_date_range",
+        # BLOCK 8 — One Health (derived from blocks 4-7)
         "one_health_category",
-        "isolate",
-        "strain",
-        "sub_strain",
-        "serotype",
-        "serovar",
-        "genotype",
-        "culture_collection",
+        "one_health_term",
+        "one_health_confidence",
+        "one_health_evidence_level",
+        "one_health_processing",
+        "one_health_setting",
+        "one_health_source_field",
+        # BLOCK 9 — Epidemiology
         "outbreak",
-        "env_broad_scale",
-        "env_local_scale",
-        "env_medium",
+        # BLOCK 10 — Sequencing / assembly
         "sequencing_method",
         "assembly_method",
+        # BLOCK 11 — Collection provenance
         "collected_by",
+        # BLOCK 12 — NCBI administrative
         "ncbi_package",
         "submission_date",
         "last_update",
@@ -233,6 +251,7 @@ def _load_final_schema() -> list:
         "status_date",
         "title",
         "description_comment",
+        # Overflow
         "_extra_attributes",
     ]
 
