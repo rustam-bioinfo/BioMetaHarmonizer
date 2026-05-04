@@ -3,6 +3,7 @@
 [![version](https://img.shields.io/badge/version-0.6.0-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rustam-bioinfo.github.io/BioMetaHarmonizer/)
 
 A Python package for fetching, parsing, and standardizing NCBI BioSample metadata for large-scale genomic epidemiology.
 
