@@ -22,6 +22,11 @@ Working directory note (Colab):
   Assembly summary flat files (~100 MB each) are cached in CACHE_DIR, which defaults
   to ~/.biometaharmonizer/cache/. In Colab, override with set_cache_dir("/content")
   if you want them in the working directory.
+
+Thread-safety note:
+  ENTREZ_EMAIL, ENTREZ_API_KEY, and CACHE_DIR are module-level globals. Concurrent
+  calls to ingest() from different threads with different credentials will overwrite
+  each other's state. Do not use this module from multiple threads simultaneously.
 """
 
 import functools
@@ -46,6 +51,13 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_EMAIL = "your@email.com"
+_PLACEHOLDER_EMAILS = {
+    "your@email.com",
+    "example@example.com",
+    "user@example.org",
+    "test@test.com",
+    "email@example.com",
+}
 ENTREZ_EMAIL = _DEFAULT_EMAIL
 ENTREZ_API_KEY = None
 CACHE_DIR = Path.home() / ".biometaharmonizer" / "cache"
@@ -59,6 +71,8 @@ _MAX_RETRIES = 3
 _RETRY_BASE_S = 2
 _RETRY_MAX_S = 30
 _CACHE_TTL_DAYS = 7
+# NCBI-recommended maximum records per efetch request.
+_NCBI_EFETCH_MAX = 500
 
 # Prefixes that identify native BioSample accessions (INSDC standard).
 _BIOSAMPLE_PREFIXES = ("SAMN", "SAME", "SAMD")
@@ -102,8 +116,6 @@ _ANTIBIOGRAM_FIELDS = (
     "testing_standard",
 )
 
-# Maps the human-readable <Header><Cell> labels (lowercase) in the NCBI
-# Antibiogram table to canonical field key names used in the output dict.
 _ANTIBIOGRAM_HEADER_MAP = {
     "antibiotic":                                   "antibiotic_name",
     "resistance phenotype":                         "resistance_phenotype",
@@ -201,12 +213,22 @@ BIOSAMPLE_SCHEMA_SET = set(BIOSAMPLE_SCHEMA)
 
 
 def set_email(email: str) -> None:
+    """Set the Entrez contact email.
+
+    Raises ValueError for invalid format or known placeholder addresses.
+    Not thread-safe: sets a module-level global.
+    """
     global ENTREZ_EMAIL
     email = str(email).strip()
     if not _EMAIL_RE.match(email):
         raise ValueError(
             f"Invalid email address: {email!r}. "
             "NCBI requires a valid contact email for all Entrez API calls."
+        )
+    if email.lower() in _PLACEHOLDER_EMAILS:
+        raise ValueError(
+            f"{email!r} is a placeholder address. "
+            "Please provide your real email address as required by NCBI Entrez guidelines."
         )
     ENTREZ_EMAIL = email
     Entrez.email = email
@@ -226,7 +248,6 @@ def set_cache_dir(path) -> None:
 
 @functools.lru_cache(maxsize=2)
 def _read_assembly_summary_cached(path_str: str, mtime: float) -> pd.DataFrame:
-    """Read and cache one assembly summary file.  Keyed on path + mtime."""
     return _read_assembly_summary_uncached(Path(path_str))
 
 
@@ -281,20 +302,16 @@ def ingest(
     api_key:
         NCBI API key (optional, raises rate limit from 3 to 10 req/s).
     cache_dir:
-        Directory for assembly summary flat-file cache. Defaults to
-        ~/.biometaharmonizer/cache/.
+        Directory for assembly summary flat-file cache.
     fetch_batch_size:
-        Number of BioSample accessions per efetch request. Defaults to
-        the module-level _BATCH_SIZE (200). Higher values mean fewer HTTP
-        round trips but larger XML payloads per response.
+        Records per efetch request. Clamped to _NCBI_EFETCH_MAX (500).
     esearch_batch_size:
-        Number of accessions per esearch/elink/esummary request used in the
-        legacy UID-resolution path and the Entrez elink GCF/GCA fallback.
-        Defaults to the module-level _ESEARCH_BATCH (100).
+        Accessions per esearch/elink/esummary request.
     refresh_cache:
-        When True, delete and re-download the assembly summary flat files
-        unconditionally, regardless of their age. Useful when NCBI has added
-        new assemblies since the last download. Defaults to False.
+        Re-download assembly summary flat files unconditionally.
+
+    Thread-safety: not thread-safe; do not call from multiple threads with
+    different credentials simultaneously.
     """
     resolved_email = email or (None if ENTREZ_EMAIL == _DEFAULT_EMAIL else ENTREZ_EMAIL)
     if not resolved_email:
@@ -312,8 +329,15 @@ def ingest(
     Entrez.email = ENTREZ_EMAIL
     Entrez.api_key = ENTREZ_API_KEY
 
-    # Resolve effective batch sizes: caller value > module default.
+    # Clamp fetch_batch_size to NCBI-recommended maximum.
     eff_batch_size = int(fetch_batch_size) if fetch_batch_size is not None else _BATCH_SIZE
+    if eff_batch_size > _NCBI_EFETCH_MAX:
+        logger.warning(
+            "fetch_batch_size=%d exceeds NCBI-recommended maximum of %d. "
+            "Clamping to %d to avoid truncated XML responses.",
+            eff_batch_size, _NCBI_EFETCH_MAX, _NCBI_EFETCH_MAX,
+        )
+        eff_batch_size = _NCBI_EFETCH_MAX
     eff_esearch_batch = int(esearch_batch_size) if esearch_batch_size is not None else _ESEARCH_BATCH
 
     ids = _load_ids(source)
@@ -483,15 +507,6 @@ def _classify_ids(ids: list) -> tuple:
 
 
 def _ensure_assembly_summaries(refresh: bool = False) -> None:
-    """Download assembly summary flat files to CACHE_DIR if missing or stale.
-
-    Parameters
-    ----------
-    refresh:
-        When True, delete existing cache files and re-download unconditionally,
-        bypassing the TTL check. Use this when NCBI has added new assemblies
-        since the last download.
-    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for url, label in [
         (ASSEMBLY_SUMMARY_REFSEQ, "refseq"),
@@ -535,12 +550,6 @@ def _ensure_assembly_summaries(refresh: bool = False) -> None:
 
 
 def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
-    """Resolve GCF/GCA accessions to BioSample accessions using the local index.
-
-    Returns (resolved_biosample_list, still_unresolved_gcx_list).
-    The Entrez elink fallback is NOT called here; callers that want it should
-    call _resolve_gcx_via_entrez() on the returned unresolved list.
-    """
     resolved = []
     gcx_set = set(gcx_ids)
 
@@ -573,20 +582,11 @@ def _resolve_assembly_to_biosample(gcx_ids: list) -> tuple:
 def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
     """Fallback: resolve GCF/GCA accessions to BioSample via Entrez elink.
 
-    Uses elink with db=biosample, dbfrom=assembly to traverse the
-    assembly->biosample link in NCBI. Accessions are first resolved to
-    assembly numeric UIDs via esearch, then elink converts those UIDs to
-    biosample UIDs, and finally esummary retrieves the SAMN accessions.
-
-    Parameters
-    ----------
-    gcx_ids:
-        List of GCF_/GCA_ accessions to resolve.
-    esearch_batch:
-        Batch size for esearch/elink/esummary calls. Defaults to
-        the module-level _ESEARCH_BATCH.
-
     Returns (resolved_biosample_list, still_unresolved_gcx_list).
+    Only GCF/GCA accessions for which the full esearch+elink+esummary
+    pipeline completed successfully are removed from `remaining`.
+    Accessions whose requests failed at any step are preserved in
+    `remaining` and returned as unresolved.
     """
     batch_size = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
@@ -617,7 +617,8 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
                     "elink esearch attempt %d/%d failed: %s. Retrying in %ds...",
                     attempt, _MAX_RETRIES, exc, wait,
                 )
-                time.sleep(wait)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(wait)
         else:
             logger.warning(
                 "Entrez esearch (assembly) failed for batch at index %d -- skipping.", start
@@ -654,7 +655,8 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
                     "elink attempt %d/%d failed: %s. Retrying in %ds...",
                     attempt, _MAX_RETRIES, exc, wait,
                 )
-                time.sleep(wait)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(wait)
         else:
             logger.warning(
                 "Entrez elink (assembly->biosample) failed for batch at index %d -- skipping.",
@@ -664,10 +666,17 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
             continue
 
         if not bs_uids:
+            # elink returned no biosample links for this batch; accessions are
+            # genuinely unlinked (suppressed). Mark as processed so they are
+            # reported as unresolved rather than silently dropped.
+            for acc in batch:
+                remaining.discard(acc)
             time.sleep(inter_req_sleep)
             continue
 
         # Step 3: esummary biosample UIDs -> SAMN accessions
+        # Track whether at least one esummary sub-call succeeded for this batch.
+        esummary_succeeded = False
         for uid_start in range(0, len(bs_uids), batch_size):
             uid_batch = bs_uids[uid_start:uid_start + batch_size]
             for attempt in range(1, _MAX_RETRIES + 1):
@@ -685,10 +694,13 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
                         "esummary attempt %d/%d failed: %s. Retrying in %ds...",
                         attempt, _MAX_RETRIES, exc, wait,
                     )
-                    time.sleep(wait)
+                    if attempt < _MAX_RETRIES:
+                        time.sleep(wait)
             else:
+                # This uid sub-batch failed; skip it but do NOT mark batch as resolved.
                 continue
 
+            esummary_succeeded = True
             for doc in summaries["DocumentSummarySet"]["DocumentSummary"]:
                 acc = doc.get("Accession", "")
                 if acc and acc.upper().startswith(_BIOSAMPLE_PREFIXES):
@@ -696,8 +708,10 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
 
             time.sleep(inter_req_sleep)
 
-        for acc in batch:
-            remaining.discard(acc)
+        # Only remove from remaining if the full pipeline succeeded for this batch.
+        if esummary_succeeded:
+            for acc in batch:
+                remaining.discard(acc)
 
         time.sleep(inter_req_sleep)
 
@@ -705,7 +719,7 @@ def _resolve_gcx_via_entrez(gcx_ids: list, esearch_batch: int = None) -> tuple:
     if unresolved:
         logger.warning(
             "%d assembly accessions returned no biosample link from Entrez elink "
-            "(truly suppressed or invalid): %s",
+            "(truly suppressed, invalid, or transient API failure): %s",
             len(unresolved), unresolved[:5],
         )
     return resolved, unresolved
@@ -765,23 +779,6 @@ def _resolve_biosample_to_assembly(biosample_ids: set) -> dict:
 
 
 def _parse_antibiogram(sample_elem) -> list | None:
-    """Extract the antibiogram table from a BioSample XML element.
-
-    NCBI BioSample pathogen records (Pathogen.cl.1.0, Pathogen.env.1.0, etc.)
-    store antibiogram data as a generic HTML-like table nested inside
-    <Description><Comment><Table class="Antibiogram.1.0">. The table has a
-    <Header> row with human-readable column names and a <Body> section with
-    one <Row> per antibiotic, each containing positional <Cell> elements.
-
-    Returns a list of dicts (one per antibiotic row) if the section is present
-    and contains at least one non-empty row, or None otherwise. Empty cells
-    are excluded from each row dict to keep the payload compact.
-
-    The returned list is stored directly as a native Python object in the
-    extras dict so that the single json.dumps(extras) call at the end of
-    _parse_biosample_xml serializes everything in one pass without
-    double-encoding.
-    """
     table = sample_elem.find('.//Comment/Table[@class="Antibiogram.1.0"]')
     if table is None:
         return None
@@ -814,24 +811,6 @@ def _fetch_biosample_metadata(
     batch_size: int = None,
     esearch_batch: int = None,
 ) -> pd.DataFrame:
-    """Fetch BioSample XML records for a list of accessions.
-
-    For SAMN/SAME/SAMD accessions the pipeline is:
-      esearch(term=batch[Accession] OR ..., usehistory=y)  -- one call per batch
-      efetch(WebEnv=..., query_key=..., retstart=0, retmax=batch_size) -- one call per batch
-
-    Each batch produces its own fresh WebEnv+query_key that covers exactly
-    the accessions in that batch.  This avoids the cross-batch accumulation
-    bug where the last query_key only indexes the last batch.
-
-    Parameters
-    ----------
-    batch_size:
-        Records per efetch request. Defaults to module-level _BATCH_SIZE.
-    esearch_batch:
-        Records per esearch/esummary request in the legacy UID-resolution
-        path. Defaults to module-level _ESEARCH_BATCH.
-    """
     eff_batch = batch_size if batch_size is not None else _BATCH_SIZE
     eff_esearch = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
 
@@ -845,7 +824,6 @@ def _fetch_biosample_metadata(
     total = len(direct_ids)
     n_batches = (total + eff_batch - 1) // eff_batch
 
-    # --- Path 1: SAMN/SAME/SAMD -- esearch(usehistory=y) + efetch per batch ---
     for batch_i, start in enumerate(range(0, total, eff_batch)):
         batch = direct_ids[start:start + eff_batch]
         term = " OR ".join(f"{acc}[Accession]" for acc in batch)
@@ -874,7 +852,8 @@ def _fetch_biosample_metadata(
                     "esearch attempt %d/%d failed (batch %d/%d): %s. Retrying in %ds...",
                     attempt, _MAX_RETRIES, batch_i + 1, n_batches, exc, wait,
                 )
-                time.sleep(wait)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(wait)
         else:
             logger.error(
                 "esearch failed after %d retries for batch %d/%d (%d accessions skipped).",
@@ -923,7 +902,6 @@ def _fetch_biosample_metadata(
         if batch_i < n_batches - 1:
             time.sleep(inter_batch_sleep)
 
-    # --- Path 2: non-standard accessions -- legacy esearch+esummary+efetch ---
     if needs_resolution:
         logger.info(
             "Resolving %d non-BioSample accessions to NCBI UIDs via esearch...",
@@ -962,7 +940,6 @@ def _fetch_biosample_metadata(
 
 
 def _resolve_accessions_to_uids(accessions: list, esearch_batch: int = None) -> dict:
-    """Resolve non-BioSample accessions to numeric UIDs via esearch + esummary."""
     batch_size = esearch_batch if esearch_batch is not None else _ESEARCH_BATCH
     inter_req_sleep = 0.12 if ENTREZ_API_KEY else 0.34
     acc_to_uid = {}
@@ -988,7 +965,8 @@ def _resolve_accessions_to_uids(accessions: list, esearch_batch: int = None) -> 
                     "esearch attempt %d/%d failed: %s. Retrying in %ds...",
                     attempt, _MAX_RETRIES, exc, wait,
                 )
-                time.sleep(wait)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(wait)
         else:
             logger.warning(
                 "esearch failed for batch starting at index %d. These accessions will be skipped.",
@@ -1014,7 +992,8 @@ def _resolve_accessions_to_uids(accessions: list, esearch_batch: int = None) -> 
                         "esummary attempt %d/%d failed: %s. Retrying in %ds...",
                         attempt, _MAX_RETRIES, exc, wait,
                     )
-                    time.sleep(wait)
+                    if attempt < _MAX_RETRIES:
+                        time.sleep(wait)
             else:
                 continue
 
@@ -1038,7 +1017,6 @@ def _fetch_batch_via_history(
     retmax: int,
     synonym_lookup: dict = None,
 ):
-    """Fetch one page of BioSample records from an Entrez History slot."""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -1053,9 +1031,6 @@ def _fetch_batch_via_history(
             raw = handle.read()
             handle.close()
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
-        except ET.ParseError as exc:
-            logger.error("XML ParseError on efetch (retstart=%d): %s", retstart, exc)
-            return []
         except _TRANSIENT_EXCEPTIONS as exc:
             wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
             logger.warning(
@@ -1063,7 +1038,8 @@ def _fetch_batch_via_history(
                 "Retrying in %ds...",
                 attempt, _MAX_RETRIES, retstart, exc, wait,
             )
-            time.sleep(wait)
+            if attempt < _MAX_RETRIES:
+                time.sleep(wait)
     logger.error(
         "efetch failed after %d retries (retstart=%d, retmax=%d).",
         _MAX_RETRIES, retstart, retmax,
@@ -1072,7 +1048,6 @@ def _fetch_batch_via_history(
 
 
 def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
-    """Fetch BioSample records by explicit numeric UID list (legacy path)."""
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -1084,18 +1059,14 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             raw = handle.read()
             handle.close()
             return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
-        except ET.ParseError as exc:
-            logger.error(
-                "XML ParseError on efetch batch (malformed/truncated response): %s", exc
-            )
-            return []
         except _TRANSIENT_EXCEPTIONS as exc:
             wait = min(_RETRY_BASE_S ** attempt, _RETRY_MAX_S)
             logger.warning(
                 "Batch fetch attempt %d/%d failed (transient): %s. Retrying in %ds...",
                 attempt, _MAX_RETRIES, exc, wait,
             )
-            time.sleep(wait)
+            if attempt < _MAX_RETRIES:
+                time.sleep(wait)
     logger.error(
         "efetch failed after %d retries for %d UIDs.", _MAX_RETRIES, len(uid_batch)
     )
@@ -1110,9 +1081,12 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as exc:
-        logger.error("XML ParseError from NCBI response (truncated?): %s", exc)
-        logger.debug("Partial XML content (first 200 bytes): %r", xml_bytes[:200])
-        raise
+        # Handle entirely here; do not re-raise so callers never see double log lines.
+        logger.error(
+            "XML ParseError from NCBI efetch response (truncated XML?): %s. "
+            "First 200 bytes: %r", exc, xml_bytes[:200]
+        )
+        return []
 
     records = []
     for sample in root.findall(".//BioSample"):
@@ -1228,11 +1202,6 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     f"{existing}|{contact_name}" if existing else contact_name
                 )
 
-        # Antibiogram: stored as <Description><Comment><Table class="Antibiogram.1.0">
-        # with a <Header> row and <Body><Row><Cell> data rows. Present only in
-        # records from NCBI pathogen packages (Pathogen.cl.1.0, Pathogen.env.1.0, etc.).
-        # The list is assigned directly so that the single json.dumps(extras) below
-        # serializes it in one pass without double-encoding.
         antibiogram_rows = _parse_antibiogram(sample)
         if antibiogram_rows is not None:
             extras["antibiogram"] = antibiogram_rows

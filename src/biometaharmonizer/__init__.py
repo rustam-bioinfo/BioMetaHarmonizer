@@ -1,6 +1,6 @@
 __version__ = "0.6.0"
 __author__ = "Rustam"
-__email__ = ""
+__email__ = "rustam.bioinfo@gmail.com"
 
 from .ingestion import ingest
 from .key_mapper import KeyMapper
