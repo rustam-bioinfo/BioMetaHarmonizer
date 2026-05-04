@@ -9,6 +9,9 @@ description = "Harmonize messy NCBI BioSample metadata at scale"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
+authors = [
+    { name = "Rustam", email = "rustam.bioinfo@gmail.com" }
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
@@ -22,22 +25,22 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "pandas>=1.5",
-    "numpy>=1.24",
-    "biopython>=1.80",
-    "requests>=2.28",
+    "pandas>=1.5,<3.0",
+    "numpy>=1.24,<3.0",
+    "biopython>=1.80,<2.0",
+    "requests>=2.28,<3.0",
     "pycountry>=22.3",
-    "python-dateutil>=2.8",
-    "openpyxl>=3.0",
-    "pyarrow>=12.0",
-    "rapidfuzz>=3.0.0",
+    "python-dateutil>=2.8,<3.0",
+    "openpyxl>=3.0,<4.0",
+    "pyarrow>=12.0,<20.0",
+    "rapidfuzz>=3.0.0,<4.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/rustam-bioinfo/BioMetaHarmonizer"
 Documentation = "https://biometaharmonizer.readthedocs.io"
 "Bug Tracker" = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/issues"
-Changelog = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/releases"
+Changelog = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/CHANGELOG.md"
 
 [project.scripts]
 biometaharmonizer = "biometaharmonizer.cli:main"

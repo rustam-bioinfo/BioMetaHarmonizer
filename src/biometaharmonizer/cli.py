@@ -9,6 +9,19 @@ import time
 from pathlib import Path
 
 
+_VALID_FORMATS = ["csv", "tsv", "excel", "parquet"]
+
+
+def _lower_format(s: str) -> str:
+    """Argparse type: normalise format string to lowercase and validate."""
+    lowered = s.lower()
+    if lowered not in _VALID_FORMATS:
+        raise argparse.ArgumentTypeError(
+            f"invalid format {s!r}. Choose from: {', '.join(_VALID_FORMATS)}"
+        )
+    return lowered
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="biometaharmonizer",
@@ -44,7 +57,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--output", "-o", required=True, metavar="FILE")
     run_p.add_argument("--api-key", metavar="KEY", default=None)
     run_p.add_argument("--cache-dir", metavar="DIR", default=None)
-    run_p.add_argument("--format", "-f", choices=["csv", "tsv", "excel", "parquet"], default=None, metavar="FORMAT")
+    run_p.add_argument(
+        "--format", "-f",
+        type=_lower_format,
+        default=None,
+        metavar="FORMAT",
+        help="Output format: csv, tsv, excel, parquet (case-insensitive). "
+             "Inferred from output file extension when omitted.",
+    )
     run_p.add_argument("--summary", metavar="FILE", default=None)
     run_p.add_argument("--verbose", "-v", action="store_true", default=False)
     run_p.add_argument(
@@ -52,7 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=200,
-        help="Number of records per efetch request (default: 200).",
+        help="Records per efetch request (default: 200, max recommended: 500).",
     )
     run_p.add_argument(
         "--esearch-batch-size",

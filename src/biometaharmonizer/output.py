@@ -1,6 +1,8 @@
 """Module 6: Output -- write harmonized DataFrame to disk."""
 
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -13,7 +15,10 @@ _VALID_FORMATS = ("csv", "tsv", "excel", "parquet")
 
 def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
     """
-    Write a harmonized DataFrame to disk.
+    Write a harmonized DataFrame to disk using an atomic temp-file-then-rename
+    pattern. If the write is interrupted mid-stream (keyboard interrupt, OOM
+    kill, disk full), the destination file is never left in a partial/corrupt
+    state.
 
     Parameters
     ----------
@@ -44,14 +49,30 @@ def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if fmt == "csv":
-        df.to_csv(path, index=False, encoding="utf-8")
-    elif fmt == "tsv":
-        df.to_csv(path, index=False, sep="\t", encoding="utf-8")
-    elif fmt == "excel":
-        df.to_excel(path, index=False, engine="openpyxl")
-    elif fmt == "parquet":
-        df.to_parquet(path, index=False, engine="pyarrow")
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        suffix=path.suffix + ".tmp",
+        delete=False,
+    ) as tmp_fh:
+        tmp_path = Path(tmp_fh.name)
+
+    try:
+        if fmt == "csv":
+            df.to_csv(tmp_path, index=False, encoding="utf-8")
+        elif fmt == "tsv":
+            df.to_csv(tmp_path, index=False, sep="\t", encoding="utf-8")
+        elif fmt == "excel":
+            df.to_excel(tmp_path, index=False, engine="openpyxl")
+        elif fmt == "parquet":
+            df.to_parquet(tmp_path, index=False, engine="pyarrow")
+
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
     logger.info(
         "Output written: %s (%d records, %d columns)",

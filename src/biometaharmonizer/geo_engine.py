@@ -26,9 +26,6 @@ class GeoEngine:
     geo_sea_ocean : ocean/sea name for marine samples (str or NaN)
     geo_loc_raw   : original submitted string, present only when the value
                     could not be fully parsed (coordinate-only entries).
-                    For all successfully parsed country entries this field
-                    is NaN; the original value is always available in the
-                    source geo_loc_name column.
     """
 
     NULL_PATTERNS = re.compile(
@@ -46,9 +43,10 @@ class GeoEngine:
         re.IGNORECASE,
     )
 
-    # Strips a trailing parenthetical qualifier from a country string, e.g.
-    # 'United Kingdom (England, Wales & N. Ireland)' -> 'United Kingdom'.
-    _PAREN_RE = re.compile(r"\s*\(.*\)\s*$")
+    # LOW-8: Use negated char class [^)]* instead of greedy .* to strip only
+    # the LAST parenthetical group, not the entire span from first ( to last ).
+    # e.g. 'UK (Foo) and (Bar)' -> 'UK (Foo) and'  (not 'UK')
+    _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
     _UK_SUBCOUNTRY = {
         "england": "GB",
@@ -100,12 +98,31 @@ class GeoEngine:
         "netherlands antilles",
     }
 
+    # MED-5: Expanded ocean/sea/gulf/bay set with 30+ additional water bodies
+    # commonly found in NCBI BioSample marine submissions.
     _OCEAN_SEA = {
+        # Oceans
         "pacific ocean", "atlantic ocean", "indian ocean",
-        "arctic ocean", "southern ocean", "mediterranean sea",
-        "north sea", "caribbean sea", "south china sea",
+        "arctic ocean", "southern ocean",
+        # Major seas
+        "mediterranean sea", "north sea", "caribbean sea",
+        "south china sea", "east china sea", "yellow sea",
         "baltic sea", "red sea", "black sea", "caspian sea",
         "arabian sea", "coral sea", "tasman sea",
+        "bering sea", "barents sea", "norwegian sea",
+        "labrador sea", "andaman sea", "laccadive sea",
+        "banda sea", "celebes sea", "java sea", "timor sea",
+        "sulu sea", "philippine sea", "sea of japan",
+        "sea of okhotsk", "sea of azov", "ross sea",
+        "weddell sea", "scotia sea",
+        # Gulfs and bays
+        "persian gulf", "gulf of mexico", "gulf of aden",
+        "gulf of guinea", "gulf of oman", "gulf of california",
+        "gulf of thailand", "gulf of tonkin",
+        "bay of bengal", "bay of biscay", "hudson bay",
+        # Straits and channels
+        "english channel", "mozambique channel",
+        "strait of malacca",
     }
 
     _COORD_RE = re.compile(
@@ -152,14 +169,9 @@ class GeoEngine:
 
         country_str, region_str, locality_str = self._split_geo_string(value)
 
-        # Strip trailing parenthetical qualifiers FIRST, before any membership
-        # checks. This ensures inputs like "Pacific Ocean (NE)" and
-        # "United Kingdom (England, Wales & N. Ireland)" are normalised to
-        # "Pacific Ocean" and "United Kingdom" before lookup.
         country_str_clean = self._PAREN_RE.sub("", country_str).strip()
         lower_country = country_str_clean.lower()
 
-        # Ocean / sea: use the cleaned name for lookup AND for storage.
         if lower_country in self._OCEAN_SEA:
             result = dict(empty)
             result["geo_sea_ocean"] = country_str_clean
@@ -186,14 +198,6 @@ class GeoEngine:
         }
 
     def _split_geo_string(self, value):
-        """Split a geo_loc_name string into (country, region, locality).
-
-        Handles 'Country: Region, Locality' and fallback 'Country, Locality'.
-        When the country token contains a parenthesised qualifier with a comma
-        inside (e.g. 'United Kingdom (England, Wales & N. Ireland)') the naive
-        comma-split would break the country name, so the whole value is treated
-        as the country token in that case.
-        """
         country_str = region_str = locality_str = ""
         if ":" in value:
             parts = value.split(":", 1)
@@ -206,8 +210,6 @@ class GeoEngine:
             else:
                 region_str = remainder
         else:
-            # If a comma exists but is enclosed inside parentheses, treat the
-            # whole value as the country token to avoid splitting the name.
             if "," in value and not re.search(r"\([^)]*,[^)]*\)", value):
                 parts = value.split(",", 1)
                 country_str = parts[0].strip()

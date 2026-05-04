@@ -33,37 +33,35 @@ class DateEngine:
       - Approximate/uncertain:     ~2015, circa 2010, early March 2020, late 2019
     """
 
+    # Canonical null pattern set -- kept in sync with ingestion._NULL_PATTERNS
+    # so that DateEngine used directly on raw (un-ingested) data handles the
+    # same null variants.  (MED-3 / issue #54)
     NULL_PATTERNS = re.compile(
-        r"^("
-        r"missing|unknown|n/?a|not provided|not collected|na|none|--"
-        r"|missing:\s*.*"
-        r"|not applicable:\s*.*"
-        r"|not applicable"
-        r"|restricted access"
-        r")$",
+        r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
+        r"missing|misssing|missng|mising|"
+        r"unknown|unkown|unknwon|unknow|"
+        r"not\s+provided|not\s+collected|not\s+applicable|not\s+available|"
+        r"not\s+determined|not\s+recorded|not\s+reported|not\s+known|"
+        r"not\s+given|not\s+stated|not\s+specified|"
+        r"not\s+done|not\s+tested|not\s+sequenced|not\s+typed|"
+        r"unavailable|unspecified|undetermined|unidentified|"
+        r"restricted|restricted\s+access|withheld|confidential|"
+        r"tbd|tba|"
+        r"missing\s*:.*|not\s+applicable\s*:.*|data\s+agreement\s+established\s+pre-?2023)$",
         re.IGNORECASE,
     )
     YEAR_ONLY  = re.compile(r"^(\d{4})$")
     YEAR_MONTH = re.compile(r"^(\d{4})[-/](\d{1,2})$|^([A-Za-z]{3,9})[-/\s](\d{4})$")
     TWO_DIGIT_YEAR = re.compile(r"^\d{2}$")
 
-    # ------------------------------------------------------------------
-    # Range-detection patterns — checked in order, all before dateutil.
-    # The order matters: more-specific patterns first.
-    # ------------------------------------------------------------------
-
-    # Numeric INSDC slash: 2004-07/2004-12, 2021-01-15/2021-03-20
     _INSDC_SLASH_RANGE = re.compile(
         r"^\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?\s*/\s*\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?$"
     )
 
-    # Year-only range: 2018-2020, 2015/2017
-    # MUST be checked before dateutil — dateutil misparses 2018-2020 as 2018-01-20.
     _YEAR_ONLY_RANGE = re.compile(
         r"^(?P<start>\d{4})\s*[-/]\s*(?P<end>\d{4})$"
     )
 
-    # Numeric dash/word range: 2021-01-15 - 2021-03-20, 2020-06 to 2020-09
     _NUMERIC_DASH_RANGE = re.compile(
         r"^\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?"
         r"(?:\s*[\-\u2013\u2014]\s*|\s+to\s+)"
@@ -71,23 +69,19 @@ class DateEngine:
         re.IGNORECASE,
     )
 
-    # Named-month same year: July-December 2004, Jan-Mar 2019
     _NAMED_MONTH_SAME_YEAR = re.compile(
         r"^[A-Za-z]{3,9}\s*[-/]\s*[A-Za-z]{3,9}\s+\d{4}$"
     )
 
-    # Named-month cross-year: Oct 2020-Feb 2021, Dec 2018-Jan 2019
     _NAMED_MONTH_CROSS_YEAR = re.compile(
         r"^[A-Za-z]{3,9}\s+\d{4}\s*[-/]\s*[A-Za-z]{3,9}\s+\d{4}$"
     )
 
-    # Season strings: Spring 2019, Winter 2020-2021
     _SEASON_RANGE = re.compile(
         r"^(?:spring|summer|autumn|fall|winter)\s+\d{4}(?:\s*[-/]\s*\d{4})?$",
         re.IGNORECASE,
     )
 
-    # Approximate/uncertain: ~2015, circa 2010, early/mid/late + date fragment
     _APPROX_DATE = re.compile(
         r"^(?:~|circa\s|ca\.?\s|approx\.?\s|late\s|early\s|mid[-\s])\S",
         re.IGNORECASE,
@@ -95,27 +89,24 @@ class DateEngine:
 
     @staticmethod
     def _empty_row():
-        """Return a fresh dict for a missing/unresolvable date entry.
-
-        A factory is used (rather than a shared module-level constant) to
-        ensure every call site gets an independent object, preventing aliasing
-        if caller code mutates rows before the DataFrame is fully materialised.
-        """
         return {"collection_date": np.nan, "collection_date_range": np.nan}
 
     @staticmethod
     def _detect_range(value):
-        """
-        Return True if *value* represents a date range or approximate date
-        of any supported format.  Must be called before dateutil to prevent
-        silent misparsing (e.g. 2018-2020 -> 2018-01-20 by dateutil).
-        """
         v = value.strip()
         if DateEngine._INSDC_SLASH_RANGE.match(v):
             return True
         m = DateEngine._YEAR_ONLY_RANGE.match(v)
-        if m and int(m.group("start")) != int(m.group("end")):
-            return True
+        if m:
+            start, end = int(m.group("start")), int(m.group("end"))
+            if start != end:
+                if start > end:
+                    logger.warning(
+                        "Inverted year range detected: %r (start=%d > end=%d). "
+                        "Preserving verbatim in collection_date_range.",
+                        v, start, end,
+                    )
+                return True
         if DateEngine._NUMERIC_DASH_RANGE.match(v):
             return True
         if DateEngine._NAMED_MONTH_SAME_YEAR.match(v):
@@ -127,10 +118,6 @@ class DateEngine:
         if DateEngine._APPROX_DATE.match(v):
             return True
         return False
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def parse(self, series):
         """
@@ -158,10 +145,6 @@ class DateEngine:
         results = series.map(lambda v: cache.get(v) if pd.notna(v) else self._empty_row())
         return pd.DataFrame(results.tolist(), index=series.index)
 
-    # ------------------------------------------------------------------
-    # Internal parsing
-    # ------------------------------------------------------------------
-
     def _parse_single(self, value):
         return self._parse_single_with_range(value)["collection_date"]
 
@@ -175,16 +158,12 @@ class DateEngine:
         if self.NULL_PATTERNS.match(value):
             return self._empty_row()
 
-        # Gate: any range or approximate date -> collection_date is NaN, always.
-        # This must run before TWO_DIGIT_YEAR and before dateutil to prevent
-        # silent misparsing of patterns like 2018-2020.
         if self._detect_range(value):
             return {
                 "collection_date": np.nan,
                 "collection_date_range": value,
             }
 
-        # Reject bare two-digit strings
         if self.TWO_DIGIT_YEAR.match(value):
             logger.warning("Rejecting two-digit year string: '%s'", value)
             return self._empty_row()
@@ -193,7 +172,6 @@ class DateEngine:
         return {"collection_date": parsed, "collection_date_range": np.nan}
 
     def _parse_date_string(self, value):
-        """Parse a single point-date string into ISO 8601 truncated form."""
         if self.YEAR_ONLY.match(value):
             return value
         if self.YEAR_MONTH.match(value):
