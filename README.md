@@ -29,7 +29,7 @@ pip install -e .
 
 Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
 
-The package ships with pre-built schema files (`unified.json`, `one_health_dictionaries.json`, `ncbi_attributes.xml`). The rebuild scripts in `scripts/` are only needed when you want to refresh those files from upstream sources — see [Rebuilding schema files](#rebuilding-schema-files).
+The package ships with a minimal hand-curated `one_health_dictionaries.json`. For production-quality One Health classification — in particular, full NCBI taxonomy coverage of host species names — you should rebuild this file before use. See [Rebuilding schema files](#rebuilding-schema-files).
 
 ---
 
@@ -372,11 +372,13 @@ Handling notes:
 
 **Classification pipeline per record:**
 
-1. `host` field: institution guard (strips culture collection prefixes; returns Lab if residual < 4 chars), then `host_to_category` dictionary lookup, then text classification fallback.
+1. `host` field: institution guard (strips culture collection prefixes; returns Lab if residual < 4 chars), then bracket/parenthesis annotation stripping (e.g. `[NCBITaxon:9825]`, `(Linnaeus 1758)`), then `host_to_category` dictionary lookup with progressive right-token-drop fallback for trinomial/subspecies names, then text classification fallback.
 2. `isolation_source`, `env_medium`, `env_local_scale`: matched against unambiguous human/animal term lists, then tier1 patterns, then rapidfuzz fuzzy fallback against the ontology map.
 3. `sample_type`: domain-level signal; used to set category if no specimen field matched.
 4. `env_broad_scale`: supporting signal only; contributes a corroboration bonus but does not set the primary category on its own.
 5. Pass 2 resolves the winning category from accumulated domain/specimen/supporting evidence.
+
+**Host trinomial / subspecies fallback.** When a host value like `Equus ferus caballus` is not found as an exact entry in `host_to_category`, the classifier progressively drops tokens from the right (`Equus ferus`, then `Equus`) until a match is found or all prefixes are exhausted. This fallback is active only when every token in the name is composed solely of letters or hyphens (no digits or strain identifiers), so free-text phrases are never misclassified via this path. The bundled `one_health_dictionaries.json` contains only a hand-curated seed; after running `scripts/build_dictionaries.py` the full NCBI taxonomy is present and the fallback is rarely needed.
 
 ---
 
@@ -409,6 +411,45 @@ Format strings are case-insensitive. If `--format` is not specified on the CLI, 
 
 ---
 
+## Rebuilding schema files
+
+The package ships with pre-built schema files. These are sufficient for basic use, but rebuilding them is strongly recommended before processing large or taxonomically diverse datasets.
+
+### `build_dictionaries.py` — One Health dictionary
+
+The bundled `one_health_dictionaries.json` is a minimal hand-curated seed. It covers common host names and key ontology terms, but it does **not** include the full NCBI taxonomy. Without rebuilding, trinomial host names (e.g. `Equus ferus caballus`, `Bos taurus indicus`) and many uncommon species will fall back to the progressive prefix-drop heuristic instead of resolving from an authoritative entry.
+
+To build the full dictionary, run:
+
+```bash
+python scripts/build_dictionaries.py \
+    --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
+    --output src/biometaharmonizer/schemas/one_health_dictionaries.json
+```
+
+This queries the OLS4 API (ENVO, FoodOn, UBERON, Plant Ontology) and downloads the NCBI taxonomy dump (~65 MB) to populate `host_to_category` with scientific names, common names, and equivalent names for all vertebrates and plants. The full build takes a few minutes depending on network speed.
+
+Options:
+
+| Flag | Description |
+|---|---|
+| `--taxdmp PATH` | Path to a pre-downloaded `taxdmp.zip` or an extracted directory containing `names.dmp` and `nodes.dmp`. Skips the ~65 MB NCBI download. |
+| `--skip-ncbi` | Skip NCBI taxonomy entirely (OLS4 terms only). |
+| `--skip-ols` | Skip OLS4 queries (NCBI taxonomy only). |
+| `--umls-key KEY` | Optional UMLS API key for additional synonym expansion. |
+
+The hand-curated entries in the base file always win over ontology-derived data (`merge_strategy: base_wins`).
+
+### `build_ncbi_attribute_cache.py`
+
+Downloads the official NCBI BioSample attribute harmonization table and stores it as `schemas/ncbi_attributes.xml`.
+
+```bash
+python scripts/build_ncbi_attribute_cache.py
+```
+
+---
+
 ## Scripts
 
 ### `generate_summary_report.py`
@@ -429,24 +470,6 @@ python scripts/generate_summary_report.py \
 ```
 
 Requires `plotly>=5.14` for HTML output (`pip install plotly`). `kaleido` is optional and only needed for PDF export.
-
-### `build_dictionaries.py`
-
-Rebuilds `one_health_dictionaries.json` from OLS4 ontologies, NCBI Taxonomy, and optional UMLS synonyms.
-
-```bash
-python scripts/build_dictionaries.py \
-    --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
-    --output src/biometaharmonizer/schemas/one_health_dictionaries.json
-```
-
-### `build_ncbi_attribute_cache.py`
-
-Downloads the official NCBI BioSample attribute harmonization table and stores it as `schemas/ncbi_attributes.xml`.
-
-```bash
-python scripts/build_ncbi_attribute_cache.py
-```
 
 ---
 
