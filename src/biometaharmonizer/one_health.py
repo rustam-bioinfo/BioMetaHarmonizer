@@ -108,6 +108,18 @@ _HOST_BRACKET_RE = re.compile(r"\s*[\[\(][^\]\)]*[\]\)]\s*")
 # Used by _taxonomic_fallback to detect tokens that look like taxonomic words.
 _TAXON_TOKEN_RE = re.compile(r"^[a-zA-Z\-]+$")
 
+# Matches "tissue/organ (species name)" patterns in specimen fields.
+# Captures the parenthetical content for host_to_category lookup.
+# Examples: "Feces (Canis lupus familiaris)", "Kidney (Equus Caballus)"
+_SPECIES_IN_PARENS_RE = re.compile(r"^[^(]+\(([^)]+)\)\s*$")
+
+# Matches "a blood/feces/... sample of <animal> origin" patterns.
+# Captures the animal noun for host_to_category lookup.
+_ANIMAL_ORIGIN_RE = re.compile(
+    r"\ba\s+(?:blood|feces|fecal|urine|tissue|swab)\s+(?:sample\s+)?of\s+(\w+)\s+origin\b",
+    re.IGNORECASE,
+)
+
 
 def _taxonomic_fallback(name_lower, host_to_category):
     """
@@ -481,6 +493,29 @@ class OneHealthClassifier:
     # Two-pass evidence integration
     # ------------------------------------------------------------------
 
+    def _lookup_species_in_parens(self, val_str):
+        """
+        For specimen fields (isolation_source, env_medium, env_local_scale),
+        detect the pattern '<tissue> (<species name>)' and resolve the
+        parenthetical content via host_to_category + _taxonomic_fallback.
+
+        Returns (category, species_key) or (None, None).
+        """
+        m = _SPECIES_IN_PARENS_RE.match(val_str.strip())
+        if not m:
+            return None, None
+        species_raw = m.group(1).strip().lower()
+        cat = self._host_to_category.get(species_raw)
+        if cat is None:
+            cat = _taxonomic_fallback(species_raw, self._host_to_category)
+        if cat is None:
+            norm = _normalize_host_name(m.group(1).strip())
+            cat = self._host_to_category.get(norm)
+            if cat is None:
+                cat = _taxonomic_fallback(norm, self._host_to_category)
+            species_raw = norm if cat else species_raw
+        return cat, species_raw
+
     def _integrate_evidence(self, row):
         out = {
             "one_health_category":       "Unclassified",
@@ -599,6 +634,22 @@ class OneHealthClassifier:
                 elif domain_category == cat:
                     corroborated = True
                 continue
+
+            # For specimen fields, try species-in-parens extraction before
+            # the standard text classification pipeline.
+            if field in self._SPECIMEN_FIELDS:
+                paren_cat, paren_term = self._lookup_species_in_parens(val_str)
+                if paren_cat is not None:
+                    fw = _FIELD_WEIGHTS.get(field, 1.00)
+                    if specimen_category is None:
+                        specimen_category     = paren_cat
+                        specimen_term         = paren_term
+                        specimen_field        = field
+                        specimen_specificity  = 0.90
+                        specimen_field_weight = fw
+                    elif specimen_category == paren_cat:
+                        corroborated = True
+                    continue
 
             layer = self._classify_text(val_str)
 
@@ -780,6 +831,10 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
+        # Normalize underscores to spaces so that values like
+        # "Environmental_bathroom" or "Blood_Blood" are tokenized correctly.
+        text = text.replace("_", " ")
+
         # Strip culture collection prefixes (ATCC, DSM, NCTC, ...) and broad
         # institution keywords, then continue classification on the residual.
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
@@ -790,6 +845,24 @@ class OneHealthClassifier:
         text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
         if not text:
             return unclassified
+
+        # Resolve "a <specimen> of <animal> origin" before abbreviation
+        # expansion so the pattern matches the original capitalization.
+        origin_m = _ANIMAL_ORIGIN_RE.search(text)
+        if origin_m:
+            animal_noun = origin_m.group(1).lower()
+            cat = self._host_to_category.get(animal_noun)
+            if cat is None:
+                cat = _taxonomic_fallback(animal_noun, self._host_to_category)
+            if cat is not None:
+                return {
+                    "one_health_category":    cat,
+                    "one_health_term":        animal_noun,
+                    "one_health_confidence":  0.90,
+                    "one_health_term_source": "host_dict",
+                    "one_health_processing":  np.nan,
+                    "one_health_setting":     np.nan,
+                }
 
         text = self._expand_abbreviations(text)
         working = self._normalize_synonyms(text)
