@@ -99,6 +99,44 @@ _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
 
+# Strips bracket and parenthesis annotations from host values only.
+# Applied before host_to_category lookup in _integrate_evidence.
+# Examples: "Sus scrofa domesticus [NCBITaxon:9825]" -> "Sus scrofa domesticus"
+#           "Gallus gallus (Linnaeus 1758)" -> "Gallus gallus"
+_HOST_BRACKET_RE = re.compile(r"\s*[\[\(][^\]\)]*[\]\)]\s*")
+
+# Used by _taxonomic_fallback to detect tokens that look like taxonomic words.
+_TAXON_TOKEN_RE = re.compile(r"^[a-zA-Z\-]+$")
+
+
+def _taxonomic_fallback(name_lower, host_to_category):
+    """
+    Progressive right-token-drop fallback for trinomial / subspecies names.
+
+    Given a name like "equus ferus caballus" that is absent from
+    host_to_category, tries progressively shorter prefixes:
+      "equus ferus caballus" -> miss
+      "equus ferus"          -> hit (if present) -> return category
+      "equus"                -> (would try if still no hit)
+
+    Only fires when:
+      - the name has 2-4 tokens (binomial, trinomial, quadrinomial)
+      - every token consists solely of letters or hyphens (no digits,
+        no punctuation that would indicate a non-taxonomic string)
+
+    Returns the category string on the first prefix hit, or None.
+    """
+    tokens = name_lower.split()
+    if not (2 <= len(tokens) <= 4):
+        return None
+    if not all(_TAXON_TOKEN_RE.match(t) for t in tokens):
+        return None
+    for n in range(len(tokens) - 1, 0, -1):
+        candidate = " ".join(tokens[:n])
+        if candidate in host_to_category:
+            return host_to_category[candidate]
+    return None
+
 
 def _is_institution_host(text):
     if _INSTITUTION_KEYWORD_RE.search(text):
@@ -271,7 +309,6 @@ class OneHealthClassifier:
             k.lower(): v
             for k, v in self._dicts.get("host_to_category", {}).items()
         }
-
         self._ambiguous_terms = {
             t.lower() for t in self._dicts.get("ambiguous_specimen_terms", [])
         }
@@ -351,10 +388,6 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
 
-        # MED-4: per-instance LRU cache for _classify_text to avoid redundant
-        # pattern matching when the same text value appears in many records.
-        # maxsize=4096 covers the long tail of common isolation_source values
-        # (e.g. "blood", "human", "clinical") without unbounded memory growth.
         self._classify_text = functools.lru_cache(maxsize=4096)(self._classify_text_uncached)
 
     # ------------------------------------------------------------------
@@ -493,13 +526,30 @@ class OneHealthClassifier:
                 if _is_institution_host(val_str):
                     continue
 
-                host_key = val_str.lower()
+                # Strip bracket/parenthesis annotations from the host value
+                # before lookup (e.g. [NCBITaxon:9825], (Linnaeus 1758)).
+                # Applied only here; other fields may carry useful () / [] content.
+                host_clean = _HOST_BRACKET_RE.sub(" ", val_str).strip()
+
+                host_key = host_clean.lower()
                 host_cat = self._host_to_category.get(host_key)
+
                 if host_cat is None:
-                    norm_key = _normalize_host_name(val_str)
+                    norm_key = _normalize_host_name(host_clean)
                     host_cat = self._host_to_category.get(norm_key)
                     lookup_term = norm_key
                 else:
+                    lookup_term = host_key
+
+                # Progressive right-token-drop fallback for trinomials /
+                # subspecies names not yet in host_to_category.
+                if host_cat is None:
+                    host_cat = _taxonomic_fallback(host_key, self._host_to_category)
+                    if host_cat is None:
+                        host_cat = _taxonomic_fallback(
+                            _normalize_host_name(host_clean),
+                            self._host_to_category,
+                        )
                     lookup_term = host_key
 
                 if host_cat is not None:
