@@ -99,20 +99,6 @@ _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
 
-_LAB_CONTEXT_RE = re.compile(
-    r"\b(?:laboratory|laboratories|lab\b|in\s+vitro|in\s+vivo)\b",
-    re.IGNORECASE,
-)
-
-# MED-10: matches culture collection accession numbers (digits only, or
-# letter-prefix + digits, e.g. "25922", "BAA-1705", "ATCC-25922").
-# Used after stripping institution prefixes to decide if residual is a
-# collection number (-> Lab) rather than a biological term (-> continue).
-_COLLECTION_NUMBER_RE = re.compile(
-    r"^\s*[A-Z]{0,4}-?\d+[A-Z]?\s*$",
-    re.IGNORECASE,
-)
-
 
 def _is_institution_host(text):
     if _INSTITUTION_KEYWORD_RE.search(text):
@@ -214,12 +200,9 @@ _CLASSIFY_TEXT_KEYS = frozenset({
 _VALID_CATEGORIES = frozenset({
     "Human",
     "Animal",
-    "Aquatic",
-    "Wildlife",
     "Plant",
     "Food",
     "Environmental",
-    "Lab",
     "Unclassified",
 })
 
@@ -576,9 +559,6 @@ class OneHealthClassifier:
 
             cat = layer.get("one_health_category")
 
-            if cat == "Lab":
-                continue
-
             if cat is None or cat == "Unclassified":
                 continue
 
@@ -733,10 +713,6 @@ class OneHealthClassifier:
         Returns dict with keys:
           one_health_category, one_health_term, one_health_confidence,
           one_health_term_source, one_health_processing, one_health_setting
-
-        Lab category is returned ONLY when a culture collection prefix (ATCC,
-        DSM, NCTC, etc.) is the sole meaningful content after stripping,
-        determined by _COLLECTION_NUMBER_RE (MED-10).
         """
         unclassified = {
             "one_health_category":    "Unclassified",
@@ -754,27 +730,14 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
-        # Institution guard — two levels:
-        # Level 1: culture collection prefixes (ATCC, DSM, NCTC, ...)
-        #   Strip them; if residual is empty or matches _COLLECTION_NUMBER_RE
-        #   (digits / letter-prefix+digits like "25922" or "BAA-1705") -> Lab.
-        # Level 2: broad institution keywords -> strip and continue.
+        # Strip culture collection prefixes (ATCC, DSM, NCTC, ...) and broad
+        # institution keywords, then continue classification on the residual.
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
-            stripped = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
-            # MED-10: use regex to match collection accession numbers of any
-            # length rather than the old hard-coded < 4 char threshold.
-            if not stripped or _COLLECTION_NUMBER_RE.match(stripped):
-                return {
-                    "one_health_category":    "Lab",
-                    "one_health_term":        text[:60],
-                    "one_health_confidence":  0.9,
-                    "one_health_term_source": "institution",
-                    "one_health_processing":  np.nan,
-                    "one_health_setting":     np.nan,
-                }
+            text = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
+            if not text:
+                return unclassified
 
         text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
-        text = _LAB_CONTEXT_RE.sub("", text).strip()
         if not text:
             return unclassified
 
