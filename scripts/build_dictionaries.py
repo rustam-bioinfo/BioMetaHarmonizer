@@ -725,7 +725,7 @@ def fetch_umls_synonyms(api_key):
 def _resolve_collisions(base):
     """
     Detect terms that appear in multiple One Health categories or conflict
-    with other dictionary sections, and record them in
+    with authoritative dictionary sections, and record them in
     base["ambiguous_category_terms"] instead of silently keeping them in
     whichever category happened to be populated first.
 
@@ -734,9 +734,18 @@ def _resolve_collisions(base):
     1. Intra-ontology_map: same term string present in 2+ category lists
        (e.g. "blood" in both Food and Animal).
 
-    2. Cross-section: a term in ontology_map also exists in host_to_category,
-       unambiguous_human_terms, unambiguous_animal_terms, or
-       ambiguous_specimen_terms.
+    2. Cross-section (authoritative only): a term in ontology_map also exists
+       in host_to_category, unambiguous_human_terms, or
+       unambiguous_animal_terms.
+
+    NOTE: ambiguous_specimen_terms is intentionally NOT treated as an
+    authoritative conflict source. It is a tiebreaker list used during
+    classification when no domain signal is present. A term that is already
+    uniquely placed in one ontology_map category should NOT be evicted just
+    because it also appears in ambiguous_specimen_terms — doing so causes
+    correctly categorized entries (e.g. Food, Environmental, Plant ontology
+    terms like "fruit", "extract", "wash") to be silently suppressed and
+    produce Unclassified outputs.
 
     In both cases the term is removed from the ontology_map category list(s)
     and added to ambiguous_category_terms with the list of conflicting sources.
@@ -756,11 +765,11 @@ def _resolve_collisions(base):
         for t in terms:
             term_to_cats.setdefault(t, []).append(cat)
 
-    # Cross-section lookup sets
-    host_keys    = set(base.get("host_to_category", {}).keys())
-    human_set    = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
-    animal_set   = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
-    specimen_set = set(t.lower() for t in base.get("ambiguous_specimen_terms", []))
+    # Authoritative cross-section lookup sets.
+    # ambiguous_specimen_terms is deliberately excluded — see docstring.
+    host_keys  = set(base.get("host_to_category", {}).keys())
+    human_set  = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
+    animal_set = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
 
     intra_count = 0
     cross_count = 0
@@ -768,15 +777,13 @@ def _resolve_collisions(base):
     for term, cats in term_to_cats.items():
         conflicts = list(cats)
 
-        # cross-section conflicts
+        # Only authoritative sections trigger cross-section eviction
         if term in host_keys:
             conflicts.append("host_to_category")
         if term in human_set:
             conflicts.append("unambiguous_human_terms")
         if term in animal_set:
             conflicts.append("unambiguous_animal_terms")
-        if term in specimen_set:
-            conflicts.append("ambiguous_specimen_terms")
 
         has_intra = len(cats) > 1
         has_cross = len(conflicts) > len(cats)
@@ -785,7 +792,7 @@ def _resolve_collisions(base):
             continue
 
         # base_wins: if term was hand-curated into exactly one ontology_map
-        # category and has no cross-section conflict, leave it alone
+        # category and has no authoritative cross-section conflict, leave it alone
         if not has_cross and len(cats) == 1:
             continue
 
@@ -908,8 +915,10 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
         "collision_stats": collision_stats,
         "note": (
             "Hand-curated entries always override ontology-derived entries. "
-            "Terms present in multiple categories are recorded in "
-            "ambiguous_category_terms for context-aware disambiguation. "
+            "Terms with intra-ontology_map or authoritative cross-section "
+            "conflicts are recorded in ambiguous_category_terms. "
+            "ambiguous_specimen_terms is a tiebreaker and does NOT evict "
+            "terms from ontology_map. "
             "Rebuild by running scripts/build_dictionaries.py."
         ),
     }
