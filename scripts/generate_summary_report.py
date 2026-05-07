@@ -1,7 +1,21 @@
+#!/usr/bin/env python3
 """
-BioSample HTML Report Generator
-Generates an interactive, self-contained HTML report from a BioMetaHarmonizer-style Excel file.
-Usage: python biosample_report.py input.xlsx [output.html]
+generate_summary_report.py
+
+Generates an interactive, self-contained HTML report from a
+BioMetaHarmonizer-style Excel, CSV, TSV, or Parquet file.
+
+Usage
+-----
+  python scripts/generate_summary_report.py input.xlsx [output.html]
+
+Dependencies
+------------
+  pandas>=1.5
+  numpy
+  plotly>=2.32  (CDN, no local install required at runtime)
+  openpyxl      (for .xlsx input)
+  pyarrow       (for .parquet input, optional)
 """
 
 import sys
@@ -9,11 +23,23 @@ import os
 import json
 import re
 import argparse
+import logging
 from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
 import numpy as np
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# Maximum rows serialised into the inline data table.
+# Larger datasets are truncated to keep HTML file size manageable.
+_TABLE_ROW_CAP = 5_000
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -30,6 +56,10 @@ def load_data(path: str) -> pd.DataFrame:
         df = pd.read_excel(path, dtype=str)
     elif ext == ".csv":
         df = pd.read_csv(path, dtype=str)
+    elif ext == ".tsv":
+        df = pd.read_csv(path, sep="\t", dtype=str)
+    elif ext == ".parquet":
+        df = pd.read_parquet(path).astype(str).replace("nan", None)
     else:
         raise ValueError(f"Unsupported file format: {ext}")
     df = df.where(df.notna(), None)
@@ -103,10 +133,20 @@ def oh_category_json(df: pd.DataFrame) -> str:
 
 
 def confidence_json(df: pd.DataFrame) -> str:
+    """
+    Bin one_health_confidence (float 0-1) into four ranges so the chart
+    is readable instead of plotting individual float values as categories.
+    """
     c = col(df, "one_health_confidence")
     if c is None:
         return "null"
-    return value_counts_json(c)
+    numeric = pd.to_numeric(c, errors="coerce").dropna()
+    if numeric.empty:
+        return "null"
+    bins = [0.0, 0.30, 0.60, 0.85, 1.001]
+    labels = ["0.00-0.30", "0.30-0.60", "0.60-0.85", "0.85-1.00"]
+    counts = pd.cut(numeric, bins=bins, labels=labels, right=False).value_counts().sort_index()
+    return json.dumps({"labels": counts.index.tolist(), "values": counts.values.tolist()})
 
 
 def evidence_json(df: pd.DataFrame) -> str:
@@ -191,23 +231,31 @@ def df_to_records(df: pd.DataFrame) -> str:
     remaining = [c for c in df.columns if c not in available and c != "_extra_attributes"]
     final_cols = available + remaining
     sub = df[final_cols].fillna("")
+
+    if len(sub) > _TABLE_ROW_CAP:
+        logger.warning(
+            "Data table truncated to %d rows (dataset has %d). "
+            "Increase _TABLE_ROW_CAP if needed.",
+            _TABLE_ROW_CAP, len(sub),
+        )
+        sub = sub.iloc[:_TABLE_ROW_CAP]
+
     return json.dumps({"columns": final_cols, "rows": sub.values.tolist()})
 
 
 def kv_stats(df: pd.DataFrame) -> dict:
     total = len(df)
-    has_assembly = 0
+
     c_ref = col(df, "assembly_accession_refseq")
-    c_gb = col(df, "assembly_accession_genbank")
-    if c_ref is not None:
-        has_assembly += (c_ref.notna() & (c_ref.str.strip() != "")).sum()
-    elif c_gb is not None:
-        has_assembly += (c_gb.notna() & (c_gb.str.strip() != "")).sum()
+    c_gb  = col(df, "assembly_accession_genbank")
+    has_ref = (c_ref.notna() & (c_ref.str.strip() != "")) if c_ref is not None else pd.Series(False, index=df.index)
+    has_gb  = (c_gb.notna()  & (c_gb.str.strip()  != "")) if c_gb  is not None else pd.Series(False, index=df.index)
+    has_assembly = int((has_ref | has_gb).sum())
 
     has_sra = 0
     c_sra = col(df, "sra_accession")
     if c_sra is not None:
-        has_sra = (c_sra.notna() & (c_sra.str.strip() != "")).sum()
+        has_sra = int((c_sra.notna() & (c_sra.str.strip() != "")).sum())
 
     n_taxa = 0
     c_tax = col(df, "organism_name", "taxonomy_name")
@@ -219,22 +267,22 @@ def kv_stats(df: pd.DataFrame) -> dict:
     if c_geo is not None:
         n_countries = c_geo.dropna().nunique()
 
-    n_bioprojcts = 0
+    n_bioprojects = 0
     c_bp = col(df, "bioproject_accession")
     if c_bp is not None:
-        n_bioprojcts = c_bp.dropna().nunique()
+        n_bioprojects = c_bp.dropna().nunique()
 
     completeness = round(df.notna().values.sum() / (df.shape[0] * df.shape[1]) * 100, 1)
 
     return {
-        "total": total,
-        "has_assembly": int(has_assembly),
-        "has_sra": int(has_sra),
-        "n_taxa": int(n_taxa),
-        "n_countries": int(n_countries),
-        "n_bioprojects": int(n_bioprojcts),
-        "n_columns": len(df.columns),
-        "completeness": completeness,
+        "total":         total,
+        "has_assembly":  has_assembly,
+        "has_sra":       has_sra,
+        "n_taxa":        int(n_taxa),
+        "n_countries":   int(n_countries),
+        "n_bioprojects": int(n_bioprojects),
+        "n_columns":     len(df.columns),
+        "completeness":  completeness,
     }
 
 
@@ -416,6 +464,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h3>Access &amp; Status</h3>
       <div id="fig-access" style="height:280px"></div>
     </div>
+    <div class="chart-card" id="chart-bioprojects-ov" style="min-height:320px">
+      <h3>Top BioProjects (top 25)</h3>
+      <div id="fig-bioprojects-ov" style="height:280px"></div>
+    </div>
   </div>
 </div>
 
@@ -481,7 +533,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="fig-oh-cat" style="height:300px"></div>
     </div>
     <div class="chart-card" style="min-height:340px">
-      <h3>Confidence Score</h3>
+      <h3>Confidence Score Distribution</h3>
       <div id="fig-oh-conf" style="height:300px"></div>
     </div>
     <div class="chart-card wide" style="min-height:340px">
@@ -564,7 +616,6 @@ function showSection(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('section-' + name).classList.add('active');
   document.getElementById('nav-' + name).classList.add('active');
-  // lazy render charts on first visit
   renderSection(name);
 }
 
@@ -641,12 +692,12 @@ function renderSection(name) {
     pie('fig-taxonomy-ov', TAX_DATA);
     pie('fig-geo-ov', GEO_DATA);
     pie('fig-sample-type', STYPE_DATA);
-    // combined access+status donut
     const accessData = ACCESS_DATA && STATUS_DATA
       ? { labels: [...(ACCESS_DATA.labels||[]), ...(STATUS_DATA.labels||[])],
           values: [...(ACCESS_DATA.values||[]), ...(STATUS_DATA.values||[])] }
       : (ACCESS_DATA || STATUS_DATA);
     pie('fig-access', accessData);
+    barH('fig-bioprojects-ov', BPROJ_DATA, 280);
   }
 
   if (name === 'taxonomy') {
@@ -749,7 +800,6 @@ function buildTable() {
   tblAll = rows;
   tblFiltered = rows;
 
-  // header
   const thead = document.getElementById('thead');
   const tr = document.createElement('tr');
   cols.forEach((c, i) => {
@@ -760,7 +810,6 @@ function buildTable() {
   });
   thead.appendChild(tr);
 
-  // column filter select
   const sel = document.getElementById('col-filter');
   cols.forEach((c, i) => {
     const opt = document.createElement('option');
@@ -881,41 +930,41 @@ def generate_report(input_path: str, output_path: str | None = None) -> str:
     stats = kv_stats(df)
 
     html = HTML_TEMPLATE
-    html = html.replace("__GEN_DATE__",   datetime.now().strftime("%Y-%m-%d %H:%M"))
+    html = html.replace("__GEN_DATE__",    datetime.now().strftime("%Y-%m-%d %H:%M"))
     html = html.replace("__SOURCE_FILE__", Path(input_path).name)
-    html = html.replace("__STATS__",      json.dumps(stats))
-    html = html.replace("__TAX_DATA__",   taxonomy_json(df))
-    html = html.replace("__GEO_DATA__",   geo_json(df))
-    html = html.replace("__HOST_DATA__",  host_json(df))
-    html = html.replace("__TIMELINE__",   timeline_json(df))
-    html = html.replace("__SUBMIT_TL__",  submission_timeline_json(df))
-    html = html.replace("__OH_CAT__",     oh_category_json(df))
-    html = html.replace("__OH_CONF__",    confidence_json(df))
-    html = html.replace("__OH_EVID__",    evidence_json(df))
-    html = html.replace("__COMP_DATA__",  completeness_json(df))
-    html = html.replace("__STYPE_DATA__", sample_type_json(df))
-    html = html.replace("__ACCESS_DATA__",access_json(df))
-    html = html.replace("__STATUS_DATA__",status_json(df))
-    html = html.replace("__HDISC_DATA__", host_disease_json(df))
-    html = html.replace("__ISOL_DATA__",  isolation_source_json(df))
-    html = html.replace("__BPROJ_DATA__", bioproject_json(df))
-    html = html.replace("__TABLE_DATA__", df_to_records(df))
+    html = html.replace("__STATS__",       json.dumps(stats))
+    html = html.replace("__TAX_DATA__",    taxonomy_json(df))
+    html = html.replace("__GEO_DATA__",    geo_json(df))
+    html = html.replace("__HOST_DATA__",   host_json(df))
+    html = html.replace("__TIMELINE__",    timeline_json(df))
+    html = html.replace("__SUBMIT_TL__",   submission_timeline_json(df))
+    html = html.replace("__OH_CAT__",      oh_category_json(df))
+    html = html.replace("__OH_CONF__",     confidence_json(df))
+    html = html.replace("__OH_EVID__",     evidence_json(df))
+    html = html.replace("__COMP_DATA__",   completeness_json(df))
+    html = html.replace("__STYPE_DATA__",  sample_type_json(df))
+    html = html.replace("__ACCESS_DATA__", access_json(df))
+    html = html.replace("__STATUS_DATA__", status_json(df))
+    html = html.replace("__HDISC_DATA__",  host_disease_json(df))
+    html = html.replace("__ISOL_DATA__",   isolation_source_json(df))
+    html = html.replace("__BPROJ_DATA__",  bioproject_json(df))
+    html = html.replace("__TABLE_DATA__",  df_to_records(df))
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
+    logger.info("Report written to: %s", output_path)
     return output_path
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate an interactive HTML report from a BioMetaHarmonizer Excel/CSV file.")
-    parser.add_argument("input", help="Input .xlsx or .csv file")
+        description="Generate an interactive HTML report from a BioMetaHarmonizer Excel/CSV/TSV/Parquet file.")
+    parser.add_argument("input", help="Input .xlsx, .csv, .tsv, or .parquet file")
     parser.add_argument("output", nargs="?", default=None,
                         help="Output HTML file (default: <input>_report.html)")
     args = parser.parse_args()
-    out = generate_report(args.input, args.output)
-    print(f"Report written to: {out}")
+    generate_report(args.input, args.output)
 
 
 if __name__ == "__main__":
