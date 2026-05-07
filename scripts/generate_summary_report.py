@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # Larger datasets are truncated to keep HTML file size manageable.
 _TABLE_ROW_CAP = 5_000
 
+# Maximum distinct values shown per categorical chart.
+_CHART_TOP_N = 25
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -68,16 +71,38 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def col(df: pd.DataFrame, *names) -> pd.Series | None:
-    for n in names:
+    """
+    Return the first column from *names* that exists in df.
+    Logs a DEBUG message when a fallback name is used instead of the first choice.
+    """
+    for i, n in enumerate(names):
         if n in df.columns:
+            if i > 0:
+                logger.debug(
+                    "Column '%s' not found; falling back to '%s'.",
+                    names[0], n,
+                )
             return df[n]
     return None
 
 
-def value_counts_json(series) -> str:
+def value_counts_json(series, top_n: int = _CHART_TOP_N) -> str:
+    """
+    Return a JSON object with the top *top_n* value counts.
+    The payload includes a 'capped' boolean so the JS layer can annotate
+    chart titles when only a subset of values is shown.
+    """
     counts = series.dropna().value_counts()
     counts = counts[counts.index.str.strip() != ""]
-    return json.dumps({"labels": counts.index.tolist()[:25], "values": counts.values.tolist()[:25]})
+    total_unique = len(counts)
+    capped = total_unique > top_n
+    counts = counts.iloc[:top_n]
+    return json.dumps({
+        "labels": counts.index.tolist(),
+        "values": counts.values.tolist(),
+        "capped": capped,
+        "top_n": top_n,
+    })
 
 
 def completeness_json(df: pd.DataFrame) -> str:
@@ -100,15 +125,20 @@ def timeline_json(df: pd.DataFrame) -> str:
 
 
 def geo_json(df: pd.DataFrame) -> str:
-    c = col(df, "geo_country")
-    if c is None:
-        c = col(df, "geo_loc_name")
+    c = col(df, "geo_country", "geo_loc_name")
     if c is None:
         return "null"
     counts = c.dropna().value_counts()
     counts = counts[counts.index.str.strip() != ""]
-    return json.dumps({"countries": counts.index.tolist()[:30],
-                       "counts": counts.values.tolist()[:30]})
+    total = len(counts)
+    capped = total > 30
+    counts = counts.iloc[:30]
+    return json.dumps({
+        "countries": counts.index.tolist(),
+        "counts": counts.values.tolist(),
+        "capped": capped,
+        "top_n": 30,
+    })
 
 
 def host_json(df: pd.DataFrame) -> str:
@@ -146,7 +176,7 @@ def confidence_json(df: pd.DataFrame) -> str:
     bins = [0.0, 0.30, 0.60, 0.85, 1.001]
     labels = ["0.00-0.30", "0.30-0.60", "0.60-0.85", "0.85-1.00"]
     counts = pd.cut(numeric, bins=bins, labels=labels, right=False).value_counts().sort_index()
-    return json.dumps({"labels": counts.index.tolist(), "values": counts.values.tolist()})
+    return json.dumps({"labels": counts.index.tolist(), "values": counts.values.tolist(), "capped": False})
 
 
 def evidence_json(df: pd.DataFrame) -> str:
@@ -448,24 +478,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div class="stat-grid" id="stat-grid"></div>
   <div class="chart-grid">
-    <div class="chart-card" id="chart-taxonomy-ov" style="min-height:320px">
-      <h3>Organism Distribution</h3>
+    <div class="chart-card" style="min-height:320px">
+      <h3 id="title-taxonomy-ov">Organism Distribution</h3>
       <div id="fig-taxonomy-ov" style="height:280px"></div>
     </div>
-    <div class="chart-card" id="chart-geo-ov" style="min-height:320px">
-      <h3>Geographic Distribution</h3>
+    <div class="chart-card" style="min-height:320px">
+      <h3 id="title-geo-ov">Geographic Distribution</h3>
       <div id="fig-geo-ov" style="height:280px"></div>
     </div>
-    <div class="chart-card" id="chart-sample-type" style="min-height:320px">
-      <h3>Sample Type</h3>
+    <div class="chart-card" style="min-height:320px">
+      <h3 id="title-sample-type">Sample Type</h3>
       <div id="fig-sample-type" style="height:280px"></div>
     </div>
-    <div class="chart-card" id="chart-access" style="min-height:320px">
+    <div class="chart-card" style="min-height:320px">
       <h3>Access &amp; Status</h3>
       <div id="fig-access" style="height:280px"></div>
     </div>
-    <div class="chart-card" id="chart-bioprojects-ov" style="min-height:320px">
-      <h3>Top BioProjects (top 25)</h3>
+    <div class="chart-card" style="min-height:320px">
+      <h3 id="title-bioprojects-ov">Top BioProjects</h3>
       <div id="fig-bioprojects-ov" style="height:280px"></div>
     </div>
   </div>
@@ -476,19 +506,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="page-header"><h1>Taxonomy</h1></div>
   <div class="chart-grid">
     <div class="chart-card wide" style="min-height:360px">
-      <h3>Organism Names (top 25)</h3>
+      <h3 id="title-taxonomy-bar">Organism Names</h3>
       <div id="fig-taxonomy-bar" style="height:320px"></div>
     </div>
     <div class="chart-card" style="min-height:360px">
-      <h3>Host Distribution</h3>
+      <h3 id="title-host">Host Distribution</h3>
       <div id="fig-host" style="height:320px"></div>
     </div>
     <div class="chart-card" style="min-height:360px">
-      <h3>Host Disease</h3>
+      <h3 id="title-host-disease">Host Disease</h3>
       <div id="fig-host-disease" style="height:320px"></div>
     </div>
     <div class="chart-card" style="min-height:360px">
-      <h3>Isolation Source</h3>
+      <h3 id="title-isolation">Isolation Source</h3>
       <div id="fig-isolation" style="height:320px"></div>
     </div>
   </div>
@@ -499,7 +529,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="page-header"><h1>Geography</h1></div>
   <div class="chart-grid">
     <div class="chart-card wide" style="min-height:420px">
-      <h3>Samples by Country (top 30)</h3>
+      <h3 id="title-geo-bar">Samples by Country</h3>
       <div id="fig-geo-bar" style="height:380px"></div>
     </div>
     <div class="chart-card wide" style="min-height:420px">
@@ -529,7 +559,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="page-header"><h1>One Health Annotation</h1></div>
   <div class="chart-grid">
     <div class="chart-card" style="min-height:340px">
-      <h3>Category</h3>
+      <h3 id="title-oh-cat">Category</h3>
       <div id="fig-oh-cat" style="height:300px"></div>
     </div>
     <div class="chart-card" style="min-height:340px">
@@ -537,7 +567,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="fig-oh-conf" style="height:300px"></div>
     </div>
     <div class="chart-card wide" style="min-height:340px">
-      <h3>Evidence Level</h3>
+      <h3 id="title-oh-evid">Evidence Level</h3>
       <div id="fig-oh-evid" style="height:300px"></div>
     </div>
   </div>
@@ -610,6 +640,15 @@ const CFG = { responsive: true, displayModeBar: false };
 
 function layout(extras) { return Object.assign({}, LAYOUT_BASE, extras); }
 
+// Append " (top N)" to a chart heading element when data was capped.
+function maybeAnnotateTitle(titleId, data) {
+  if (!data || !data.capped) return;
+  const el = document.getElementById(titleId);
+  if (el && !el.textContent.includes('top')) {
+    el.textContent += ` (top ${data.top_n})`;
+  }
+}
+
 // ── Navigation ────────────────────────────────────────────────────────────
 function showSection(name) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -642,8 +681,9 @@ function buildStats() {
 }
 
 // ── Chart helpers ─────────────────────────────────────────────────────────
-function barH(el, data, height) {
+function barH(el, data, height, titleId) {
   if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
+  if (titleId) maybeAnnotateTitle(titleId, data);
   Plotly.newPlot(el, [{
     type: 'bar', orientation: 'h',
     x: data.values, y: data.labels,
@@ -657,8 +697,9 @@ function barH(el, data, height) {
   }), CFG);
 }
 
-function pie(el, data, height) {
+function pie(el, data, height, titleId) {
   if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
+  if (titleId) maybeAnnotateTitle(titleId, data);
   Plotly.newPlot(el, [{
     type: 'pie', labels: data.labels, values: data.values,
     hole: 0.42, textinfo: 'percent+label',
@@ -689,26 +730,26 @@ function renderSection(name) {
   rendered[name] = true;
 
   if (name === 'overview') {
-    pie('fig-taxonomy-ov', TAX_DATA);
-    pie('fig-geo-ov', GEO_DATA);
-    pie('fig-sample-type', STYPE_DATA);
+    pie('fig-taxonomy-ov', TAX_DATA, 280, 'title-taxonomy-ov');
+    pie('fig-geo-ov', GEO_DATA, 280, 'title-geo-ov');
+    pie('fig-sample-type', STYPE_DATA, 280, 'title-sample-type');
     const accessData = ACCESS_DATA && STATUS_DATA
       ? { labels: [...(ACCESS_DATA.labels||[]), ...(STATUS_DATA.labels||[])],
           values: [...(ACCESS_DATA.values||[]), ...(STATUS_DATA.values||[])] }
       : (ACCESS_DATA || STATUS_DATA);
     pie('fig-access', accessData);
-    barH('fig-bioprojects-ov', BPROJ_DATA, 280);
+    barH('fig-bioprojects-ov', BPROJ_DATA, 280, 'title-bioprojects-ov');
   }
 
   if (name === 'taxonomy') {
-    barH('fig-taxonomy-bar', TAX_DATA, 320);
-    pie('fig-host', HOST_DATA);
-    barH('fig-host-disease', HDISC_DATA);
-    barH('fig-isolation', ISOL_DATA);
+    barH('fig-taxonomy-bar', TAX_DATA, 320, 'title-taxonomy-bar');
+    pie('fig-host', HOST_DATA, 320, 'title-host');
+    barH('fig-host-disease', HDISC_DATA, 320, 'title-host-disease');
+    barH('fig-isolation', ISOL_DATA, 320, 'title-isolation');
   }
 
   if (name === 'geography') {
-    barH('fig-geo-bar', GEO_DATA, 380);
+    barH('fig-geo-bar', GEO_DATA, 380, 'title-geo-bar');
     if (GEO_DATA) {
       Plotly.newPlot('fig-geo-map', [{
         type: 'choropleth', locationmode: 'country names',
@@ -763,9 +804,10 @@ function renderSection(name) {
   }
 
   if (name === 'onehealth') {
-    pie('fig-oh-cat', OH_CAT, 300);
+    pie('fig-oh-cat', OH_CAT, 300, 'title-oh-cat');
     bar('fig-oh-conf', OH_CONF ? OH_CONF.labels : [], OH_CONF ? OH_CONF.values : [], '#7c5cbf', 300);
     bar('fig-oh-evid', OH_EVID ? OH_EVID.labels : [], OH_EVID ? OH_EVID.values : [], '#2ec4b6', 300);
+    if (OH_EVID) maybeAnnotateTitle('title-oh-evid', OH_EVID);
   }
 
   if (name === 'completeness') {
