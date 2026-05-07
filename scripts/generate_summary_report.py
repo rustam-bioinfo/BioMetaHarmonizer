@@ -704,12 +704,10 @@ function barH(el, data, height, titleId) {
 }
 
 // Pie: show only percentage on slices; labels go into a scrollable legend.
-// This avoids all text-overflow/clipping issues regardless of slice count.
 function pie(el, data, height, titleId) {
   if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
   if (titleId) maybeAnnotateTitle(titleId, data);
   const total = data.values.reduce((a, b) => a + b, 0);
-  // Build custom hover text showing label + count + percent.
   const hoverText = data.labels.map((lbl, i) => {
     const pct = (data.values[i] / total * 100).toFixed(1);
     return `${lbl}<br>${data.values[i].toLocaleString()} (${pct}%)`;
@@ -750,26 +748,32 @@ function barV(el, labels, values, color, height) {
   }), CFG);
 }
 
-// Temporal bar with a shared year-axis range across both charts.
+// Temporal bar: years kept as numbers so the shared numeric range works correctly.
+// type:'category' is intentionally NOT used here.
 function temporalBar(el, tl, color, sharedRange) {
   if (!tl) {
     document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>';
     return;
   }
-  const pct = tl.missing > 0
-    ? ` — ${tl.missing.toLocaleString()} of ${tl.total.toLocaleString()} records missing date (${(tl.missing/tl.total*100).toFixed(1)}%)`
-    : ' — all records have a date';
+  const msg = tl.missing > 0
+    ? `${tl.missing.toLocaleString()} of ${tl.total.toLocaleString()} records missing date (${(tl.missing / tl.total * 100).toFixed(1)}%)`
+    : 'all records have a date';
   const subtitleEl = document.getElementById(
     el === 'fig-timeline' ? 'subtitle-timeline' : 'subtitle-submission');
-  if (subtitleEl) subtitleEl.textContent = pct;
+  if (subtitleEl) subtitleEl.textContent = msg;
 
   Plotly.newPlot(el, [{
-    type: 'bar', x: tl.years.map(String), y: tl.counts,
+    type: 'bar',
+    x: tl.years,
+    y: tl.counts,
     marker: { color: color, opacity: 0.85 },
   }], layout({
     margin: { t: 10, b: 60, l: 55, r: 10 },
     xaxis: {
-      tickangle: -45, showgrid: false, dtick: 1, type: 'category',
+      tickformat: 'd',
+      dtick: 1,
+      showgrid: false,
+      tickangle: -45,
       range: sharedRange ? [sharedRange[0] - 0.5, sharedRange[1] + 0.5] : undefined,
     },
     yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
