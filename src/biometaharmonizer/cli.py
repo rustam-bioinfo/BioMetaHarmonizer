@@ -271,8 +271,12 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("         One Health skipped (no source columns present).")
 
     if "one_health_category" in df.columns:
-        classified = df["one_health_category"].notna().sum()
-        logger.info("         %d / %d records classified.", classified, len(df))
+        classified = (df["one_health_category"].notna() & (df["one_health_category"] != "Unclassified")).sum()
+        unclassified = len(df) - classified
+        logger.info(
+            "         %d / %d records classified (%d unclassified).",
+            classified, len(df), unclassified,
+        )
 
     logger.info("Writing output to %s (format=%s)", output_path, fmt)
     t0 = time.perf_counter()
