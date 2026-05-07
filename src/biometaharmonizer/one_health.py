@@ -247,6 +247,10 @@ _CLASSIFY_TEXT_KEYS = frozenset({
     "one_health_setting",
 })
 
+# Categories that may appear as output of the classifier.
+# 'Lab' is intentionally excluded: Lab signals are handled via
+# processing_terms and institution_patterns, not emitted as a
+# classifiable One Health category.
 _VALID_CATEGORIES = frozenset({
     "Human",
     "Animal",
@@ -380,6 +384,12 @@ class OneHealthClassifier:
         tier1_order = self._dicts.get("tier1_order", list(tier1_raw.keys()))
         self._TIER1_PATTERNS = []
         for category in tier1_order:
+            # Skip categories that must not appear as classifier output.
+            # 'Lab' signals are handled upstream via processing_terms and
+            # institution_patterns; emitting 'Lab' as a category is not
+            # part of the One Health taxonomy used in this module.
+            if category not in _VALID_CATEGORIES:
+                continue
             if category in tier1_raw:
                 self._TIER1_PATTERNS.append(
                     (category, _tier1_to_pattern(tier1_raw[category]))
@@ -390,6 +400,9 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
             for category, terms in ont_map.items():
+                # Also exclude invalid categories from the fuzzy corpus.
+                if category not in _VALID_CATEGORIES:
+                    continue
                 for term in terms:
                     term_lower = term.lower()
                     if term_lower in self._ambiguous_category_set:
@@ -612,7 +625,7 @@ class OneHealthClassifier:
                     out["one_health_setting"] = layer["one_health_setting"]
 
                 cat = layer.get("one_health_category")
-                if cat is None or cat == "Unclassified":
+                if cat is None or cat not in _VALID_CATEGORIES or cat == "Unclassified":
                     continue
                 term_lower = str(layer.get("one_health_term") or val_str).lower()
                 if term_lower in self._ambiguous_category_set:
@@ -660,7 +673,7 @@ class OneHealthClassifier:
 
             cat = layer.get("one_health_category")
 
-            if cat is None or cat == "Unclassified":
+            if cat is None or cat not in _VALID_CATEGORIES or cat == "Unclassified":
                 continue
 
             term_lower = str(layer.get("one_health_term") or val_str).lower()
