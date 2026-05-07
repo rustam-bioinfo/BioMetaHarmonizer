@@ -22,6 +22,9 @@ Usage
   # Skip taxonomy entirely:
   python scripts/build_dictionaries.py --skip-ncbi
 
+  # Show per-term collision / priority / food-host details:
+  python scripts/build_dictionaries.py --verbose-collisions
+
 Dependencies (all standard or already in requirements.txt):
   requests>=2.28
   pandas>=1.5
@@ -331,7 +334,7 @@ def _clean_ols_term(term):
     return term
 
 
-def ols_descendants(ontology, short_id, max_terms=2000):
+def ols_descendants(ontology, short_id, max_terms=15000):
     """
     Fetch all hierarchicalDescendant term labels + exact synonyms for a
     given short ID from OLS4.
@@ -421,7 +424,7 @@ def fetch_ols_terms():
             for short_id in short_ids:
                 if category == "_anatomy":
                     log.info("  UBERON %s (anatomy)", short_id)
-                    terms = ols_descendants(ontology, short_id, max_terms=3000)
+                    terms = ols_descendants(ontology, short_id, max_terms=15000)
                     anatomy_all.extend(terms)
                     log.info("    -> %d anatomy terms", len(terms))
                 else:
@@ -747,7 +750,7 @@ def _apply_priority_rule(term, unique_cats, ont_map):
 
     If a matching (winner, loser) pair is found:
       - removes term from ont_map[loser]
-      - logs at INFO level
+      - logs at DEBUG level (visible only with --verbose-collisions)
       - returns True (caller should skip eviction)
 
     Returns False if no priority rule applies.
@@ -761,7 +764,7 @@ def _apply_priority_rule(term, unique_cats, ont_map):
                 ont_map[loser].remove(term)
             except (ValueError, KeyError):
                 pass
-            log.info(
+            log.debug(
                 "PRIORITY %s > %s: '%s' kept in %s, removed from %s",
                 winner, loser, term, winner, loser,
             )
@@ -812,6 +815,10 @@ def _resolve_collisions(base):
     Terms that were present in the hand-curated base ontology_map before this
     build run are exempt (base_wins).
 
+    Per-term detail lines (COLLISION / PRIORITY / FOOD-HOST-PRIORITY) are
+    logged at DEBUG level and are silent by default. Pass --verbose-collisions
+    on the CLI to see them.
+
     Returns a stats dict attached to _metadata["collision_stats"].
     """
     ont_map   = base.get("ontology_map", {})
@@ -830,9 +837,9 @@ def _resolve_collisions(base):
     human_set  = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
     animal_set = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
 
-    intra_count    = 0
-    cross_count    = 0
-    priority_count = 0
+    intra_count     = 0
+    cross_count     = 0
+    priority_count  = 0
     food_host_saved = 0
 
     for term, cats in term_to_cats.items():
@@ -860,10 +867,9 @@ def _resolve_collisions(base):
         has_cross = len(conflicts) > len(unique_cats)
 
         if not has_intra and not has_cross:
-            # Check if we silently saved a Food term from host_to_category eviction
             if term in host_keys and len(unique_cats) == 1 and unique_cats[0] == "Food":
                 food_host_saved += 1
-                log.info(
+                log.debug(
                     "FOOD-HOST-PRIORITY: '%s' kept in Food "
                     "(host_to_category match is a taxonomy artefact, not a collision)",
                     term,
@@ -897,13 +903,13 @@ def _resolve_collisions(base):
 
         if has_intra:
             intra_count += 1
-            log.warning(
+            log.debug(
                 "COLLISION intra-ontology_map: '%s' in %s -> moved to ambiguous_category_terms",
                 term, unique_cats,
             )
         if has_cross:
             cross_count += 1
-            log.warning(
+            log.debug(
                 "COLLISION cross-section: '%s' conflicts with %s -> moved to ambiguous_category_terms",
                 term, [c for c in conflicts if c not in unique_cats],
             )
@@ -1023,7 +1029,8 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
             "or unambiguous_animal_terms are recorded in ambiguous_category_terms. "
             "ambiguous_specimen_terms is a tiebreaker and does NOT evict "
             "terms from ontology_map. "
-            "Rebuild by running scripts/build_dictionaries.py."
+            "Rebuild by running scripts/build_dictionaries.py. "
+            "Use --verbose-collisions for per-term collision detail."
         ),
     }
     return data
@@ -1052,12 +1059,24 @@ def parse_args():
     p.add_argument("--skip-ols",  action="store_true")
     p.add_argument("--skip-ncbi", action="store_true")
     p.add_argument("--dry-run",   action="store_true")
+    p.add_argument(
+        "--verbose-collisions",
+        action="store_true",
+        help=(
+            "Print per-term collision detail: COLLISION cross-section, "
+            "COLLISION intra-ontology_map, PRIORITY Food > Environmental, "
+            "and FOOD-HOST-PRIORITY lines. Silent by default."
+        ),
+    )
     return p.parse_args()
 
 
 def main():
     args      = parse_args()
     base_path = Path(args.base)
+
+    if args.verbose_collisions:
+        log.setLevel(logging.DEBUG)
 
     if not base_path.exists():
         log.error("Base file not found: %s", base_path)
