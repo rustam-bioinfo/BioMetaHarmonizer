@@ -107,16 +107,48 @@ def completeness_json(df: pd.DataFrame) -> str:
     return json.dumps({"cols": pct.index.tolist(), "pct": pct.values.tolist()})
 
 
-def timeline_json(df: pd.DataFrame) -> str:
+def timeline_json(df: pd.DataFrame, total: int) -> str:
+    """
+    Collection date aggregated by year.
+    Returns year range, counts, and count of records missing the date.
+    """
     date_col = col(df, "collection_date")
     if date_col is None:
         return "null"
-    parsed = pd.to_datetime(date_col, errors="coerce").dropna()
+    parsed = pd.to_datetime(date_col, errors="coerce")
+    missing = int(parsed.isna().sum())
+    parsed = parsed.dropna()
     if parsed.empty:
         return "null"
     by_year = parsed.dt.year.value_counts().sort_index()
-    return json.dumps({"years": [int(y) for y in by_year.index.tolist()],
-                       "counts": by_year.values.tolist()})
+    return json.dumps({
+        "years":   [int(y) for y in by_year.index.tolist()],
+        "counts":  by_year.values.tolist(),
+        "missing": missing,
+        "total":   total,
+    })
+
+
+def submission_timeline_json(df: pd.DataFrame, total: int) -> str:
+    """
+    Submission date aggregated by year (not month) for consistency with
+    the collection date chart. Returns year range, counts, and missing count.
+    """
+    c = col(df, "submission_date")
+    if c is None:
+        return "null"
+    parsed = pd.to_datetime(c, errors="coerce")
+    missing = int(parsed.isna().sum())
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return "null"
+    by_year = parsed.dt.year.value_counts().sort_index()
+    return json.dumps({
+        "years":   [int(y) for y in by_year.index.tolist()],
+        "counts":  by_year.values.tolist(),
+        "missing": missing,
+        "total":   total,
+    })
 
 
 def geo_json(df: pd.DataFrame) -> str:
@@ -135,12 +167,12 @@ def geo_json(df: pd.DataFrame) -> str:
     labels = counts.index.tolist()
     values = counts.values.tolist()
     return json.dumps({
-        "labels":   labels,
-        "values":   values,
+        "labels":    labels,
+        "values":    values,
         "countries": labels,
         "counts":    values,
-        "capped": capped,
-        "top_n": 30,
+        "capped":    capped,
+        "top_n":     30,
     })
 
 
@@ -217,18 +249,6 @@ def status_json(df: pd.DataFrame) -> str:
     return value_counts_json(c)
 
 
-def submission_timeline_json(df: pd.DataFrame) -> str:
-    c = col(df, "submission_date")
-    if c is None:
-        return "null"
-    parsed = pd.to_datetime(c, errors="coerce").dropna()
-    if parsed.empty:
-        return "null"
-    by_month = parsed.dt.to_period("M").value_counts().sort_index()
-    return json.dumps({"months": [str(m) for m in by_month.index],
-                       "counts": by_month.values.tolist()})
-
-
 def host_disease_json(df: pd.DataFrame) -> str:
     c = col(df, "host_disease")
     if c is None:
@@ -252,8 +272,10 @@ def isolation_source_json(df: pd.DataFrame) -> str:
 
 
 def df_to_records(df: pd.DataFrame) -> str:
+    # Priority columns; collection_date_range immediately follows collection_date.
     display_cols = [
-        "biosample_accession", "organism_name", "strain", "collection_date",
+        "biosample_accession", "organism_name", "strain",
+        "collection_date", "collection_date_range",
         "geo_country", "host", "host_disease", "isolation_source",
         "assembly_accession_refseq", "assembly_accession_genbank",
         "bioproject_accession", "sra_accession", "one_health_category",
@@ -366,7 +388,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 gap: 20px; margin-bottom: 28px; }
   .chart-card { background: var(--surface); border: 1px solid var(--border);
                 border-radius: var(--card-radius); padding: 20px; }
-  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; color: var(--text); }
+  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--text); }
+  .chart-card .chart-subtitle { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
   .chart-card.wide { grid-column: 1 / -1; }
 
   .table-wrap { background: var(--surface); border: 1px solid var(--border);
@@ -514,9 +537,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h3 id="title-geo-bar">Samples by Country</h3>
       <div id="fig-geo-bar" style="height:380px"></div>
     </div>
-    <div class="chart-card wide" style="min-height:420px">
+    <div class="chart-card wide" style="min-height:460px">
       <h3>World Map</h3>
-      <div id="fig-geo-map" style="height:380px"></div>
+      <div id="fig-geo-map" style="height:420px"></div>
     </div>
   </div>
 </div>
@@ -525,12 +548,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="section" id="section-temporal">
   <div class="page-header"><h1>Temporal</h1></div>
   <div class="chart-grid">
-    <div class="chart-card wide" style="min-height:340px">
+    <div class="chart-card wide" style="min-height:360px">
       <h3>Collection Date by Year</h3>
+      <div class="chart-subtitle" id="subtitle-timeline"></div>
       <div id="fig-timeline" style="height:300px"></div>
     </div>
-    <div class="chart-card wide" style="min-height:340px">
-      <h3>Submission Date by Month</h3>
+    <div class="chart-card wide" style="min-height:360px">
+      <h3>Submission Date by Year</h3>
+      <div class="chart-subtitle" id="subtitle-submission"></div>
       <div id="fig-submission" style="height:300px"></div>
     </div>
   </div>
@@ -558,9 +583,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <!-- ── Completeness ─────────────────────────────────────────────────────── -->
 <div class="section" id="section-completeness">
   <div class="page-header"><h1>Metadata Completeness</h1></div>
-  <div class="chart-card wide" style="min-height:500px; margin-bottom:20px">
+  <div class="chart-card wide" id="completeness-card" style="margin-bottom:20px">
     <h3>Field Completeness (%)</h3>
-    <div id="fig-completeness" style="height:460px"></div>
+    <div id="fig-completeness"></div>
   </div>
 </div>
 
@@ -683,10 +708,12 @@ function pie(el, data, height, titleId) {
   if (titleId) maybeAnnotateTitle(titleId, data);
   Plotly.newPlot(el, [{
     type: 'pie', labels: data.labels, values: data.values,
-    hole: 0.42, textinfo: 'percent+label',
+    hole: 0.42,
+    textinfo: 'percent+label',
     textfont: { size: 11 },
+    automargin: true,
   }], layout({
-    margin: { t: 10, b: 10, l: 10, r: 10 },
+    margin: { t: 30, b: 30, l: 30, r: 30 },
     showlegend: false,
     height: height || 280,
   }), CFG);
@@ -698,9 +725,36 @@ function barV(el, labels, values, color, height) {
     marker: { color: color || '#4f8ef7', opacity: 0.85 },
   }], layout({
     margin: { t: 10, b: 70, l: 55, r: 10 },
-    xaxis: { tickangle: -45, showgrid: false },
+    xaxis: { tickangle: -45, showgrid: false, dtick: 1, type: 'category' },
     yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
     height: height || 300,
+  }), CFG);
+}
+
+// Temporal bar with a shared year-axis range across both charts.
+function temporalBar(el, tl, color, sharedRange) {
+  if (!tl) {
+    document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>';
+    return;
+  }
+  const pct = tl.missing > 0
+    ? ` — ${tl.missing.toLocaleString()} of ${tl.total.toLocaleString()} records missing date (${(tl.missing/tl.total*100).toFixed(1)}%)`
+    : ' — all records have a date';
+  const subtitleEl = document.getElementById(
+    el === 'fig-timeline' ? 'subtitle-timeline' : 'subtitle-submission');
+  if (subtitleEl) subtitleEl.textContent = pct;
+
+  Plotly.newPlot(el, [{
+    type: 'bar', x: tl.years.map(String), y: tl.counts,
+    marker: { color: color, opacity: 0.85 },
+  }], layout({
+    margin: { t: 10, b: 60, l: 55, r: 10 },
+    xaxis: {
+      tickangle: -45, showgrid: false, dtick: 1, type: 'category',
+      range: sharedRange ? [sharedRange[0] - 0.5, sharedRange[1] + 0.5] : undefined,
+    },
+    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
+    height: 300,
   }), CFG);
 }
 
@@ -711,9 +765,9 @@ function renderSection(name) {
   rendered[name] = true;
 
   if (name === 'overview') {
-    pie('fig-geo-ov',       GEO_DATA,   280, 'title-geo-ov');
-    pie('fig-host-ov',      HOST_DATA,  280, 'title-host-ov');
-    pie('fig-isolation-ov', ISOL_DATA,  280, 'title-isolation-ov');
+    pie('fig-geo-ov',       GEO_DATA,    280, 'title-geo-ov');
+    pie('fig-host-ov',      HOST_DATA,   280, 'title-host-ov');
+    pie('fig-isolation-ov', ISOL_DATA,   280, 'title-isolation-ov');
     pie('fig-access-ov',    ACCESS_DATA, 280, 'title-access-ov');
     pie('fig-status-ov',    STATUS_DATA, 280, 'title-status-ov');
     barH('fig-bioprojects-ov', BPROJ_DATA, 280, 'title-bioprojects-ov');
@@ -729,20 +783,40 @@ function renderSection(name) {
   if (name === 'geography') {
     barH('fig-geo-bar', GEO_DATA, 380, 'title-geo-bar');
     if (GEO_DATA) {
+      // Use a log colorscale so minor contributors are still visible.
+      const zVals = GEO_DATA.counts;
+      const zMax  = Math.max(...zVals);
       Plotly.newPlot('fig-geo-map', [{
         type: 'choropleth', locationmode: 'country names',
-        locations: GEO_DATA.countries, z: GEO_DATA.counts,
-        colorscale: [['0','#1a1d27'],['1','#4f8ef7']],
+        locations: GEO_DATA.countries,
+        z: zVals,
+        zmin: 0, zmax: zMax,
+        colorscale: [
+          [0,     '#2a3a5c'],
+          [0.05,  '#2e5fa3'],
+          [0.2,   '#4f8ef7'],
+          [0.5,   '#7ec8e3'],
+          [1,     '#ffffff'],
+        ],
         showscale: true,
-        colorbar: { bgcolor: 'rgba(0,0,0,0)', tickcolor: '#8892a4',
-                    tickfont: { color: '#8892a4' } },
+        colorbar: {
+          bgcolor: 'rgba(0,0,0,0)', tickcolor: '#8892a4',
+          tickfont: { color: '#8892a4' }, title: { text: 'Samples', font: { color: '#8892a4' } },
+        },
+        hovertemplate: '%{location}: %{z}<extra></extra>',
       }], layout({
-        geo: { bgcolor: 'rgba(0,0,0,0)', landcolor: '#22263a',
-               coastlinecolor: '#2a2f45', showcoastlines: true,
-               showland: true, showocean: true, oceancolor: '#15182a',
-               showframe: false },
+        geo: {
+          bgcolor: 'rgba(0,0,0,0)',
+          landcolor: '#2d3250',
+          showland: true,
+          showocean: true, oceancolor: '#1a2035',
+          showcoastlines: true, coastlinecolor: '#4a5280',
+          showcountries: true, countrycolor: '#3a4060',
+          showframe: false,
+          projection: { type: 'natural earth' },
+        },
         margin: { t: 0, b: 0, l: 0, r: 0 },
-        height: 380,
+        height: 420,
       }), CFG);
     } else {
       document.getElementById('fig-geo-map').innerHTML = '<p style="color:var(--muted);padding:20px">No geo data</p>';
@@ -750,16 +824,15 @@ function renderSection(name) {
   }
 
   if (name === 'temporal') {
-    if (TIMELINE) {
-      barV('fig-timeline', TIMELINE.years.map(String), TIMELINE.counts, '#2ec4b6', 300);
-    } else {
-      document.getElementById('fig-timeline').innerHTML = '<p style="color:var(--muted);padding:20px">No collection date data</p>';
-    }
-    if (SUBMIT_TL) {
-      barV('fig-submission', SUBMIT_TL.months, SUBMIT_TL.counts, '#f59e0b', 300);
-    } else {
-      document.getElementById('fig-submission').innerHTML = '<p style="color:var(--muted);padding:20px">No submission date data</p>';
-    }
+    // Compute a shared year range across both datasets.
+    const tlYears  = TIMELINE  ? TIMELINE.years  : [];
+    const subYears = SUBMIT_TL ? SUBMIT_TL.years : [];
+    const allYears = [...tlYears, ...subYears];
+    const sharedRange = allYears.length
+      ? [Math.min(...allYears), Math.max(...allYears)]
+      : null;
+    temporalBar('fig-timeline',   TIMELINE,  '#2ec4b6', sharedRange);
+    temporalBar('fig-submission', SUBMIT_TL, '#f59e0b', sharedRange);
   }
 
   if (name === 'onehealth') {
@@ -772,6 +845,11 @@ function renderSection(name) {
   if (name === 'completeness') {
     if (COMP_DATA) {
       const n = COMP_DATA.cols.length;
+      const plotH = Math.max(400, n * 26);
+      const cardEl = document.getElementById('completeness-card');
+      cardEl.style.minHeight = (plotH + 60) + 'px';
+      const figEl = document.getElementById('fig-completeness');
+      figEl.style.height = plotH + 'px';
       const colors = COMP_DATA.pct.map(p =>
         p >= 80 ? '#22c55e' : p >= 40 ? '#f59e0b' : '#ef4444');
       Plotly.newPlot('fig-completeness', [{
@@ -783,7 +861,7 @@ function renderSection(name) {
         margin: { t: 10, b: 30, l: 200, r: 60 },
         xaxis: { range: [0, 115], showgrid: true, gridcolor: '#2a2f45' },
         yaxis: { automargin: true },
-        height: Math.max(460, n * 22),
+        height: plotH,
       }), CFG);
     }
   }
@@ -846,7 +924,6 @@ function escHtml(s) {
 }
 
 function renderTable() {
-  const cols = TABLE_DATA.columns;
   const start = tblPage * tblPageSize;
   const slice = tblFiltered.slice(start, start + tblPageSize);
   const tbody = document.getElementById('tbody');
@@ -921,6 +998,7 @@ buildTable();
 
 def generate_report(input_path: str, output_path: str | None = None) -> str:
     df = load_data(input_path)
+    total = len(df)
 
     if output_path is None:
         stem = Path(input_path).stem
@@ -935,8 +1013,8 @@ def generate_report(input_path: str, output_path: str | None = None) -> str:
     html = html.replace("__TAX_DATA__",    taxonomy_json(df))
     html = html.replace("__GEO_DATA__",    geo_json(df))
     html = html.replace("__HOST_DATA__",   host_json(df))
-    html = html.replace("__TIMELINE__",    timeline_json(df))
-    html = html.replace("__SUBMIT_TL__",   submission_timeline_json(df))
+    html = html.replace("__TIMELINE__",    timeline_json(df, total))
+    html = html.replace("__SUBMIT_TL__",   submission_timeline_json(df, total))
     html = html.replace("__OH_CAT__",      oh_category_json(df))
     html = html.replace("__OH_CONF__",     confidence_json(df))
     html = html.replace("__OH_EVID__",     evidence_json(df))
