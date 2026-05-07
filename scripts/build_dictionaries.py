@@ -731,8 +731,10 @@ def _resolve_collisions(base):
 
     Two collision types are handled:
 
-    1. Intra-ontology_map: same term string present in 2+ category lists
-       (e.g. "blood" in both Food and Animal).
+    1. Intra-ontology_map: same term string present in 2+ *distinct* category
+       lists (e.g. "blood" in both Food and Animal). Duplicate entries for
+       the same category (caused by overlapping OLS4 seed subtrees) are
+       deduplicated first and do NOT count as a collision.
 
     2. Cross-section (authoritative only): a term in ontology_map also exists
        in host_to_category, unambiguous_human_terms, or
@@ -747,8 +749,9 @@ def _resolve_collisions(base):
     terms like "fruit", "extract", "wash") to be silently suppressed and
     produce Unclassified outputs.
 
-    In both cases the term is removed from the ontology_map category list(s)
-    and added to ambiguous_category_terms with the list of conflicting sources.
+    In both collision cases the term is removed from the ontology_map
+    category list(s) and added to ambiguous_category_terms with the list of
+    conflicting sources.
 
     Terms that were present in the hand-curated base ontology_map before this
     build run are exempt (base_wins: if a human already decided the category,
@@ -759,7 +762,8 @@ def _resolve_collisions(base):
     ont_map   = base.get("ontology_map", {})
     ambiguous = base.setdefault("ambiguous_category_terms", {})
 
-    # Build inverted index: term -> [categories]
+    # Build inverted index: term -> [categories] (may contain duplicates when
+    # multiple OLS4 seeds for the same category share overlapping subtrees).
     term_to_cats = {}
     for cat, terms in ont_map.items():
         for t in terms:
@@ -775,7 +779,12 @@ def _resolve_collisions(base):
     cross_count = 0
 
     for term, cats in term_to_cats.items():
-        conflicts = list(cats)
+        # Deduplicate category list while preserving order. Multiple identical
+        # categories arise when overlapping ENVO seed subtrees return the same
+        # term; this is NOT a real collision and must not trigger eviction.
+        unique_cats = list(dict.fromkeys(cats))
+
+        conflicts = list(unique_cats)
 
         # Only authoritative sections trigger cross-section eviction
         if term in host_keys:
@@ -785,15 +794,15 @@ def _resolve_collisions(base):
         if term in animal_set:
             conflicts.append("unambiguous_animal_terms")
 
-        has_intra = len(cats) > 1
-        has_cross = len(conflicts) > len(cats)
+        has_intra = len(unique_cats) > 1
+        has_cross = len(conflicts) > len(unique_cats)
 
         if not has_intra and not has_cross:
             continue
 
         # base_wins: if term was hand-curated into exactly one ontology_map
         # category and has no authoritative cross-section conflict, leave it alone
-        if not has_cross and len(cats) == 1:
+        if not has_cross and len(unique_cats) == 1:
             continue
 
         # Record in ambiguous_category_terms (merge if already present)
@@ -801,8 +810,9 @@ def _resolve_collisions(base):
         merged   = list(dict.fromkeys(existing + conflicts))
         ambiguous[term] = merged
 
-        # Remove from all ontology_map category lists
-        for cat in cats:
+        # Remove from all ontology_map category lists (use unique_cats to
+        # avoid redundant .remove() calls on already-cleaned lists)
+        for cat in unique_cats:
             try:
                 ont_map[cat].remove(term)
             except ValueError:
@@ -810,10 +820,16 @@ def _resolve_collisions(base):
 
         if has_intra:
             intra_count += 1
-            log.warning("COLLISION intra-ontology_map: '%s' in %s -> moved to ambiguous_category_terms", term, cats)
+            log.warning(
+                "COLLISION intra-ontology_map: '%s' in %s -> moved to ambiguous_category_terms",
+                term, unique_cats,
+            )
         if has_cross:
             cross_count += 1
-            log.warning("COLLISION cross-section: '%s' conflicts with %s -> moved to ambiguous_category_terms", term, [c for c in conflicts if c not in cats])
+            log.warning(
+                "COLLISION cross-section: '%s' conflicts with %s -> moved to ambiguous_category_terms",
+                term, [c for c in conflicts if c not in unique_cats],
+            )
 
     log.info(
         "Collision resolution: %d intra-ontology_map, %d cross-section, %d total ambiguous terms",
@@ -915,8 +931,10 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
         "collision_stats": collision_stats,
         "note": (
             "Hand-curated entries always override ontology-derived entries. "
-            "Terms with intra-ontology_map or authoritative cross-section "
-            "conflicts are recorded in ambiguous_category_terms. "
+            "Terms with intra-ontology_map (distinct categories) or authoritative "
+            "cross-section conflicts are recorded in ambiguous_category_terms. "
+            "Same-category duplicates from overlapping OLS4 seed subtrees are "
+            "deduplicated silently and do not count as collisions. "
             "ambiguous_specimen_terms is a tiebreaker and does NOT evict "
             "terms from ontology_map. "
             "Rebuild by running scripts/build_dictionaries.py."
