@@ -479,29 +479,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div class="stat-grid" id="stat-grid"></div>
   <div class="chart-grid">
-    <div class="chart-card" style="min-height:320px">
+    <div class="chart-card" style="min-height:340px">
       <h3 id="title-geo-ov">Geographic Distribution</h3>
-      <div id="fig-geo-ov" style="height:280px"></div>
+      <div id="fig-geo-ov" style="height:300px"></div>
     </div>
-    <div class="chart-card" style="min-height:320px">
+    <div class="chart-card" style="min-height:340px">
       <h3 id="title-host-ov">Host Distribution</h3>
-      <div id="fig-host-ov" style="height:280px"></div>
+      <div id="fig-host-ov" style="height:300px"></div>
     </div>
-    <div class="chart-card" style="min-height:320px">
+    <div class="chart-card" style="min-height:340px">
       <h3 id="title-isolation-ov">Isolation Source</h3>
-      <div id="fig-isolation-ov" style="height:280px"></div>
+      <div id="fig-isolation-ov" style="height:300px"></div>
     </div>
-    <div class="chart-card" style="min-height:320px">
+    <div class="chart-card" style="min-height:340px">
       <h3 id="title-access-ov">Access</h3>
-      <div id="fig-access-ov" style="height:280px"></div>
+      <div id="fig-access-ov" style="height:300px"></div>
     </div>
-    <div class="chart-card" style="min-height:320px">
+    <div class="chart-card" style="min-height:340px">
       <h3 id="title-status-ov">Status</h3>
-      <div id="fig-status-ov" style="height:280px"></div>
+      <div id="fig-status-ov" style="height:300px"></div>
     </div>
-    <div class="chart-card" style="min-height:320px">
+    <div class="chart-card" style="min-height:340px">
       <h3 id="title-bioprojects-ov">Top BioProjects</h3>
-      <div id="fig-bioprojects-ov" style="height:280px"></div>
+      <div id="fig-bioprojects-ov" style="height:300px"></div>
     </div>
   </div>
 </div>
@@ -514,9 +514,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h3 id="title-taxonomy-bar">Organism Names</h3>
       <div id="fig-taxonomy-bar" style="height:320px"></div>
     </div>
-    <div class="chart-card" style="min-height:360px">
+    <div class="chart-card" style="min-height:380px">
       <h3 id="title-host">Host Distribution</h3>
-      <div id="fig-host" style="height:320px"></div>
+      <div id="fig-host" style="height:340px"></div>
     </div>
     <div class="chart-card" style="min-height:360px">
       <h3 id="title-host-disease">Host Disease</h3>
@@ -565,9 +565,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="section" id="section-onehealth">
   <div class="page-header"><h1>One Health Annotation</h1></div>
   <div class="chart-grid">
-    <div class="chart-card" style="min-height:340px">
+    <div class="chart-card" style="min-height:360px">
       <h3 id="title-oh-cat">Category</h3>
-      <div id="fig-oh-cat" style="height:300px"></div>
+      <div id="fig-oh-cat" style="height:320px"></div>
     </div>
     <div class="chart-card" style="min-height:340px">
       <h3>Confidence Score Distribution</h3>
@@ -703,19 +703,38 @@ function barH(el, data, height, titleId) {
   }), CFG);
 }
 
+// Pie: show only percentage on slices; labels go into a scrollable legend.
+// This avoids all text-overflow/clipping issues regardless of slice count.
 function pie(el, data, height, titleId) {
   if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
   if (titleId) maybeAnnotateTitle(titleId, data);
+  const total = data.values.reduce((a, b) => a + b, 0);
+  // Build custom hover text showing label + count + percent.
+  const hoverText = data.labels.map((lbl, i) => {
+    const pct = (data.values[i] / total * 100).toFixed(1);
+    return `${lbl}<br>${data.values[i].toLocaleString()} (${pct}%)`;
+  });
   Plotly.newPlot(el, [{
-    type: 'pie', labels: data.labels, values: data.values,
+    type: 'pie',
+    labels: data.labels,
+    values: data.values,
     hole: 0.42,
-    textinfo: 'percent+label',
+    textinfo: 'percent',
     textfont: { size: 11 },
-    automargin: true,
+    hovertemplate: '%{customdata}<extra></extra>',
+    customdata: hoverText,
   }], layout({
-    margin: { t: 30, b: 30, l: 30, r: 30 },
-    showlegend: false,
-    height: height || 280,
+    margin: { t: 10, b: 10, l: 10, r: 10 },
+    showlegend: true,
+    legend: {
+      orientation: 'v',
+      x: 1.02, xanchor: 'left',
+      y: 1,    yanchor: 'top',
+      font: { size: 11 },
+      bgcolor: 'rgba(0,0,0,0)',
+      bordercolor: 'rgba(0,0,0,0)',
+    },
+    height: height || 300,
   }), CFG);
 }
 
@@ -765,17 +784,17 @@ function renderSection(name) {
   rendered[name] = true;
 
   if (name === 'overview') {
-    pie('fig-geo-ov',       GEO_DATA,    280, 'title-geo-ov');
-    pie('fig-host-ov',      HOST_DATA,   280, 'title-host-ov');
-    pie('fig-isolation-ov', ISOL_DATA,   280, 'title-isolation-ov');
-    pie('fig-access-ov',    ACCESS_DATA, 280, 'title-access-ov');
-    pie('fig-status-ov',    STATUS_DATA, 280, 'title-status-ov');
-    barH('fig-bioprojects-ov', BPROJ_DATA, 280, 'title-bioprojects-ov');
+    pie('fig-geo-ov',       GEO_DATA,    300, 'title-geo-ov');
+    pie('fig-host-ov',      HOST_DATA,   300, 'title-host-ov');
+    pie('fig-isolation-ov', ISOL_DATA,   300, 'title-isolation-ov');
+    pie('fig-access-ov',    ACCESS_DATA, 300, 'title-access-ov');
+    pie('fig-status-ov',    STATUS_DATA, 300, 'title-status-ov');
+    barH('fig-bioprojects-ov', BPROJ_DATA, 300, 'title-bioprojects-ov');
   }
 
   if (name === 'taxonomy') {
     barH('fig-taxonomy-bar', TAX_DATA,   320, 'title-taxonomy-bar');
-    pie('fig-host',          HOST_DATA,  320, 'title-host');
+    pie('fig-host',          HOST_DATA,  340, 'title-host');
     barH('fig-host-disease', HDISC_DATA, 320, 'title-host-disease');
     barH('fig-isolation',    ISOL_DATA,  320, 'title-isolation');
   }
@@ -783,14 +802,11 @@ function renderSection(name) {
   if (name === 'geography') {
     barH('fig-geo-bar', GEO_DATA, 380, 'title-geo-bar');
     if (GEO_DATA) {
-      // Use a log colorscale so minor contributors are still visible.
-      const zVals = GEO_DATA.counts;
-      const zMax  = Math.max(...zVals);
       Plotly.newPlot('fig-geo-map', [{
         type: 'choropleth', locationmode: 'country names',
         locations: GEO_DATA.countries,
-        z: zVals,
-        zmin: 0, zmax: zMax,
+        z: GEO_DATA.counts,
+        zmin: 0, zmax: Math.max(...GEO_DATA.counts),
         colorscale: [
           [0,     '#2a3a5c'],
           [0.05,  '#2e5fa3'],
@@ -824,7 +840,6 @@ function renderSection(name) {
   }
 
   if (name === 'temporal') {
-    // Compute a shared year range across both datasets.
     const tlYears  = TIMELINE  ? TIMELINE.years  : [];
     const subYears = SUBMIT_TL ? SUBMIT_TL.years : [];
     const allYears = [...tlYears, ...subYears];
@@ -836,7 +851,7 @@ function renderSection(name) {
   }
 
   if (name === 'onehealth') {
-    pie('fig-oh-cat', OH_CAT, 300, 'title-oh-cat');
+    pie('fig-oh-cat', OH_CAT, 320, 'title-oh-cat');
     barV('fig-oh-conf', OH_CONF ? OH_CONF.labels : [], OH_CONF ? OH_CONF.values : [], '#7c5cbf', 300);
     barV('fig-oh-evid', OH_EVID ? OH_EVID.labels : [], OH_EVID ? OH_EVID.values : [], '#2ec4b6', 300);
     if (OH_EVID) maybeAnnotateTitle('title-oh-evid', OH_EVID);
