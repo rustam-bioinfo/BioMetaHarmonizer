@@ -37,8 +37,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Maximum distinct values shown per categorical chart.
+# Maximum distinct values shown per bar chart.
 _CHART_TOP_N = 25
+# Maximum distinct values shown per pie chart.
+_PIE_TOP_N = 10
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -687,35 +689,59 @@ function buildStats() {
 }
 
 // ── Chart helpers ─────────────────────────────────────────────────────────
+
+// Horizontal bar chart.
+// Labels are drawn inside bars ('inside') for large bars and suppressed for
+// tiny ones via cliponaxis:false + a generous right margin.  The x-axis range
+// is explicitly padded to 120% of the max value so outside labels never clip.
 function barH(el, data, height, titleId) {
   if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
   if (titleId) maybeAnnotateTitle(titleId, data);
+  const maxVal = Math.max(...data.values);
   Plotly.newPlot(el, [{
     type: 'bar', orientation: 'h',
     x: data.values, y: data.labels,
     marker: { color: '#4f8ef7', opacity: 0.85 },
-    text: data.values.map(String), textposition: 'outside',
+    text: data.values.map(String),
+    textposition: 'outside',
+    cliponaxis: false,
   }], layout({
-    margin: { t: 10, b: 30, l: 160, r: 40 },
-    yaxis: { automargin: true },
-    xaxis: { showgrid: true, gridcolor: '#2a2f45' },
+    margin: { t: 10, b: 30, l: 10, r: 60 },
+    yaxis: { automargin: true, tickfont: { size: 11 } },
+    xaxis: { showgrid: true, gridcolor: '#2a2f45', range: [0, maxVal * 1.2] },
     height: height || 280,
   }), CFG);
 }
 
-// Pie: show only percentage on slices; labels go into a scrollable legend.
+// Pie chart: capped at PIE_TOP_N (10) entries, percent on slices, labels in legend.
+const PIE_TOP_N = 10;
 function pie(el, data, height, titleId) {
   if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
-  if (titleId) maybeAnnotateTitle(titleId, data);
-  const total = data.values.reduce((a, b) => a + b, 0);
-  const hoverText = data.labels.map((lbl, i) => {
-    const pct = (data.values[i] / total * 100).toFixed(1);
-    return `${lbl}<br>${data.values[i].toLocaleString()} (${pct}%)`;
+
+  // Slice to top 10 and annotate title if capped.
+  let labels = data.labels;
+  let values = data.values;
+  const wasCapped = labels.length > PIE_TOP_N;
+  if (wasCapped) {
+    labels = labels.slice(0, PIE_TOP_N);
+    values = values.slice(0, PIE_TOP_N);
+  }
+  if (titleId) {
+    const el2 = document.getElementById(titleId);
+    if (el2 && wasCapped && !el2.textContent.includes('top')) {
+      el2.textContent += ` (top ${PIE_TOP_N})`;
+    }
+  }
+
+  const total = values.reduce((a, b) => a + b, 0);
+  const hoverText = labels.map((lbl, i) => {
+    const pct = (values[i] / total * 100).toFixed(1);
+    return `${lbl}<br>${values[i].toLocaleString()} (${pct}%)`;
   });
   Plotly.newPlot(el, [{
     type: 'pie',
-    labels: data.labels,
-    values: data.values,
+    labels: labels,
+    values: values,
     hole: 0.42,
     textinfo: 'percent',
     textfont: { size: 11 },
@@ -737,19 +763,22 @@ function pie(el, data, height, titleId) {
 }
 
 function barV(el, labels, values, color, height) {
+  const maxVal = values.length ? Math.max(...values) : 1;
   Plotly.newPlot(el, [{
     type: 'bar', x: labels, y: values,
     marker: { color: color || '#4f8ef7', opacity: 0.85 },
+    text: values.map(String),
+    textposition: 'outside',
+    cliponaxis: false,
   }], layout({
-    margin: { t: 10, b: 70, l: 55, r: 10 },
+    margin: { t: 30, b: 70, l: 55, r: 10 },
     xaxis: { tickangle: -45, showgrid: false, dtick: 1, type: 'category' },
-    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
+    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples', range: [0, maxVal * 1.2] },
     height: height || 300,
   }), CFG);
 }
 
 // Temporal bar: years kept as numbers so the shared numeric range works correctly.
-// type:'category' is intentionally NOT used here.
 function temporalBar(el, tl, color, sharedRange) {
   if (!tl) {
     document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>';
@@ -762,13 +791,17 @@ function temporalBar(el, tl, color, sharedRange) {
     el === 'fig-timeline' ? 'subtitle-timeline' : 'subtitle-submission');
   if (subtitleEl) subtitleEl.textContent = msg;
 
+  const maxVal = Math.max(...tl.counts);
   Plotly.newPlot(el, [{
     type: 'bar',
     x: tl.years,
     y: tl.counts,
     marker: { color: color, opacity: 0.85 },
+    text: tl.counts.map(String),
+    textposition: 'outside',
+    cliponaxis: false,
   }], layout({
-    margin: { t: 10, b: 60, l: 55, r: 10 },
+    margin: { t: 30, b: 60, l: 55, r: 10 },
     xaxis: {
       tickformat: 'd',
       dtick: 1,
@@ -776,7 +809,7 @@ function temporalBar(el, tl, color, sharedRange) {
       tickangle: -45,
       range: sharedRange ? [sharedRange[0] - 0.5, sharedRange[1] + 0.5] : undefined,
     },
-    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
+    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples', range: [0, maxVal * 1.2] },
     height: 300,
   }), CFG);
 }
@@ -875,11 +908,13 @@ function renderSection(name) {
         type: 'bar', orientation: 'h',
         x: COMP_DATA.pct, y: COMP_DATA.cols,
         marker: { color: colors },
-        text: COMP_DATA.pct.map(p => p + '%'), textposition: 'outside',
+        text: COMP_DATA.pct.map(p => p + '%'),
+        textposition: 'outside',
+        cliponaxis: false,
       }], layout({
-        margin: { t: 10, b: 30, l: 200, r: 60 },
-        xaxis: { range: [0, 115], showgrid: true, gridcolor: '#2a2f45' },
-        yaxis: { automargin: true },
+        margin: { t: 10, b: 30, l: 10, r: 60 },
+        xaxis: { range: [0, 120], showgrid: true, gridcolor: '#2a2f45' },
+        yaxis: { automargin: true, tickfont: { size: 11 } },
         height: plotH,
       }), CFG);
     }
