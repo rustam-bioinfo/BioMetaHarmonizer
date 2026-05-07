@@ -174,6 +174,24 @@ UBERON_ANIMAL_EXCLUSIVE = {
     "hemolymph", "exoskeleton",
 }
 
+# Category priority rules for intra-ontology_map collisions.
+#
+# When a term appears in exactly two categories and both are listed as a
+# (winner, loser) pair here, the winner keeps the term and the loser loses
+# it. No eviction to ambiguous_category_terms occurs.
+#
+# Rationale for Food > Environmental:
+#   FoodOn subtrees (food product, food material, plant food product) heavily
+#   overlap with ENVO anthropogenic_environment and environmental_material.
+#   Terms such as "buttermilk food product", "beer beverage", "rice food
+#   product" are unambiguously food items in BioSample context. ENVO includes
+#   these as part of agri-food environment descriptions, but for isolation
+#   source classification Food is the correct and more specific assignment.
+_CATEGORY_PRIORITY = [
+    ("Food", "Environmental"),  # Food beats Environmental
+]
+
+
 # ---------------------------------------------------------------------------
 # Compiled patterns for _clean_ols_term()
 # ---------------------------------------------------------------------------
@@ -722,6 +740,35 @@ def fetch_umls_synonyms(api_key):
 # Collision resolution
 # ---------------------------------------------------------------------------
 
+def _apply_priority_rule(term, unique_cats, ont_map):
+    """
+    Check whether a two-category intra-ontology_map collision can be resolved
+    by a priority rule in _CATEGORY_PRIORITY.
+
+    If a matching (winner, loser) pair is found:
+      - removes term from ont_map[loser]
+      - logs at INFO level
+      - returns True (caller should skip eviction)
+
+    Returns False if no priority rule applies.
+    """
+    if len(unique_cats) != 2:
+        return False
+    cats_set = set(unique_cats)
+    for winner, loser in _CATEGORY_PRIORITY:
+        if cats_set == {winner, loser}:
+            try:
+                ont_map[loser].remove(term)
+            except (ValueError, KeyError):
+                pass
+            log.info(
+                "PRIORITY %s > %s: '%s' kept in %s, removed from %s",
+                winner, loser, term, winner, loser,
+            )
+            return True
+    return False
+
+
 def _resolve_collisions(base):
     """
     Detect terms that appear in multiple One Health categories or conflict
@@ -732,9 +779,10 @@ def _resolve_collisions(base):
     Two collision types are handled:
 
     1. Intra-ontology_map: same term string present in 2+ *distinct* category
-       lists (e.g. "blood" in both Food and Animal). Duplicate entries for
-       the same category (caused by overlapping OLS4 seed subtrees) are
-       deduplicated first and do NOT count as a collision.
+       lists. Duplicate entries for the same category (overlapping OLS4 seed
+       subtrees) are deduplicated first and do NOT count as a collision.
+       Before eviction, priority rules in _CATEGORY_PRIORITY are checked: if
+       a (winner, loser) pair matches, the term stays in the winner category.
 
     2. Cross-section (authoritative only): a term in ontology_map also exists
        in host_to_category, unambiguous_human_terms, or
@@ -749,15 +797,13 @@ def _resolve_collisions(base):
     terms like "fruit", "extract", "wash") to be silently suppressed and
     produce Unclassified outputs.
 
-    In both collision cases the term is removed from the ontology_map
-    category list(s) and added to ambiguous_category_terms with the list of
-    conflicting sources.
+    In both remaining collision cases the term is removed from all ontology_map
+    category lists and added to ambiguous_category_terms.
 
     Terms that were present in the hand-curated base ontology_map before this
-    build run are exempt (base_wins: if a human already decided the category,
-    there is no ambiguity).
+    build run are exempt (base_wins).
 
-    Returns a stats dict that is attached to _metadata["collision_stats"].
+    Returns a stats dict attached to _metadata["collision_stats"].
     """
     ont_map   = base.get("ontology_map", {})
     ambiguous = base.setdefault("ambiguous_category_terms", {})
@@ -770,13 +816,14 @@ def _resolve_collisions(base):
             term_to_cats.setdefault(t, []).append(cat)
 
     # Authoritative cross-section lookup sets.
-    # ambiguous_specimen_terms is deliberately excluded — see docstring.
+    # ambiguous_specimen_terms is deliberately excluded - see docstring.
     host_keys  = set(base.get("host_to_category", {}).keys())
     human_set  = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
     animal_set = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
 
-    intra_count = 0
-    cross_count = 0
+    intra_count    = 0
+    cross_count    = 0
+    priority_count = 0
 
     for term, cats in term_to_cats.items():
         # Deduplicate category list while preserving order. Multiple identical
@@ -805,13 +852,20 @@ def _resolve_collisions(base):
         if not has_cross and len(unique_cats) == 1:
             continue
 
+        # Priority rules: resolve two-category intra collisions without eviction
+        # when a clear winner is defined (e.g. Food beats Environmental).
+        # Cross-section conflicts bypass priority rules and always evict.
+        if has_intra and not has_cross:
+            if _apply_priority_rule(term, unique_cats, ont_map):
+                priority_count += 1
+                continue
+
         # Record in ambiguous_category_terms (merge if already present)
         existing = ambiguous.get(term, [])
         merged   = list(dict.fromkeys(existing + conflicts))
         ambiguous[term] = merged
 
-        # Remove from all ontology_map category lists (use unique_cats to
-        # avoid redundant .remove() calls on already-cleaned lists)
+        # Remove from all ontology_map category lists
         for cat in unique_cats:
             try:
                 ont_map[cat].remove(term)
@@ -832,14 +886,16 @@ def _resolve_collisions(base):
             )
 
     log.info(
-        "Collision resolution: %d intra-ontology_map, %d cross-section, %d total ambiguous terms",
-        intra_count, cross_count, len(ambiguous),
+        "Collision resolution: %d priority-resolved, %d intra-ontology_map, "
+        "%d cross-section, %d total ambiguous terms",
+        priority_count, intra_count, cross_count, len(ambiguous),
     )
 
     return {
-        "total_ambiguous_terms": len(ambiguous),
-        "intra_ontology_map":    intra_count,
-        "cross_section":         cross_count,
+        "total_ambiguous_terms":   len(ambiguous),
+        "priority_resolved":       priority_count,
+        "intra_ontology_map":      intra_count,
+        "cross_section":           cross_count,
     }
 
 
@@ -931,10 +987,13 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
         "collision_stats": collision_stats,
         "note": (
             "Hand-curated entries always override ontology-derived entries. "
-            "Terms with intra-ontology_map (distinct categories) or authoritative "
-            "cross-section conflicts are recorded in ambiguous_category_terms. "
+            "Intra-ontology_map collisions between distinct categories are first "
+            "checked against _CATEGORY_PRIORITY rules (e.g. Food beats Environmental); "
+            "if a priority rule applies, the term stays in the winner category. "
+            "Remaining intra-map and all authoritative cross-section conflicts are "
+            "recorded in ambiguous_category_terms. "
             "Same-category duplicates from overlapping OLS4 seed subtrees are "
-            "deduplicated silently and do not count as collisions. "
+            "deduplicated silently. "
             "ambiguous_specimen_terms is a tiebreaker and does NOT evict "
             "terms from ontology_map. "
             "Rebuild by running scripts/build_dictionaries.py."
