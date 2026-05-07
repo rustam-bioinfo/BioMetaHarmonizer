@@ -37,10 +37,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Maximum rows serialised into the inline data table.
-# Larger datasets are truncated to keep HTML file size manageable.
-_TABLE_ROW_CAP = 5_000
-
 # Maximum distinct values shown per categorical chart.
 _CHART_TOP_N = 25
 
@@ -115,8 +111,7 @@ def timeline_json(df: pd.DataFrame) -> str:
     date_col = col(df, "collection_date")
     if date_col is None:
         return "null"
-    parsed = pd.to_datetime(date_col, errors="coerce")
-    parsed = parsed.dropna()
+    parsed = pd.to_datetime(date_col, errors="coerce").dropna()
     if parsed.empty:
         return "null"
     by_year = parsed.dt.year.value_counts().sort_index()
@@ -125,6 +120,10 @@ def timeline_json(df: pd.DataFrame) -> str:
 
 
 def geo_json(df: pd.DataFrame) -> str:
+    """
+    Returns a JSON object with both 'labels'/'values' (for pie/bar charts)
+    and 'countries'/'counts' aliases (for the choropleth map).
+    """
     c = col(df, "geo_country", "geo_loc_name")
     if c is None:
         return "null"
@@ -133,9 +132,13 @@ def geo_json(df: pd.DataFrame) -> str:
     total = len(counts)
     capped = total > 30
     counts = counts.iloc[:30]
+    labels = counts.index.tolist()
+    values = counts.values.tolist()
     return json.dumps({
-        "countries": counts.index.tolist(),
-        "counts": counts.values.tolist(),
+        "labels":   labels,
+        "values":   values,
+        "countries": labels,
+        "counts":    values,
         "capped": capped,
         "top_n": 30,
     })
@@ -261,15 +264,6 @@ def df_to_records(df: pd.DataFrame) -> str:
     remaining = [c for c in df.columns if c not in available and c != "_extra_attributes"]
     final_cols = available + remaining
     sub = df[final_cols].fillna("")
-
-    if len(sub) > _TABLE_ROW_CAP:
-        logger.warning(
-            "Data table truncated to %d rows (dataset has %d). "
-            "Increase _TABLE_ROW_CAP if needed.",
-            _TABLE_ROW_CAP, len(sub),
-        )
-        sub = sub.iloc[:_TABLE_ROW_CAP]
-
     return json.dumps({"columns": final_cols, "rows": sub.values.tolist()})
 
 
@@ -339,7 +333,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  /* Layout */
   .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
              background: var(--surface); border-right: 1px solid var(--border);
              padding: 20px 0; overflow-y: auto; z-index: 100; }
@@ -350,8 +343,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 20px;
               cursor: pointer; color: var(--muted); transition: all .2s;
               font-size: 13px; }
-  .nav-item:hover, .nav-item.active { background: var(--surface2);
-                                      color: var(--text); }
+  .nav-item:hover, .nav-item.active { background: var(--surface2); color: var(--text); }
   .nav-item.active { border-right: 3px solid var(--accent); }
   .nav-icon { font-size: 16px; width: 20px; text-align: center; }
 
@@ -360,11 +352,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .page-header h1 { font-size: 24px; font-weight: 700; }
   .page-header p { color: var(--muted); margin-top: 4px; font-size: 13px; }
 
-  /* Sections */
   .section { display: none; }
   .section.active { display: block; }
 
-  /* Stat cards */
   .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
                gap: 16px; margin-bottom: 28px; }
   .stat-card { background: var(--surface); border: 1px solid var(--border);
@@ -372,16 +362,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-value { font-size: 28px; font-weight: 700; color: var(--accent); line-height: 1; }
   .stat-label { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
-  /* Chart cards */
   .chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
                 gap: 20px; margin-bottom: 28px; }
   .chart-card { background: var(--surface); border: 1px solid var(--border);
                 border-radius: var(--card-radius); padding: 20px; }
-  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px;
-                   color: var(--text); }
+  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; color: var(--text); }
   .chart-card.wide { grid-column: 1 / -1; }
 
-  /* Table */
   .table-wrap { background: var(--surface); border: 1px solid var(--border);
                 border-radius: var(--card-radius); overflow: hidden; }
   .table-toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 16px;
@@ -419,25 +406,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .pag-btn:not(:disabled):hover { border-color: var(--accent); }
   .pag-info { font-size: 12px; color: var(--muted); margin-left: auto; }
 
-  /* Completeness bar */
-  .completeness-bar { height: 8px; background: var(--surface2); border-radius: 4px;
-                      overflow: hidden; margin-top: 6px; }
-  .completeness-bar div { height: 100%; border-radius: 4px;
-                          background: linear-gradient(90deg, var(--accent), var(--accent3)); }
-
-  /* Badges */
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px;
-           font-size: 11px; font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
   .badge-green { background: rgba(34,197,94,.15); color: var(--green); }
   .badge-yellow { background: rgba(245,158,11,.15); color: var(--yellow); }
   .badge-red { background: rgba(239,68,68,.15); color: var(--red); }
   .badge-blue { background: rgba(79,142,247,.15); color: var(--accent); }
 
-  /* Responsive */
   @media (max-width: 768px) {
     .sidebar { transform: translateX(-220px); }
     .main { margin-left: 0; padding: 16px; }
-    .chart-grid { grid-template-columns: 1fr; }
+    .chart-grid { grid-column: 1fr; }
   }
 </style>
 </head>
@@ -479,20 +457,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="stat-grid" id="stat-grid"></div>
   <div class="chart-grid">
     <div class="chart-card" style="min-height:320px">
-      <h3 id="title-taxonomy-ov">Organism Distribution</h3>
-      <div id="fig-taxonomy-ov" style="height:280px"></div>
-    </div>
-    <div class="chart-card" style="min-height:320px">
       <h3 id="title-geo-ov">Geographic Distribution</h3>
       <div id="fig-geo-ov" style="height:280px"></div>
     </div>
     <div class="chart-card" style="min-height:320px">
-      <h3 id="title-sample-type">Sample Type</h3>
-      <div id="fig-sample-type" style="height:280px"></div>
+      <h3 id="title-host-ov">Host Distribution</h3>
+      <div id="fig-host-ov" style="height:280px"></div>
     </div>
     <div class="chart-card" style="min-height:320px">
-      <h3>Access &amp; Status</h3>
-      <div id="fig-access" style="height:280px"></div>
+      <h3 id="title-isolation-ov">Isolation Source</h3>
+      <div id="fig-isolation-ov" style="height:280px"></div>
+    </div>
+    <div class="chart-card" style="min-height:320px">
+      <h3 id="title-access-ov">Access</h3>
+      <div id="fig-access-ov" style="height:280px"></div>
+    </div>
+    <div class="chart-card" style="min-height:320px">
+      <h3 id="title-status-ov">Status</h3>
+      <div id="fig-status-ov" style="height:280px"></div>
     </div>
     <div class="chart-card" style="min-height:320px">
       <h3 id="title-bioprojects-ov">Top BioProjects</h3>
@@ -640,7 +622,6 @@ const CFG = { responsive: true, displayModeBar: false };
 
 function layout(extras) { return Object.assign({}, LAYOUT_BASE, extras); }
 
-// Append " (top N)" to a chart heading element when data was capped.
 function maybeAnnotateTitle(titleId, data) {
   if (!data || !data.capped) return;
   const el = document.getElementById(titleId);
@@ -711,15 +692,15 @@ function pie(el, data, height, titleId) {
   }), CFG);
 }
 
-function bar(el, labels, values, color, height) {
+function barV(el, labels, values, color, height) {
   Plotly.newPlot(el, [{
     type: 'bar', x: labels, y: values,
     marker: { color: color || '#4f8ef7', opacity: 0.85 },
   }], layout({
-    margin: { t: 10, b: 60, l: 50, r: 10 },
-    xaxis: { tickangle: -35 },
-    yaxis: { showgrid: true, gridcolor: '#2a2f45' },
-    height: height || 280,
+    margin: { t: 10, b: 70, l: 55, r: 10 },
+    xaxis: { tickangle: -45, showgrid: false },
+    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
+    height: height || 300,
   }), CFG);
 }
 
@@ -730,22 +711,19 @@ function renderSection(name) {
   rendered[name] = true;
 
   if (name === 'overview') {
-    pie('fig-taxonomy-ov', TAX_DATA, 280, 'title-taxonomy-ov');
-    pie('fig-geo-ov', GEO_DATA, 280, 'title-geo-ov');
-    pie('fig-sample-type', STYPE_DATA, 280, 'title-sample-type');
-    const accessData = ACCESS_DATA && STATUS_DATA
-      ? { labels: [...(ACCESS_DATA.labels||[]), ...(STATUS_DATA.labels||[])],
-          values: [...(ACCESS_DATA.values||[]), ...(STATUS_DATA.values||[])] }
-      : (ACCESS_DATA || STATUS_DATA);
-    pie('fig-access', accessData);
+    pie('fig-geo-ov',       GEO_DATA,   280, 'title-geo-ov');
+    pie('fig-host-ov',      HOST_DATA,  280, 'title-host-ov');
+    pie('fig-isolation-ov', ISOL_DATA,  280, 'title-isolation-ov');
+    pie('fig-access-ov',    ACCESS_DATA, 280, 'title-access-ov');
+    pie('fig-status-ov',    STATUS_DATA, 280, 'title-status-ov');
     barH('fig-bioprojects-ov', BPROJ_DATA, 280, 'title-bioprojects-ov');
   }
 
   if (name === 'taxonomy') {
-    barH('fig-taxonomy-bar', TAX_DATA, 320, 'title-taxonomy-bar');
-    pie('fig-host', HOST_DATA, 320, 'title-host');
+    barH('fig-taxonomy-bar', TAX_DATA,   320, 'title-taxonomy-bar');
+    pie('fig-host',          HOST_DATA,  320, 'title-host');
     barH('fig-host-disease', HDISC_DATA, 320, 'title-host-disease');
-    barH('fig-isolation', ISOL_DATA, 320, 'title-isolation');
+    barH('fig-isolation',    ISOL_DATA,  320, 'title-isolation');
   }
 
   if (name === 'geography') {
@@ -773,31 +751,12 @@ function renderSection(name) {
 
   if (name === 'temporal') {
     if (TIMELINE) {
-      Plotly.newPlot('fig-timeline', [{
-        type: 'bar', x: TIMELINE.years, y: TIMELINE.counts,
-        marker: { color: '#2ec4b6', opacity: 0.85 },
-      }], layout({
-        xaxis: { title: 'Year', dtick: 1, tickangle: -45 },
-        yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples' },
-        margin: { t: 10, b: 70, l: 55, r: 10 },
-        height: 300,
-      }), CFG);
+      barV('fig-timeline', TIMELINE.years.map(String), TIMELINE.counts, '#2ec4b6', 300);
     } else {
       document.getElementById('fig-timeline').innerHTML = '<p style="color:var(--muted);padding:20px">No collection date data</p>';
     }
     if (SUBMIT_TL) {
-      Plotly.newPlot('fig-submission', [{
-        type: 'scatter', mode: 'lines+markers',
-        x: SUBMIT_TL.months, y: SUBMIT_TL.counts,
-        line: { color: '#f59e0b', width: 2 },
-        marker: { color: '#f59e0b', size: 5 },
-        fill: 'tozeroy', fillcolor: 'rgba(245,158,11,0.08)',
-      }], layout({
-        xaxis: { tickangle: -45 },
-        yaxis: { showgrid: true, gridcolor: '#2a2f45' },
-        margin: { t: 10, b: 70, l: 50, r: 10 },
-        height: 300,
-      }), CFG);
+      barV('fig-submission', SUBMIT_TL.months, SUBMIT_TL.counts, '#f59e0b', 300);
     } else {
       document.getElementById('fig-submission').innerHTML = '<p style="color:var(--muted);padding:20px">No submission date data</p>';
     }
@@ -805,8 +764,8 @@ function renderSection(name) {
 
   if (name === 'onehealth') {
     pie('fig-oh-cat', OH_CAT, 300, 'title-oh-cat');
-    bar('fig-oh-conf', OH_CONF ? OH_CONF.labels : [], OH_CONF ? OH_CONF.values : [], '#7c5cbf', 300);
-    bar('fig-oh-evid', OH_EVID ? OH_EVID.labels : [], OH_EVID ? OH_EVID.values : [], '#2ec4b6', 300);
+    barV('fig-oh-conf', OH_CONF ? OH_CONF.labels : [], OH_CONF ? OH_CONF.values : [], '#7c5cbf', 300);
+    barV('fig-oh-evid', OH_EVID ? OH_EVID.labels : [], OH_EVID ? OH_EVID.values : [], '#2ec4b6', 300);
     if (OH_EVID) maybeAnnotateTitle('title-oh-evid', OH_EVID);
   }
 
@@ -876,7 +835,7 @@ function makeLink(v) {
   if (!v || v === '') return '';
   if (ACCESSION_RE.test(v)) {
     const prefix = v.slice(0, 3);
-    const base = NCBI_BASES[prefix] || NCBI_BASES[v.slice(0,3)];
+    const base = NCBI_BASES[prefix];
     if (base) return `<a href="${base}${v}" target="_blank">${v}</a>`;
   }
   return escHtml(v);
@@ -933,9 +892,7 @@ function changePage(dir) {
 
 function sortTable(idx) {
   const ths = document.querySelectorAll('#thead th');
-  ths.forEach((th, i) => {
-    th.classList.remove('sort-asc', 'sort-desc');
-  });
+  ths.forEach(th => th.classList.remove('sort-asc', 'sort-desc'));
   if (sortCol === idx) { sortDir *= -1; }
   else { sortCol = idx; sortDir = 1; }
   ths[idx].classList.add(sortDir === 1 ? 'sort-asc' : 'sort-desc');
