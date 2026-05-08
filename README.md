@@ -67,54 +67,6 @@ biometaharmonizer run \
 | `--refresh-cache` | off | Force re-download of assembly summary flat files regardless of age |
 | `--verbose` | off | Enable DEBUG-level logging |
 
-### Python API
-
-```python
-from biometaharmonizer.ingestion import set_email, ingest
-from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier
-from biometaharmonizer import write, write_summary
-
-# Ingest: accepts a file path, a Python list, or a mix of both accession types
-set_email("your@email.com")
-df = ingest("accessions.txt")
-# or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
-
-# Force re-download of assembly summary flat files (bypasses 7-day TTL):
-# df = ingest("accessions.txt", refresh_cache=True)
-
-# Key harmonization — renames raw columns to standard keys, coalesces duplicates
-# Needed only if you bring your own DataFrame; ingest() already applies the schema
-mapper = KeyMapper()
-df = mapper.map_columns(df)
-
-# Date parsing: 40+ input formats -> ISO 8601 (YYYY / YYYY-MM / YYYY-MM-DD)
-de = DateEngine()
-date_df = de.parse_with_range(df["collection_date"])
-df["collection_date"] = date_df["collection_date"]
-df["collection_date_range"] = date_df["collection_date_range"]
-
-# Geography: splits geo_loc_name into country, region, locality, ISO code, sea
-ge = GeoEngine()
-geo_df = ge.parse(df["geo_loc_name"])
-for col in geo_df.columns:
-    df[col] = geo_df[col]
-
-# One Health classification across multiple source columns simultaneously
-oh = OneHealthClassifier()
-src = {col: df[col] for col in
-       ["isolation_source", "env_broad_scale", "env_local_scale",
-        "env_medium", "sample_type", "host"]
-       if col in df.columns}
-oh_df = oh.classify_multi_field(**src)
-for col in oh_df.columns:
-    df[col] = oh_df[col]
-
-# Write output
-write(df, "harmonized.csv")
-write_summary(df, "fill_rates.csv")
-```
-
----
 
 ## Output columns
 
@@ -556,6 +508,55 @@ pytest tests/ -v --tb=short
 ```
 
 All tests use synthetic data — no live NCBI calls are made.
+
+---
+
+### Python API
+
+```python
+from biometaharmonizer.ingestion import set_email, ingest
+from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier
+from biometaharmonizer import write, write_summary
+
+# Ingest: accepts a file path, a Python list, or a mix of both accession types
+set_email("your@email.com")
+df = ingest("accessions.txt")
+# or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
+
+# Force re-download of assembly summary flat files (bypasses 7-day TTL):
+# df = ingest("accessions.txt", refresh_cache=True)
+
+# Key harmonization — renames raw columns to standard keys, coalesces duplicates
+# Needed only if you bring your own DataFrame; ingest() already applies the schema
+mapper = KeyMapper()
+df = mapper.map_columns(df)
+
+# Date parsing: 40+ input formats -> ISO 8601 (YYYY / YYYY-MM / YYYY-MM-DD)
+de = DateEngine()
+date_df = de.parse_with_range(df["collection_date"])
+df["collection_date"] = date_df["collection_date"]
+df["collection_date_range"] = date_df["collection_date_range"]
+
+# Geography: splits geo_loc_name into country, region, locality, ISO code, sea
+ge = GeoEngine()
+geo_df = ge.parse(df["geo_loc_name"])
+for col in geo_df.columns:
+    df[col] = geo_df[col]
+
+# One Health classification across multiple source columns simultaneously
+oh = OneHealthClassifier()
+src = {col: df[col] for col in
+       ["isolation_source", "env_broad_scale", "env_local_scale",
+        "env_medium", "sample_type", "host"]
+       if col in df.columns}
+oh_df = oh.classify_multi_field(**src)
+for col in oh_df.columns:
+    df[col] = oh_df[col]
+
+# Write output
+write(df, "harmonized.csv")
+write_summary(df, "fill_rates.csv")
+```
 
 ---
 
