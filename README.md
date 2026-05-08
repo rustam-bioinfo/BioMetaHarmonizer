@@ -120,7 +120,6 @@ write_summary(df, "fill_rates.csv")
 
 The output DataFrame contains **57 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
-The first 52 columns come from ingestion. The final **6** are added by `OneHealthClassifier.classify_multi_field()` (`one_health_category` at column 28 is also produced by that step; the 6 new columns are rows 29–34).
 
 | # | Column | Source | Description |
 |---|--------|--------|-------------|
