@@ -222,7 +222,6 @@ def _load_final_schema() -> list:
         "geo_locality",
         "geo_iso3166",
         "geo_sea_ocean",
-        "geo_loc_raw",
         # BLOCK 7 — Temporal
         "collection_date",
         "collection_date_range",
