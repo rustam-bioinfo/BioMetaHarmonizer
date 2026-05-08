@@ -31,6 +31,11 @@ class DateEngine:
       - Named-month cross-year:    Oct 2020-Feb 2021, Dec 2018-Jan 2019
       - Season strings:            Spring 2019, Winter 2020-2021
       - Approximate/uncertain:     ~2015, circa 2010, early March 2020, late 2019
+
+    Same-year degenerate range
+    --------------------------
+    "YYYY-YYYY" where both years are identical is treated as the point year
+    "YYYY", not as a range.  collection_date_range is left NaN.
     """
 
     # Canonical null pattern set -- kept in sync with ingestion._NULL_PATTERNS
@@ -87,26 +92,36 @@ class DateEngine:
         re.IGNORECASE,
     )
 
+    # Sentinel returned by _detect_range when the input is a degenerate
+    # same-year string like "2020-2020" that should be collapsed to "2020".
+    _SAME_YEAR = object()
+
     @staticmethod
     def _empty_row():
         return {"collection_date": np.nan, "collection_date_range": np.nan}
 
     @staticmethod
     def _detect_range(value):
+        """
+        Return True             -- value is a genuine range
+               False            -- value is not a range
+               DateEngine._SAME_YEAR -- degenerate YYYY-YYYY (treat as point)
+        """
         v = value.strip()
         if DateEngine._INSDC_SLASH_RANGE.match(v):
             return True
         m = DateEngine._YEAR_ONLY_RANGE.match(v)
         if m:
             start, end = int(m.group("start")), int(m.group("end"))
-            if start != end:
-                if start > end:
-                    logger.warning(
-                        "Inverted year range detected: %r (start=%d > end=%d). "
-                        "Preserving verbatim in collection_date_range.",
-                        v, start, end,
-                    )
-                return True
+            if start == end:
+                return DateEngine._SAME_YEAR
+            if start > end:
+                logger.warning(
+                    "Inverted year range detected: %r (start=%d > end=%d). "
+                    "Preserving verbatim in collection_date_range.",
+                    v, start, end,
+                )
+            return True
         if DateEngine._NUMERIC_DASH_RANGE.match(v):
             return True
         if DateEngine._NAMED_MONTH_SAME_YEAR.match(v):
@@ -158,7 +173,14 @@ class DateEngine:
         if self.NULL_PATTERNS.match(value):
             return self._empty_row()
 
-        if self._detect_range(value):
+        range_result = self._detect_range(value)
+
+        if range_result is self._SAME_YEAR:
+            # "2020-2020" -> collapse to the point year
+            year = value.strip().split("-")[0].strip()
+            return {"collection_date": year, "collection_date_range": np.nan}
+
+        if range_result:
             return {
                 "collection_date": np.nan,
                 "collection_date_range": value,
