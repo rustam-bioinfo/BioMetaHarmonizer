@@ -64,8 +64,8 @@ class GeoEngine:
         re.IGNORECASE,
     )
 
-    # LOW-8: Use negated char class [^)]* instead of greedy .* to strip only
-    # the LAST parenthetical group, not the entire span from first ( to last ).
+    # Strips ONE trailing parenthetical group per application.
+    # Applied in a loop in _strip_parens() to remove all trailing groups.
     _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
     # Tier-2 water body keyword regex.
@@ -171,6 +171,9 @@ class GeoEngine:
         "strait of malacca",
     }
 
+    # Column order guaranteed on every output DataFrame, including empty input.
+    _COLUMNS = ["geo_country", "geo_region", "geo_locality", "geo_iso3166", "geo_sea_ocean"]
+
     def _empty(self):
         return {
             "geo_country": np.nan,
@@ -179,6 +182,14 @@ class GeoEngine:
             "geo_iso3166": np.nan,
             "geo_sea_ocean": np.nan,
         }
+
+    def _strip_parens(self, s):
+        """Strip all trailing parenthetical groups from s."""
+        while True:
+            stripped = self._PAREN_RE.sub("", s).strip()
+            if stripped == s:
+                return s
+            s = stripped
 
     def _water_body_result(self, country_str_clean, region_str, locality_str):
         """Build result dict for a detected water body token."""
@@ -208,7 +219,7 @@ class GeoEngine:
             cache[v] if pd.notna(v) and v in cache else empty
             for v in series
         ]
-        return pd.DataFrame(results, index=series.index)
+        return pd.DataFrame(results, index=series.index, columns=self._COLUMNS)
 
     def _parse_single(self, value):
         empty = self._empty()
@@ -221,7 +232,7 @@ class GeoEngine:
 
         country_str, region_str, locality_str = self._split_geo_string(value)
 
-        country_str_clean = self._PAREN_RE.sub("", country_str).strip()
+        country_str_clean = self._strip_parens(country_str)
         lower_country = country_str_clean.lower()
 
         # Tier 1: explicit canonical water body set
