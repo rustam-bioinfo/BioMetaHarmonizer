@@ -36,7 +36,7 @@ class GeoEngine:
     Water body detection (two-tier)
     --------------------------------
     Tier 1 -- explicit set _OCEAN_SEA: exact case-insensitive lookup for
-              canonical names (fast, zero false positives).
+              canonical names (zero false positives).
     Tier 2 -- regex _WATER_BODY_RE: catches any token containing a water-body
               keyword (ocean, sea, gulf, bay, strait, fjord, bight, sound,
               inlet, lagoon, lake, reservoir, estuary, delta, reef, atoll)
@@ -82,6 +82,11 @@ class GeoEngine:
         r"(?!\s*(islands?|territory|states?))",
         re.IGNORECASE,
     )
+
+    # Minimum rapidfuzz score for pycountry.search_fuzzy to be accepted.
+    # Scores below this threshold indicate a poor match (e.g. free text like
+    # "Clinical lab sample" fuzzy-matching "Samoa") and are rejected.
+    _FUZZY_MIN_SCORE = 80
 
     _UK_SUBCOUNTRY = {
         "england": "GB",
@@ -313,7 +318,9 @@ class GeoEngine:
             return np.nan
 
         try:
-            result = pycountry.countries.search_fuzzy(country_str)
+            result = pycountry.countries.search_fuzzy(
+                country_str, min_score=self._FUZZY_MIN_SCORE
+            )
             return result[0].alpha_2
         except Exception:
             return np.nan
