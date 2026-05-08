@@ -239,13 +239,6 @@ biometaharmonizer run --input ids.txt --email you@example.com \
 df = ingest("ids.txt", email="you@example.com", refresh_cache=True)
 ```
 
-In Colab:
-
-```python
-from biometaharmonizer.ingestion import set_cache_dir
-set_cache_dir("/content/bmh_cache")
-```
-
 ---
 
 ## Entrez rate limits
@@ -298,6 +291,8 @@ Coordinate data (e.g. `"40.71 N, 74.00 W"`) belongs in the `lat_lon` attribute, 
 | `"not applicable"` | all geo columns NaN |
 | `"Lake Baikal"` | sea\_ocean=Lake Baikal |
 | `"Gulf of Bothnia"` | sea\_ocean=Gulf of Bothnia |
+| `"Svalbard: Revvatnet basin, southern Spitsbergen"` | country=Svalbard, region=Revvatnet basin, locality=southern Spitsbergen, iso=SJ |
+| `"Kosovo"` | country=Kosovo, iso=XK |
 
 Handling notes:
 
