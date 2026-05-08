@@ -11,7 +11,7 @@ A Python package for fetching, parsing, and standardizing NCBI BioSample metadat
 
 ## What it does
 
-NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, or Parquet.
+NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, Parquet, or JSON Lines (JSONL).
 
 Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
 
@@ -51,7 +51,7 @@ biometaharmonizer run \
 | `--output FILE` | required | Output file path |
 | `--api-key KEY` | — | NCBI API key; raises rate limit from 3 to 10 requests/second |
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Directory for assembly summary flat files |
-| `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet` |
+| `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet`, `jsonl` |
 | `--summary FILE` | — | Write a per-column fill-rate CSV |
 | `--fetch-batch-size N` | `200` | Number of records per efetch request |
 | `--esearch-batch-size N` | `200` | Number of accessions per esearch term |
@@ -403,11 +403,14 @@ write(df, "out.csv")                        # CSV
 write(df, "out.tsv", fmt="tsv")             # TSV
 write(df, "out.xlsx", fmt="excel")          # Excel
 write(df, "out.parquet", fmt="parquet")     # Parquet
+write(df, "out.jsonl", fmt="jsonl")         # JSON Lines (one record per line)
 
 write_summary(df, "fill_rates.csv")         # column, non_null_count, fill_pct
 ```
 
-Format strings are case-insensitive. If `--format` is not specified on the CLI, the format is inferred from the output file extension.
+Format strings are case-insensitive. If `--format` is not specified on the CLI, the format is inferred from the output file extension (`.jsonl` → `jsonl`).
+
+The JSONL writer decodes the `_extra_attributes` field from its JSON string representation into a native Python dict before serialization, so downstream consumers receive a fully nested JSON object rather than a double-encoded string.
 
 ---
 
@@ -486,7 +489,7 @@ BioMetaHarmonizer/
 │   ├── date_engine.py          # date parsing, ISO 8601 output
 │   ├── geo_engine.py           # geo_loc_name splitting, ISO-3166 resolution
 │   ├── one_health.py           # One Health categorization
-│   ├── output.py               # write CSV / TSV / Excel / Parquet
+│   ├── output.py               # write CSV / TSV / Excel / Parquet / JSONL
 │   └── schemas/
 │       ├── unified.json                      # standard keys + synonym lists
 │       ├── one_health_dictionaries.json      # One Health keyword/ontology dict
