@@ -306,7 +306,7 @@ Handling notes:
 - `Gaza Strip`, `West Bank`, `Gaza`, `Palestine`, `Palestinian territories` → iso `PS`
 - `Korea` (bare, no qualifier) → South Korea (`KR`); logged at INFO level
 - Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
-- `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo` and several aliases are resolved via a hardcoded table before pycountry fuzzy lookup
+- `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo`, `Russia`, `Czech Republic`, `Svalbard`, `Kosovo`, and several other names are resolved via a hardcoded alias table before pycountry fuzzy lookup. `Kosovo` uses code `XK` — a user-assigned code per CLDR and EU conventions, not part of the official ISO 3166-1 standard.
 - All unique `geo_loc_name` values are resolved once and cached; pycountry fuzzy lookup runs at most once per unique country string regardless of row count
 
 ---
