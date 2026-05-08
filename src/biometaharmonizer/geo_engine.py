@@ -23,12 +23,25 @@ class GeoEngine:
                     Exception: UK sub-countries are normalised to
                     "United Kingdom".
                     NaN is returned when the token cannot be resolved to a
-                    known or historical country (e.g. free text, water bodies
-                    not in _OCEAN_SEA, unrecognised strings).
+                    known or historical country (e.g. free text, water bodies,
+                    unrecognised strings).
     geo_region    : sub-national region as submitted (str or NaN)
     geo_locality  : locality / sub-region as submitted (str or NaN)
     geo_iso3166   : ISO 3166-1 alpha-2 country code (str or 'HISTORICAL' or NaN)
-    geo_sea_ocean : ocean/sea name for marine samples (str or NaN)
+    geo_sea_ocean : any named water body -- ocean, sea, gulf, bay, strait,
+                    fjord, lake, reservoir, etc. (str or NaN).  The column
+                    name is kept for historical compatibility; it covers all
+                    aquatic geographic features, not only marine ones.
+
+    Water body detection (two-tier)
+    --------------------------------
+    Tier 1 -- explicit set _OCEAN_SEA: exact case-insensitive lookup for
+              canonical names (fast, zero false positives).
+    Tier 2 -- regex _WATER_BODY_RE: catches any token containing a water-body
+              keyword (ocean, sea, gulf, bay, strait, fjord, bight, sound,
+              inlet, lagoon, lake, reservoir, estuary, delta, reef, atoll)
+              that is NOT followed by "islands?", "territory", or "states?".
+              Applied only when Tier 1 misses.
 
     Strings that cannot be parsed (unrecognised country names, free-text
     descriptions, etc.) return all five columns as NaN.  Coordinate data
@@ -54,6 +67,21 @@ class GeoEngine:
     # LOW-8: Use negated char class [^)]* instead of greedy .* to strip only
     # the LAST parenthetical group, not the entire span from first ( to last ).
     _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+    # Tier-2 water body keyword regex.
+    # Negative lookahead blocks known false positives:
+    #   "Channel Islands"  -- channel + islands
+    #   "Pacific Islands"  -- not triggered (no keyword match)
+    #   "Gulf States"      -- gulf + states
+    #   "Island Territories" -- no keyword match
+    # "lake" and "reservoir" are included deliberately; geo_sea_ocean covers
+    # all named aquatic features (see column docstring above).
+    _WATER_BODY_RE = re.compile(
+        r"\b(ocean|sea|gulf|bay|strait|fjord|bight|sound|inlet|"
+        r"lagoon|lake|reservoir|estuary|delta|reef|atoll)\b"
+        r"(?!\s*(islands?|territory|states?))",
+        re.IGNORECASE,
+    )
 
     _UK_SUBCOUNTRY = {
         "england": "GB",
@@ -105,10 +133,8 @@ class GeoEngine:
         "netherlands antilles",
     }
 
-    # MED-5: Expanded ocean/sea/gulf/bay set.
-    # Arctic and marginal seas added: Kara Sea, Laptev Sea, East Siberian Sea,
-    # Chukchi Sea, Beaufort Sea, White Sea, Greenland Sea, Irminger Sea,
-    # Mawson Sea, Amundsen Sea, Davis Strait.
+    # MED-5: Explicit set for canonical water body names (Tier 1).
+    # Tier 2 (_WATER_BODY_RE) catches anything not listed here.
     _OCEAN_SEA = {
         # Oceans
         "pacific ocean", "atlantic ocean", "indian ocean",
@@ -149,6 +175,16 @@ class GeoEngine:
             "geo_sea_ocean": np.nan,
         }
 
+    def _water_body_result(self, country_str_clean, region_str, locality_str):
+        """Build result dict for a detected water body token."""
+        result = self._empty()
+        result["geo_sea_ocean"] = country_str_clean
+        if region_str:
+            result["geo_locality"] = (
+                region_str if not locality_str else f"{region_str}, {locality_str}"
+            )
+        return result
+
     def parse(self, series):
         if isinstance(series, pd.DataFrame):
             series = series.iloc[:, 0]
@@ -183,14 +219,17 @@ class GeoEngine:
         country_str_clean = self._PAREN_RE.sub("", country_str).strip()
         lower_country = country_str_clean.lower()
 
+        # Tier 1: explicit canonical water body set
         if lower_country in self._OCEAN_SEA:
-            result = dict(empty)
-            result["geo_sea_ocean"] = country_str_clean
-            if region_str:
-                result["geo_locality"] = (
-                    region_str if not locality_str else f"{region_str}, {locality_str}"
-                )
-            return result
+            return self._water_body_result(country_str_clean, region_str, locality_str)
+
+        # Tier 2: regex fallback for any water body keyword not in the set
+        if self._WATER_BODY_RE.search(country_str_clean):
+            logger.debug(
+                "GeoEngine: %r matched water body regex (Tier 2) -> geo_sea_ocean.",
+                country_str_clean,
+            )
+            return self._water_body_result(country_str_clean, region_str, locality_str)
 
         if lower_country in self._UK_SUBCOUNTRY:
             display_country = "United Kingdom"
@@ -201,8 +240,7 @@ class GeoEngine:
 
         # If ISO resolution completely failed and the token is not a known
         # historical entry, the country string is unrecognisable (free text,
-        # unregistered water body, coordinate fragment, etc.) -- return all-NaN
-        # rather than blindly storing the raw token in geo_country.
+        # coordinate fragment, etc.) -- return all-NaN.
         if pd.isna(iso_code) and lower_country not in self._HISTORICAL_COUNTRIES:
             logger.debug(
                 "GeoEngine: unresolvable country token %r -- returning all-NaN.",

@@ -88,7 +88,8 @@ class TestOceanSea:
         "Persian Gulf",
         "Bay of Bengal",
     ])
-    def test_ocean_routed_to_geo_sea_ocean(self, ge, ocean):
+    def test_tier1_ocean_routed_to_geo_sea_ocean(self, ge, ocean):
+        """Tier-1 explicit set: canonical names must land in geo_sea_ocean."""
         row = _parse(ge, ocean)
         assert row["geo_sea_ocean"] == ocean
         assert pd.isna(row["geo_country"])
@@ -117,19 +118,71 @@ class TestOceanSea:
         "Greenland Sea",
     ])
     def test_arctic_seas_routed_to_geo_sea_ocean(self, ge, arctic_sea):
-        """Arctic and marginal seas must land in geo_sea_ocean, not geo_country."""
+        """Arctic and marginal seas (Tier-1) must land in geo_sea_ocean."""
         row = _parse(ge, arctic_sea)
         assert row["geo_sea_ocean"] == arctic_sea
         assert pd.isna(row["geo_country"])
         assert pd.isna(row["geo_iso3166"])
 
-    def test_truly_unknown_water_body_returns_all_nan(self, ge):
-        """A water body not in _OCEAN_SEA and not resolvable by pycountry
-        returns all-NaN (nothing stored in geo_country or geo_sea_ocean)."""
-        row = _parse(ge, "Lake Baikal")
+
+class TestWaterBodyRegex:
+    """Tier-2 regex fallback: water bodies not in _OCEAN_SEA are still routed
+    to geo_sea_ocean via _WATER_BODY_RE."""
+
+    @pytest.mark.parametrize("water_body", [
+        "Lake Baikal",
+        "Lake Victoria",
+        "Lake Chad",
+        "Caspian Lake",
+        "Tonle Sap Lake",
+        "Aral Sea",
+        "Salish Sea",
+        "Gulf of Bothnia",
+        "Gulf of Finland",
+        "Bay of Fundy",
+        "Great Barrier Reef",
+        "Torres Strait",
+        "Cook Strait",
+        "Strait of Gibraltar",
+        "Strait of Hormuz",
+        "Sognefjord",
+        "Hardangerfjord",
+        "Chesapeake Bay",
+        "San Francisco Bay",
+        "Puget Sound",
+        "Long Island Sound",
+        "Niger Delta",
+        "Ganges Delta",
+        "Nile Delta",
+        "Coorong Lagoon",
+        "Venice Lagoon",
+        "Irrawaddy Delta",
+        "Hoover Reservoir",
+    ])
+    def test_tier2_water_body_routed_to_geo_sea_ocean(self, ge, water_body):
+        row = _parse(ge, water_body)
+        assert row["geo_sea_ocean"] == water_body, (
+            f"{water_body!r} should be routed to geo_sea_ocean via Tier-2 regex"
+        )
         assert pd.isna(row["geo_country"])
-        assert pd.isna(row["geo_sea_ocean"])
         assert pd.isna(row["geo_iso3166"])
+
+    @pytest.mark.parametrize("safe_country", [
+        "Channel Islands",
+        "Gulf States",
+        "Pacific Islands",
+        "Cook Islands",
+        "Solomon Islands",
+        "Faroe Islands",
+        "British Indian Ocean Territory",
+    ])
+    def test_tier2_false_positive_guard(self, ge, safe_country):
+        """Tokens containing water-body keywords but matching the negative
+        lookahead (islands?, territory, states?) must NOT go to geo_sea_ocean."""
+        row = _parse(ge, safe_country)
+        assert pd.isna(row["geo_sea_ocean"]), (
+            f"{safe_country!r} must not be routed to geo_sea_ocean"
+        )
 
 
 class TestIsoResolution:
