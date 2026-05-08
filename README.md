@@ -118,7 +118,7 @@ write_summary(df, "fill_rates.csv")
 
 ## Output columns
 
-The output DataFrame contains **58 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
+The output DataFrame contains **57 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
 The first 52 columns come from ingestion. The final **6** are added by `OneHealthClassifier.classify_multi_field()` (`one_health_category` at column 28 is also produced by that step; the 6 new columns are rows 29–34).
 
@@ -143,45 +143,44 @@ The first 52 columns come from ingestion. The final **6** are added by `OneHealt
 | 17 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
 | 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
 | 19 | `geo_sea_ocean` | GeoEngine | Sea or ocean name for marine locations |
-| 20 | `geo_loc_raw` | GeoEngine | Preserved raw string for coordinate-only inputs (e.g. `"40.71 N, 74.00 W"`); `NaN` for all other inputs |
-| 21 | `host` | BioSample attribute | Host organism name |
-| 22 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
-| 23 | `host_age` | BioSample attribute | Age of host |
-| 24 | `host_sex` | BioSample attribute | Biological sex of host |
-| 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
-| 26 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
-| 27 | `sample_type` | BioSample attribute | Sample type or specimen classification |
-| 28 | `one_health_category` | OneHealthClassifier | One of: Human, Animal, Aquatic, Wildlife, Plant, Food, Environmental, Lab, Unclassified |
-| 29 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
-| 30 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
-| 31 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
-| 32 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
-| 33 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`), if any |
-| 34 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
-| 35 | `isolate` | BioSample attribute | Isolate identifier |
-| 36 | `strain` | BioSample attribute | Strain designation |
-| 37 | `sub_strain` | BioSample attribute | Sub-strain designation |
-| 38 | `serotype` | BioSample attribute | Serotype |
-| 39 | `serovar` | BioSample attribute | Serovar |
-| 40 | `genotype` | BioSample attribute | Genotype or sequence type |
-| 41 | `culture_collection` | BioSample attribute | Culture collection identifier |
-| 42 | `outbreak` | BioSample attribute | Outbreak identifier |
-| 43 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
-| 44 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
-| 45 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
-| 46 | `sequencing_method` | BioSample attribute | Sequencing platform |
-| 47 | `assembly_method` | BioSample attribute | Genome assembly software |
-| 48 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
-| 49 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
-| 50 | `submission_date` | BioSample XML | Date first submitted |
-| 51 | `last_update` | BioSample XML | Date last modified |
-| 52 | `publication_date` | BioSample XML | Date made publicly available |
-| 53 | `access` | BioSample XML | `public` or `controlled-access` |
-| 54 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
-| 55 | `status_date` | BioSample XML | Date current status was assigned |
-| 56 | `title` | BioSample XML | Free-text title of the BioSample record |
-| 57 | `description_comment` | BioSample XML | Free-text description or comment block |
-| 58 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
+| 20 | `host` | BioSample attribute | Host organism name |
+| 21 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
+| 22 | `host_age` | BioSample attribute | Age of host |
+| 23 | `host_sex` | BioSample attribute | Biological sex of host |
+| 24 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
+| 25 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
+| 26 | `sample_type` | BioSample attribute | Sample type or specimen classification |
+| 27 | `one_health_category` | OneHealthClassifier | One of: Human, Animal, Aquatic, Wildlife, Plant, Food, Environmental, Lab, Unclassified |
+| 28 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
+| 29 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
+| 30 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
+| 31 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
+| 32 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`), if any |
+| 33 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
+| 34 | `isolate` | BioSample attribute | Isolate identifier |
+| 35 | `strain` | BioSample attribute | Strain designation |
+| 36 | `sub_strain` | BioSample attribute | Sub-strain designation |
+| 37 | `serotype` | BioSample attribute | Serotype |
+| 38 | `serovar` | BioSample attribute | Serovar |
+| 39 | `genotype` | BioSample attribute | Genotype or sequence type |
+| 40 | `culture_collection` | BioSample attribute | Culture collection identifier |
+| 41 | `outbreak` | BioSample attribute | Outbreak identifier |
+| 42 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
+| 43 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
+| 44 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 45 | `sequencing_method` | BioSample attribute | Sequencing platform |
+| 46 | `assembly_method` | BioSample attribute | Genome assembly software |
+| 47 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
+| 48 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
+| 49 | `submission_date` | BioSample XML | Date first submitted |
+| 50 | `last_update` | BioSample XML | Date last modified |
+| 51 | `publication_date` | BioSample XML | Date made publicly available |
+| 52 | `access` | BioSample XML | `public` or `controlled-access` |
+| 53 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
+| 54 | `status_date` | BioSample XML | Date current status was assigned |
+| 55 | `title` | BioSample XML | Free-text title of the BioSample record |
+| 56 | `description_comment` | BioSample XML | Free-text description or comment block |
+| 57 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
 
 ---
 
@@ -319,7 +318,7 @@ df = ingest("ids.txt", email="you@example.com", api_key="YOUR_KEY")
 
 ## Geospatial parsing
 
-`GeoEngine` splits `geo_loc_name` into `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, and `geo_loc_raw`.
+`GeoEngine` splits `geo_loc_name` into `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, and `geo_sea_ocean`.
 
 The parser recognizes two input formats:
 
@@ -327,6 +326,8 @@ The parser recognizes two input formats:
 - **Comma-only format** `"Country, Locality"` — the part before the first `,` becomes `geo_country` and the remainder becomes `geo_locality`. `geo_region` is left `NaN`.
 
 Parenthetical qualifiers (e.g. `"United Kingdom (England, Wales & N. Ireland)"`, `"Pacific Ocean (NE)"`) are stripped from the country token before any lookup. This means ocean and sea names with qualifiers are still correctly routed to `geo_sea_ocean` rather than falling through to the country resolver.
+
+Coordinate data (e.g. `"40.71 N, 74.00 W"`) belongs in the `lat_lon` attribute, not `geo_loc_name`. Strings submitted to `geo_loc_name` that look like coordinates are treated as unparseable and return all-NaN geo columns.
 
 | Input | Result |
 |---|---|
@@ -338,7 +339,6 @@ Parenthetical qualifiers (e.g. `"United Kingdom (England, Wales & N. Ireland)"`,
 | `"Pacific Ocean (NE)"` | sea\_ocean=Pacific Ocean |
 | `"Pacific Ocean: Mariana Trench"` | sea\_ocean=Pacific Ocean, locality=Mariana Trench |
 | `"Red Sea (sampling site 3): surface"` | sea\_ocean=Red Sea, locality=surface |
-| `"40.71 N, 74.00 W"` | geo\_loc\_raw preserved; all other geo columns NaN |
 | `"Gaza Strip"` | country=Gaza Strip, iso=PS |
 | `"West Bank"` | country=West Bank, iso=PS |
 | `"United Kingdom (England, Wales & N. Ireland)"` | country=United Kingdom, iso=GB |
@@ -351,7 +351,6 @@ Handling notes:
 - `Gaza Strip`, `West Bank`, `Gaza`, `Palestine`, `Palestinian territories` → iso `PS`
 - `Korea` (bare, no qualifier) → South Korea (`KR`); logged at INFO level
 - Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
-- Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded; all other geo columns are `NaN`
 - `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo` and several aliases are resolved via a hardcoded table before pycountry fuzzy lookup
 - All unique `geo_loc_name` values are resolved once and cached; pycountry fuzzy lookup runs at most once per unique country string regardless of row count
 

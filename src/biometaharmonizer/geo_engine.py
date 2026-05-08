@@ -24,8 +24,11 @@ class GeoEngine:
     geo_locality  : locality / sub-region as submitted (str or NaN)
     geo_iso3166   : ISO 3166-1 alpha-2 country code (str or 'HISTORICAL' or NaN)
     geo_sea_ocean : ocean/sea name for marine samples (str or NaN)
-    geo_loc_raw   : original submitted string, present only when the value
-                    could not be fully parsed (coordinate-only entries).
+
+    Strings that cannot be parsed (unrecognised country names, free-text
+    descriptions, etc.) return all five columns as NaN.  Coordinate data
+    belongs in the lat_lon attribute, not geo_loc_name; strings that happen
+    to look like coordinates are treated as unparseable and return all-NaN.
     """
 
     NULL_PATTERNS = re.compile(
@@ -125,18 +128,19 @@ class GeoEngine:
         "strait of malacca",
     }
 
-    _COORD_RE = re.compile(
-        r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
-    )
-
     def _empty(self):
         return {
-            "geo_country": np.nan, "geo_region": np.nan,
-            "geo_locality": np.nan, "geo_iso3166": np.nan,
-            "geo_sea_ocean": np.nan, "geo_loc_raw": np.nan,
+            "geo_country": np.nan,
+            "geo_region": np.nan,
+            "geo_locality": np.nan,
+            "geo_iso3166": np.nan,
+            "geo_sea_ocean": np.nan,
         }
 
     def parse(self, series):
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+
         empty = self._empty()
 
         unique_vals = series.dropna().unique()
@@ -161,11 +165,6 @@ class GeoEngine:
         value = str(value).strip()
         if self.NULL_PATTERNS.match(value):
             return empty
-
-        if self._COORD_RE.match(value):
-            result = dict(empty)
-            result["geo_loc_raw"] = value
-            return result
 
         country_str, region_str, locality_str = self._split_geo_string(value)
 
@@ -194,7 +193,6 @@ class GeoEngine:
             "geo_locality": locality_str if locality_str else np.nan,
             "geo_iso3166": iso_code,
             "geo_sea_ocean": np.nan,
-            "geo_loc_raw": np.nan,
         }
 
     def _split_geo_string(self, value):
