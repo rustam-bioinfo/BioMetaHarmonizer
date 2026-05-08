@@ -87,6 +87,8 @@ class GeoEngine:
     # Minimum rapidfuzz token_sort_ratio score accepted for fuzzy country
     # matches.  Scores below this reject the match and return NaN (prevents
     # free-text strings like "Clinical lab sample" from matching "Samoa").
+    # Note: this threshold is only reached when the input does NOT directly
+    # match alpha_2, alpha_3, or common_name -- those are accepted first.
     _FUZZY_MIN_SCORE = 80
 
     _UK_SUBCOUNTRY = {
@@ -334,6 +336,18 @@ class GeoEngine:
             if not matches:
                 return np.nan
             best = matches[0]
+            # Accept directly if the input matches alpha-2, alpha-3, or
+            # common_name -- these bypass the score gate because short ISO
+            # codes and common short-form names (e.g. 'USA', 'Russia',
+            # 'Iran') score poorly against pycountry's long diplomatic names
+            # ('United States', 'Russian Federation', 'Iran, Islamic Republic
+            # of') even though the match is unambiguous.
+            direct_matches = {best.alpha_2.lower(), best.alpha_3.lower()}
+            common = getattr(best, "common_name", None)
+            if common:
+                direct_matches.add(common.lower())
+            if lower in direct_matches:
+                return best.alpha_2
             score = fuzz.token_sort_ratio(lower, best.name.lower())
             if score < self._FUZZY_MIN_SCORE:
                 logger.debug(
