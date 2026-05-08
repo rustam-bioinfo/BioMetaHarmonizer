@@ -3,18 +3,30 @@
 generate_summary_report.py
 
 Generates an interactive, self-contained HTML report from a
-BioMetaHarmonizer-style Excel, CSV, TSV, or Parquet file.
+BioMetaHarmonizer output file (CSV, TSV, Excel, or Parquet).
+
+The report includes fill-rate completeness, geographic distribution,
+temporal trends, taxonomy, One Health breakdown, and a searchable
+data table — all embedded in a single HTML file with no server required.
 
 Usage
 -----
-  python scripts/generate_summary_report.py input.xlsx [output.html]
+  python scripts/generate_summary_report.py harmonized.csv
+  python scripts/generate_summary_report.py harmonized.csv report.html
+
+Arguments
+---------
+  input          Path to a BioMetaHarmonizer output file
+                 (.csv, .tsv, .xlsx, .xls, .xlsm, .parquet)
+  output         (optional) Output HTML path.
+                 Defaults to <input_stem>_report.html next to the input file.
 
 Dependencies
 ------------
   pandas>=1.5
   numpy
-  plotly>=2.32  (CDN, no local install required at runtime)
-  openpyxl      (for .xlsx input)
+  plotly>=2.32  (loaded from CDN; no local install required at runtime)
+  openpyxl      (for .xlsx / .xls input)
   pyarrow       (for .parquet input, optional)
 """
 
