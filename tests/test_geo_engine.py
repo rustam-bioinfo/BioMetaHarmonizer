@@ -48,9 +48,10 @@ class TestCountryColonRegionLocality:
         assert pd.isna(row["geo_locality"])
 
     def test_country_colon_no_comma_region_only(self, ge):
-        """Colon present, remainder has no comma -> region only, no locality."""
+        """Colon present, remainder has no comma -> region only, no locality.
+        geo_country preserves the raw token from the input string."""
         row = _parse(ge, "USA: New York")
-        assert row["geo_country"] == "United States"
+        assert row["geo_country"] == "USA"
         assert row["geo_region"] == "New York"
         assert pd.isna(row["geo_locality"])
 
