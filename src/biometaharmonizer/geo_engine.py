@@ -19,7 +19,12 @@ class GeoEngine:
 
     Output columns
     --------------
-    geo_country   : normalised country display name (str or NaN)
+    geo_country   : raw country token from the input string (str or NaN)
+                    Exception: UK sub-countries are normalised to
+                    "United Kingdom".
+                    NaN is returned when the token cannot be resolved to a
+                    known or historical country (e.g. free text, water bodies
+                    not in _OCEAN_SEA, unrecognised strings).
     geo_region    : sub-national region as submitted (str or NaN)
     geo_locality  : locality / sub-region as submitted (str or NaN)
     geo_iso3166   : ISO 3166-1 alpha-2 country code (str or 'HISTORICAL' or NaN)
@@ -48,7 +53,6 @@ class GeoEngine:
 
     # LOW-8: Use negated char class [^)]* instead of greedy .* to strip only
     # the LAST parenthetical group, not the entire span from first ( to last ).
-    # e.g. 'UK (Foo) and (Bar)' -> 'UK (Foo) and'  (not 'UK')
     _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
     _UK_SUBCOUNTRY = {
@@ -186,6 +190,17 @@ class GeoEngine:
             display_country = country_str_clean
 
         iso_code = self._resolve_iso(country_str_clean)
+
+        # If ISO resolution completely failed and the token is not a known
+        # historical entry, the country string is unrecognisable (free text,
+        # unregistered water body, coordinate fragment, etc.) -- return all-NaN
+        # rather than blindly storing the raw token in geo_country.
+        if pd.isna(iso_code) and lower_country not in self._HISTORICAL_COUNTRIES:
+            logger.debug(
+                "GeoEngine: unresolvable country token %r -- returning all-NaN.",
+                country_str_clean,
+            )
+            return empty
 
         return {
             "geo_country": display_country if country_str_clean else np.nan,
