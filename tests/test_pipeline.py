@@ -203,7 +203,6 @@ class TestLooksLikeFilepath:
         assert _looks_like_filepath("/data/ids.txt") is True
 
     def test_accession_with_extension_is_false(self):
-        # Has an extension but starts with accession prefix -> not a filepath
         assert _looks_like_filepath("SAMN001234.csv") is False
 
     def test_csv_filename_is_true(self):
@@ -450,15 +449,14 @@ class TestRunFunction:
         assert code == 1
 
     def test_empty_accession_list_returns_1(self, tmp_path):
-        # Looks like accessions (no extension, no accession prefix) but empty
         args = _make_run_args(tmp_path, input=",,,")
         code = _run(args)
         assert code == 1
 
     def test_comma_separated_accessions_calls_ingest(self, tmp_path, minimal_df):
         args = _make_run_args(tmp_path, input="SAMN001,SAMN002")
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()) as mock_ingest:
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()) as mock_ingest:
             _run(args)
         call_source = mock_ingest.call_args[0][0]
         assert isinstance(call_source, list)
@@ -466,8 +464,8 @@ class TestRunFunction:
 
     def test_ingest_exception_returns_2(self, tmp_path, ids_file):
         args = _make_run_args(tmp_path, input=str(ids_file))
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", side_effect=RuntimeError("network error")):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", side_effect=RuntimeError("network error")):
             code = _run(args)
         assert code == 2
 
@@ -475,16 +473,16 @@ class TestRunFunction:
         from biometaharmonizer.ingestion import BIOSAMPLE_SCHEMA
         empty = pd.DataFrame(columns=list(BIOSAMPLE_SCHEMA))
         args = _make_run_args(tmp_path, input=str(ids_file))
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=empty):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=empty):
             code = _run(args)
         assert code == 2
 
     def test_successful_run_returns_0(self, tmp_path, ids_file, minimal_df, capsys):
         out = tmp_path / "out.csv"
         args = _make_run_args(tmp_path, input=str(ids_file), output=str(out))
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()):
             code = _run(args)
         assert code == 0
         captured = capsys.readouterr()
@@ -493,8 +491,8 @@ class TestRunFunction:
     def test_output_file_created_on_success(self, tmp_path, ids_file, minimal_df):
         out = tmp_path / "out.csv"
         args = _make_run_args(tmp_path, input=str(ids_file), output=str(out))
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()):
             _run(args)
         assert out.exists()
 
@@ -507,8 +505,8 @@ class TestRunFunction:
             output=str(out),
             summary=str(summary),
         )
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()):
             code = _run(args)
         assert code == 0
         assert summary.exists()
@@ -521,8 +519,8 @@ class TestRunFunction:
             output=str(out),
             format=["csv", "tsv"],
         )
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()):
             code = _run(args)
         assert code == 0
         assert (tmp_path / "out.csv").exists()
@@ -531,8 +529,8 @@ class TestRunFunction:
     def test_write_failure_returns_2(self, tmp_path, ids_file, minimal_df):
         out = tmp_path / "out.csv"
         args = _make_run_args(tmp_path, input=str(ids_file), output=str(out))
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()), \
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()), \
              patch("biometaharmonizer.cli.write", side_effect=OSError("disk full")):
             code = _run(args)
         assert code == 2
@@ -540,11 +538,10 @@ class TestRunFunction:
     def test_format_inferred_from_extension(self, tmp_path, ids_file, minimal_df):
         out = tmp_path / "out.tsv"
         args = _make_run_args(tmp_path, input=str(ids_file), output=str(out))
-        with patch("biometaharmonizer.cli.set_email"), \
-             patch("biometaharmonizer.cli.ingest", return_value=minimal_df.copy()):
+        with patch("biometaharmonizer.ingestion.set_email"), \
+             patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()):
             code = _run(args)
         assert code == 0
-        # TSV file produced via format inference
         assert out.exists()
         header = out.read_text(encoding="utf-8").splitlines()[0]
         assert "\t" in header
