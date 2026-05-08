@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 
-_VALID_FORMATS = ["csv", "tsv", "excel", "parquet"]
+_VALID_FORMATS = ["csv", "tsv", "excel", "parquet", "jsonl"]
 
 
 def _lower_format(s: str) -> str:
@@ -62,7 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_lower_format,
         default=None,
         metavar="FORMAT",
-        help="Output format: csv, tsv, excel, parquet (case-insensitive). "
+        help="Output format: csv, tsv, excel, parquet, jsonl (case-insensitive). "
              "Inferred from output file extension when omitted.",
     )
     run_p.add_argument("--summary", metavar="FILE", default=None)
@@ -112,6 +112,7 @@ def _infer_format(path: Path) -> str:
         ".xlsx": "excel",
         ".xls": "excel",
         ".parquet": "parquet",
+        ".jsonl": "jsonl",
     }
     return mapping.get(suffix, "csv")
 

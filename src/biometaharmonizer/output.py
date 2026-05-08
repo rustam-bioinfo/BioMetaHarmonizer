@@ -1,5 +1,6 @@
 """Module 6: Output -- write harmonized DataFrame to disk."""
 
+import json
 import logging
 import os
 import tempfile
@@ -10,7 +11,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-_VALID_FORMATS = ("csv", "tsv", "excel", "parquet")
+_VALID_FORMATS = ("csv", "tsv", "excel", "parquet", "jsonl")
 
 
 def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
@@ -27,7 +28,7 @@ def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
     path : str or Path
         Destination file path. Parent directories are created automatically.
     fmt : str, default "csv"
-        Output format. One of: "csv", "tsv", "excel", "parquet".
+        Output format. One of: "csv", "tsv", "excel", "parquet", "jsonl".
         Case-insensitive.
 
     Returns
@@ -65,6 +66,15 @@ def write(df: pd.DataFrame, path, fmt: str = "csv") -> Path:
             df.to_excel(tmp_path, index=False, engine="openpyxl")
         elif fmt == "parquet":
             df.to_parquet(tmp_path, index=False, engine="pyarrow")
+        elif fmt == "jsonl":
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                for record in df.to_dict(orient="records"):
+                    if "_extra_attributes" in record and isinstance(record["_extra_attributes"], str):
+                        try:
+                            record["_extra_attributes"] = json.loads(record["_extra_attributes"])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
         tmp_path.replace(path)
     except Exception:
