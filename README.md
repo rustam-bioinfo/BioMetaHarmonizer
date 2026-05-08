@@ -93,7 +93,7 @@ The output DataFrame contains **57 columns**. Columns with no data for a given d
 | 16 | `geo_region` | GeoEngine | Sub-national region; populated only from colon-format inputs (`"Country: Region, Locality"`); `NaN` for comma-only inputs |
 | 17 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
 | 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
-| 19 | `geo_sea_ocean` | GeoEngine | Sea or ocean name for marine locations |
+| 19 | `geo_sea_ocean` | GeoEngine | Named aquatic feature from `geo_loc_name` — covers oceans, seas, gulfs, bays, straits, fjords, lakes, reservoirs, and other water bodies |
 | 20 | `host` | BioSample attribute | Host organism name |
 | 21 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
 | 22 | `host_age` | BioSample attribute | Age of host |
