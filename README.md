@@ -493,22 +493,25 @@ python scripts/build_ncbi_attribute_cache.py
 
 ### `generate_summary_report.py`
 
-Generates a comprehensive HTML/JSON/CSV summary report with visualizations (fill rates, geographic distribution, temporal analysis, One Health breakdown, host species, unmapped attribute frequency) for any BioMetaHarmonizer output file.
+Generates an interactive, self-contained HTML report from a BioMetaHarmonizer
+output file. The report includes metadata completeness (fill rates), geographic
+distribution, temporal trends, taxonomy, One Health breakdown, and a searchable
+paginated data table — all embedded in a single HTML file with no server required.
 
 ```bash
-# Single HTML report:
-python scripts/generate_summary_report.py \
-    --input harmonized.csv \
-    --output report.html
+# Output defaults to harmonized_report.html next to the input file
+python scripts/generate_summary_report.py harmonized.csv
 
-# All formats to a directory:
-python scripts/generate_summary_report.py \
-    --input harmonized.csv \
-    --output-dir reports/ \
-    --formats html json csv
+# Specify a custom output path
+python scripts/generate_summary_report.py harmonized.csv report.html
 ```
 
-Requires `plotly>=5.14` for HTML output (`pip install plotly`). `kaleido` is optional and only needed for PDF export.
+| Argument | Description |
+|---|---|
+| `input` | Path to a BioMetaHarmonizer output file (`.csv`, `.tsv`, `.xlsx`, `.parquet`) |
+| `output` | (optional) Output `.html` path. Defaults to `<stem>_report.html` next to the input. |
+
+Requires `plotly` (loaded from CDN — no local install needed at runtime) and `pandas`. For Excel input, also install `openpyxl`.
 
 ---
 
