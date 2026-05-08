@@ -4,6 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 import pycountry
+from rapidfuzz import fuzz
 
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,9 @@ class GeoEngine:
         re.IGNORECASE,
     )
 
-    # Minimum rapidfuzz score for pycountry.search_fuzzy to be accepted.
-    # Scores below this threshold indicate a poor match (e.g. free text like
-    # "Clinical lab sample" fuzzy-matching "Samoa") and are rejected.
+    # Minimum rapidfuzz token_sort_ratio score accepted for fuzzy country
+    # matches.  Scores below this reject the match and return NaN (prevents
+    # free-text strings like "Clinical lab sample" from matching "Samoa").
     _FUZZY_MIN_SCORE = 80
 
     _UK_SUBCOUNTRY = {
@@ -329,9 +330,17 @@ class GeoEngine:
             return np.nan
 
         try:
-            result = pycountry.countries.search_fuzzy(
-                country_str, min_score=self._FUZZY_MIN_SCORE
-            )
-            return result[0].alpha_2
+            matches = pycountry.countries.search_fuzzy(country_str)
+            if not matches:
+                return np.nan
+            best = matches[0]
+            score = fuzz.token_sort_ratio(lower, best.name.lower())
+            if score < self._FUZZY_MIN_SCORE:
+                logger.debug(
+                    "GeoEngine: fuzzy match '%s' -> '%s' rejected (score %d < %d).",
+                    country_str, best.name, score, self._FUZZY_MIN_SCORE,
+                )
+                return np.nan
+            return best.alpha_2
         except Exception:
             return np.nan
