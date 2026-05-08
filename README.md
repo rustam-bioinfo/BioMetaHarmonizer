@@ -67,7 +67,7 @@ biometaharmonizer run \
 | `--refresh-cache` | off | Force re-download of assembly summary flat files regardless of age |
 | `--verbose` | off | Enable DEBUG-level logging |
 
-
+---
 ## Output columns
 
 The output DataFrame contains **57 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
