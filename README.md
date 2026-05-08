@@ -11,7 +11,7 @@ A Python package for fetching, parsing, and standardizing NCBI BioSample metadat
 
 ## What it does
 
-NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, Parquet, or JSON Lines (JSONL).
+NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, Parquet, or JSON Lines (JSONL) — including multiple formats in a single run.
 
 Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
 
@@ -38,20 +38,29 @@ The package ships with a minimal hand-curated `one_health_dictionaries.json`. Fo
 ### Command line
 
 ```bash
+# Single output file (format inferred from extension)
 biometaharmonizer run \
     --input  accessions.txt \
     --email  your@email.com \
     --output harmonized.csv
+
+# Save to multiple formats in one run
+biometaharmonizer run \
+    --input  accessions.txt \
+    --email  your@email.com \
+    --output harmonized.csv \
+    --format csv tsv excel
+# Produces: harmonized.csv, harmonized.tsv, harmonized.xlsx
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--input FILE` | required | Path to accession list (one per line) |
 | `--email EMAIL` | required | Valid contact email for NCBI Entrez — must contain `@` and a domain |
-| `--output FILE` | required | Output file path |
+| `--output FILE` | required | Output file path (used as the base name for multi-format output) |
 | `--api-key KEY` | — | NCBI API key; raises rate limit from 3 to 10 requests/second |
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Directory for assembly summary flat files |
-| `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet`, `jsonl` |
+| `--format FORMAT [FORMAT ...]` | inferred from file extension | One or more of: `csv`, `tsv`, `excel`, `parquet`, `jsonl`. When multiple formats are given the stem of `--output` is reused and the correct extension is substituted for each format. Omit to infer from the output file extension. |
 | `--summary FILE` | — | Write a per-column fill-rate CSV |
 | `--fetch-batch-size N` | `200` | Number of records per efetch request |
 | `--esearch-batch-size N` | `200` | Number of accessions per esearch term |
@@ -411,6 +420,33 @@ write_summary(df, "fill_rates.csv")         # column, non_null_count, fill_pct
 Format strings are case-insensitive. If `--format` is not specified on the CLI, the format is inferred from the output file extension (`.jsonl` → `jsonl`).
 
 The JSONL writer decodes the `_extra_attributes` field from its JSON string representation into a native Python dict before serialization, so downstream consumers receive a fully nested JSON object rather than a double-encoded string.
+
+### Multi-format output
+
+Pass multiple space-separated format names to `--format` to write all formats in a single pipeline run. The stem of `--output` is reused and the correct extension is substituted automatically:
+
+```bash
+biometaharmonizer run \
+    --input ids.txt \
+    --email you@example.com \
+    --output results/harmonized.csv \
+    --format csv tsv parquet jsonl
+# Writes:
+#   results/harmonized.csv
+#   results/harmonized.tsv
+#   results/harmonized.parquet
+#   results/harmonized.jsonl
+```
+
+When only a single format is given, the `--output` path is used exactly as specified.
+
+| Format | Extension substituted |
+|---|---|
+| `csv` | `.csv` |
+| `tsv` | `.tsv` |
+| `excel` | `.xlsx` |
+| `parquet` | `.parquet` |
+| `jsonl` | `.jsonl` |
 
 ---
 
