@@ -29,6 +29,10 @@ class GeoEngine:
     geo_region    : sub-national region as submitted (str or NaN)
     geo_locality  : locality / sub-region as submitted (str or NaN)
     geo_iso3166   : ISO 3166-1 alpha-2 country code (str or 'HISTORICAL' or NaN)
+                    Special value 'XK' is used for Kosovo: this is a
+                    user-assigned code recognised by CLDR, the EU, and Kosovo
+                    authorities but is NOT part of the official ISO 3166-1
+                    standard and is not included in pycountry.
     geo_sea_ocean : any named water body -- ocean, sea, gulf, bay, strait,
                     fjord, lake, reservoir, etc. (str or NaN).  The column
                     name is kept for historical compatibility; it covers all
@@ -98,7 +102,22 @@ class GeoEngine:
         "northern ireland": "GB",
     }
 
+    # Manual alias table for country names that fail pycountry's search_fuzzy
+    # or score below _FUZZY_MIN_SCORE against the canonical diplomatic name.
+    # Keys are lowercase; values are ISO 3166-1 alpha-2 codes unless noted.
+    #
+    # Non-standard codes used here:
+    #   XK  Kosovo -- user-assigned code per CLDR, EU, and Kosovo authorities.
+    #               Not part of ISO 3166-1; not in pycountry.
+    #               Widely used in practice (UN bodies excluded).
+    #
+    # Administrative notes:
+    #   SJ  Svalbard and Jan Mayen -- single ISO entry covering both islands.
+    #       'Jan Mayen' alone maps to NO (Norway) as it has no separate code.
+    #   BQ  Bonaire, Sint Eustatius and Saba -- single ISO entry for all three
+    #       Caribbean special municipalities of the Netherlands.
     _COUNTRY_ALIASES = {
+        # Aliases that differ from pycountry canonical names
         "turkey": "TR",
         "t\u00fcrkiye": "TR",
         "namibia": "NA",
@@ -106,12 +125,20 @@ class GeoEngine:
         "russian federation": "RU",
         "czech republic": "CZ",
         "czechia": "CZ",
+        # Congo disambiguation (CG = Republic of the Congo / Congo-Brazzaville)
+        # CD (DRC / Congo-Kinshasa) is handled separately below
+        "congo": "CG",
+        "republic of the congo": "CG",
+        "congo-brazzaville": "CG",
+        # DRC
         "democratic republic of the congo": "CD",
         "dr congo": "CD",
         "drc": "CD",
         "congo-kinshasa": "CD",
+        # Myanmar
         "burma": "MM",
         "myanmar (burma)": "MM",
+        # Palestinian territories
         "palestine": "PS",
         "palestinian territories": "PS",
         "palestinian territory": "PS",
@@ -119,6 +146,27 @@ class GeoEngine:
         "gaza strip": "PS",
         "gaza": "PS",
         "west bank": "PS",
+        # Territories where pycountry canonical name is much longer
+        "svalbard": "SJ",
+        "svalbard and jan mayen": "SJ",
+        "jan mayen": "NO",
+        "south georgia": "GS",
+        "south georgia and the south sandwich islands": "GS",
+        "faroe islands": "FO",
+        "faeroe islands": "FO",
+        "curacao": "CW",
+        "cura\u00e7ao": "CW",
+        "sint maarten": "SX",
+        "bonaire": "BQ",
+        "bonaire, sint eustatius and saba": "BQ",
+        "micronesia": "FM",
+        "federated states of micronesia": "FM",
+        "macedonia": "MK",
+        "north macedonia": "MK",
+        "east timor": "TL",
+        "timor-leste": "TL",
+        # Kosovo: XK is a user-assigned code (not ISO 3166-1 official)
+        "kosovo": "XK",
     }
 
     _HISTORICAL_COUNTRIES = {
@@ -342,10 +390,9 @@ class GeoEngine:
             best = matches[0]
             # Accept directly if the input matches alpha-2, alpha-3, or
             # common_name -- these bypass the score gate because short ISO
-            # codes and common short-form names (e.g. 'USA', 'Russia',
-            # 'Iran') score poorly against pycountry's long diplomatic names
-            # ('United States', 'Russian Federation', 'Iran, Islamic Republic
-            # of') even though the match is unambiguous.
+            # codes and common short-form names (e.g. 'USA', 'Iran') score
+            # poorly against pycountry's long diplomatic names even though
+            # the match is unambiguous.
             direct_matches = {best.alpha_2.lower(), best.alpha_3.lower()}
             common = getattr(best, "common_name", None)
             if common:
