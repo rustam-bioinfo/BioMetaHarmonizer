@@ -286,8 +286,10 @@ class TestClassifyOutputShape:
 # ---------------------------------------------------------------------------
 
 class TestClassifySingleField:
-    def test_human_blood(self, clf):
-        result = clf.classify(pd.Series(["blood"]))
+    def test_human_blood_culture(self, clf):
+        # "blood" alone is ambiguous (could be animal); "blood culture" is
+        # in unambiguous_human_terms and unambiguously resolves to Human.
+        result = clf.classify(pd.Series(["blood culture"]))
         assert result.iloc[0] == "Human"
 
     def test_null_returns_unclassified(self, clf):
@@ -325,7 +327,8 @@ class TestUnderscoreNormalization:
         assert result["one_health_category"] == "Environmental"
 
     def test_blood_blood_underscore_synonym(self, clf):
-        # 'blood_blood' is in synonym_map -> 'blood'
+        # 'blood_blood' -> underscore replaced -> 'blood blood' ->
+        # synonym_map rewrites to 'blood' -> ambiguous specimen -> Unclassified
         result = clf._classify_text("blood_blood")
         assert result["one_health_category"] in ("Human", "Unclassified")
 
@@ -342,9 +345,9 @@ class TestProcessingAndSetting:
 
     def test_setting_term_extracted(self, clf):
         result = clf._classify_text("hospital blood")
-        # After stripping the setting term, the remaining text is still classified;
-        # the setting field should be populated.
-        assert pd.notna(result["one_health_setting"]) or result["one_health_category"] == "Human"
+        # "hospital" is stripped as a setting term; the remaining "blood" is
+        # ambiguous so category may be Unclassified -- but setting must be set.
+        assert pd.notna(result["one_health_setting"])
 
     def test_null_value_has_no_processing(self, clf):
         result = clf._classify_text(np.nan)
@@ -476,13 +479,14 @@ class TestClassifyMultiField:
         assert df_two.iloc[0]["one_health_confidence"] >= df_one.iloc[0]["one_health_confidence"]
 
     def test_isolation_source_priority_over_env_broad_scale(self, clf):
-        # isolation_source (weight 1.0) should win over env_broad_scale (weight 0.5)
+        # isolation_source (weight 1.0) should win over env_broad_scale (weight 0.5).
+        # Use an unambiguous isolation_source so it produces a classifiable result.
+        # "sputum" is in unambiguous_human_terms -> Human
+        # env_broad_scale="soil" -> Environmental (supporting field only)
         df = clf.classify_multi_field(
-            isolation_source=pd.Series(["blood"]),
+            isolation_source=pd.Series(["sputum"]),
             env_broad_scale=pd.Series(["soil"]),
         )
-        # blood -> Human; soil -> Environmental
-        # domain field takes priority
         assert df.iloc[0]["one_health_source_field"] in ("isolation_source", "host")
 
     def test_series_index_alignment(self, clf):
