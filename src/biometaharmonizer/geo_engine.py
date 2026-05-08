@@ -105,8 +105,10 @@ class GeoEngine:
         "netherlands antilles",
     }
 
-    # MED-5: Expanded ocean/sea/gulf/bay set with 30+ additional water bodies
-    # commonly found in NCBI BioSample marine submissions.
+    # MED-5: Expanded ocean/sea/gulf/bay set.
+    # Arctic and marginal seas added: Kara Sea, Laptev Sea, East Siberian Sea,
+    # Chukchi Sea, Beaufort Sea, White Sea, Greenland Sea, Irminger Sea,
+    # Mawson Sea, Amundsen Sea, Davis Strait.
     _OCEAN_SEA = {
         # Oceans
         "pacific ocean", "atlantic ocean", "indian ocean",
@@ -122,6 +124,12 @@ class GeoEngine:
         "sulu sea", "philippine sea", "sea of japan",
         "sea of okhotsk", "sea of azov", "ross sea",
         "weddell sea", "scotia sea",
+        # Arctic and marginal seas
+        "kara sea", "laptev sea", "east siberian sea",
+        "chukchi sea", "beaufort sea", "white sea",
+        "greenland sea", "irminger sea",
+        "mawson sea", "amundsen sea",
+        "davis strait",
         # Gulfs and bays
         "persian gulf", "gulf of mexico", "gulf of aden",
         "gulf of guinea", "gulf of oman", "gulf of california",

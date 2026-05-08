@@ -107,9 +107,26 @@ class TestOceanSea:
         assert row["geo_locality"] == "station A, depth 200m"
         assert pd.isna(row["geo_country"])
 
-    def test_unknown_water_body_returns_all_nan(self, ge):
-        """A water body not in _OCEAN_SEA falls through to pycountry and returns NaN."""
-        row = _parse(ge, "Kara Sea")
+    @pytest.mark.parametrize("arctic_sea", [
+        "Kara Sea",
+        "Laptev Sea",
+        "East Siberian Sea",
+        "Chukchi Sea",
+        "Beaufort Sea",
+        "White Sea",
+        "Greenland Sea",
+    ])
+    def test_arctic_seas_routed_to_geo_sea_ocean(self, ge, arctic_sea):
+        """Arctic and marginal seas must land in geo_sea_ocean, not geo_country."""
+        row = _parse(ge, arctic_sea)
+        assert row["geo_sea_ocean"] == arctic_sea
+        assert pd.isna(row["geo_country"])
+        assert pd.isna(row["geo_iso3166"])
+
+    def test_truly_unknown_water_body_returns_all_nan(self, ge):
+        """A water body not in _OCEAN_SEA and not resolvable by pycountry
+        returns all-NaN (nothing stored in geo_country or geo_sea_ocean)."""
+        row = _parse(ge, "Lake Baikal")
         assert pd.isna(row["geo_country"])
         assert pd.isna(row["geo_sea_ocean"])
         assert pd.isna(row["geo_iso3166"])
