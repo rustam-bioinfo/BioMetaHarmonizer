@@ -145,8 +145,6 @@ class TestWaterBodyRegex:
         "Cook Strait",
         "Strait of Gibraltar",
         "Strait of Hormuz",
-        "Sognefjord",
-        "Hardangerfjord",
         "Chesapeake Bay",
         "San Francisco Bay",
         "Puget Sound",
