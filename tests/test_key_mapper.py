@@ -5,6 +5,7 @@ All tests use synthetic data -- no live NCBI calls are made.
 """
 
 import json
+import logging
 import warnings
 
 import pandas as pd
@@ -119,25 +120,29 @@ class TestMapColumnsRename:
 # ---------------------------------------------------------------------------
 
 class TestMapColumnsWarning:
-    def test_extra_column_triggers_warning(self, km):
+    def test_extra_column_triggers_warning(self, km, caplog):
         df = pd.DataFrame([{"biosample_accession": "SAMN001", "extra_col": "foo"}])
-        with pytest.warns(UserWarning, match="not in BIOSAMPLE_SCHEMA"):
+        with caplog.at_level(logging.WARNING, logger="biometaharmonizer.key_mapper"):
             km.map_columns(df)
+        assert any("not in BIOSAMPLE_SCHEMA" in r.message for r in caplog.records)
 
-    def test_warning_mentions_extra_column_name(self, km):
+    def test_warning_mentions_extra_column_name(self, km, caplog):
         df = pd.DataFrame([{"biosample_accession": "SAMN001", "my_unknown_col": "bar"}])
-        with pytest.warns(UserWarning, match="my_unknown_col"):
+        with caplog.at_level(logging.WARNING, logger="biometaharmonizer.key_mapper"):
             km.map_columns(df)
+        assert any("my_unknown_col" in r.message for r in caplog.records)
 
-    def test_no_warning_when_no_extra_columns(self, km):
+    def test_no_warning_when_no_extra_columns(self, km, caplog):
         df = pd.DataFrame([{"biosample_accession": "SAMN001"}])
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
+        with caplog.at_level(logging.WARNING, logger="biometaharmonizer.key_mapper"):
             km.map_columns(df)
+        assert not any(
+            "not in BIOSAMPLE_SCHEMA" in r.message for r in caplog.records
+        )
 
-    def test_extra_column_dropped_from_output(self, km):
+    def test_extra_column_dropped_from_output(self, km, caplog):
         df = pd.DataFrame([{"biosample_accession": "SAMN001", "extra_col": "foo"}])
-        with pytest.warns(UserWarning):
+        with caplog.at_level(logging.WARNING, logger="biometaharmonizer.key_mapper"):
             result = km.map_columns(df)
         assert "extra_col" not in result.columns
 
@@ -187,10 +192,11 @@ class TestReindex:
         result = km.map_columns(df)
         assert list(result.columns) == list(BIOSAMPLE_SCHEMA)
 
-    def test_extra_columns_dropped_with_warning(self, km):
+    def test_extra_columns_dropped_with_warning(self, km, caplog):
         df = pd.DataFrame([{"biosample_accession": "SAMN001", "extra_col": "foo"}])
-        with pytest.warns(UserWarning, match="not in BIOSAMPLE_SCHEMA"):
+        with caplog.at_level(logging.WARNING, logger="biometaharmonizer.key_mapper"):
             result = km.map_columns(df)
+        assert any("not in BIOSAMPLE_SCHEMA" in r.message for r in caplog.records)
         assert "extra_col" not in result.columns
 
 
