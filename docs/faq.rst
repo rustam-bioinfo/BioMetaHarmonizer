@@ -40,13 +40,26 @@ The count of output rows will be less than the count of input IDs. Compare
 .. rubric:: 3. How do I handle the rate-limit error HTTP 429?
 
 An HTTP 429 response from NCBI means too many requests were sent in the
-last second. BioMetaHarmonizer's retry logic (``_MAX_RETRIES = 3``) handles
-transient 429s automatically using exponential backoff:
-wait = min(2^n, 30) seconds per attempt. If 429 errors persist:
+last second. BioMetaHarmonizer's retry logic handles 429 errors **separately**
+from other transient errors: instead of the normal exponential backoff
+(2 s, 4 s, 8 s), it applies a **flat 60-second wait** (``_HTTP_429_WAIT_S``)
+before each retry regardless of attempt number. This longer wait is
+necessary because NCBI's rate-limiting window takes time to expire.
 
-- Ensure you have registered and passed an NCBI API key.
+If 429 errors persist even after retries:
+
+- Ensure you have registered and passed an NCBI API key (raises limit from
+  3 to 10 requests/second).
 - Reduce ``fetch_batch_size`` (e.g. to 100) to send smaller requests.
 - Avoid running multiple concurrent instances against the same API key.
+
+.. note::
+
+   The fuzzy-matching fallback in
+   :class:`~biometaharmonizer.one_health.OneHealthClassifier` requires
+   ``rapidfuzz>=3.0.0``. If it is not installed the classifier operates
+   without fuzzy matching and logs a WARNING. All other features are
+   unaffected. Install it with ``pip install rapidfuzz>=3.0.0``.
 
 .. rubric:: 4. What does ``refresh_cache=True`` do and when should I use it?
 
@@ -105,10 +118,10 @@ The module docstring of ``ingestion.py`` contains this exact note under
 
 .. rubric:: 7. What is the difference between ``fetch_batch_size`` and ``esearch_batch_size``?
 
-- **``fetch_batch_size``** (default 200) — controls how many BioSample records
-  are retrieved per ``efetch`` HTTP request. Each ``efetch`` call returns raw
-  XML for ``N`` records; larger batches mean fewer round trips but larger
-  per-response payloads.
+- **``fetch_batch_size``** (default 200; clamped at 500) — controls how many
+  BioSample records are retrieved per ``efetch`` HTTP request. Each
+  ``efetch`` call returns raw XML for ``N`` records; larger batches mean
+  fewer round trips but larger per-response payloads.
 
 - **``esearch_batch_size``** (module constant ``_ESEARCH_BATCH`` = 100) — controls
   how many accession strings are assembled into a single ``esearch`` term
@@ -253,3 +266,22 @@ You may also pass the path to an already-extracted directory that contains
    python scripts/build_dictionaries.py \
        --taxdmp /path/to/extracted_taxdmp/ \
        --output src/biometaharmonizer/schemas/one_health_dictionaries.json
+
+.. rubric:: 15. Is BioMetaHarmonizer thread-safe?
+
+**No.** ``ENTREZ_EMAIL``, ``ENTREZ_API_KEY``, and ``CACHE_DIR`` are
+module-level globals shared across all threads in the same Python process.
+Calling :func:`~biometaharmonizer.ingestion.set_email`,
+:func:`~biometaharmonizer.ingestion.set_api_key`,
+:func:`~biometaharmonizer.ingestion.set_cache_dir`, or
+:func:`~biometaharmonizer.ingestion.ingest` concurrently from multiple
+threads **will silently overwrite credentials and configuration** without
+raising any error. Requests may be sent with the wrong email or API key.
+
+**Recommended patterns:**
+
+- Use a ``multiprocessing.Pool`` — each subprocess has an independent memory
+  space and its own copy of the globals.
+- Serialize all ``ingest()`` calls with a ``threading.Lock`` if threads are
+  required.
+- When running batch jobs, process each job in a separate OS process.

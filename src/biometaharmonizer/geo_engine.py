@@ -4,6 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 import pycountry
+from rapidfuzz import fuzz
 
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,38 @@ class GeoEngine:
 
     Output columns
     --------------
-    geo_country   : normalised country display name (str or NaN)
+    geo_country   : raw country token from the input string (str or NaN)
+                    Exception: UK sub-countries are normalised to
+                    "United Kingdom".
+                    NaN is returned when the token cannot be resolved to a
+                    known or historical country (e.g. free text, water bodies,
+                    unrecognised strings).
     geo_region    : sub-national region as submitted (str or NaN)
     geo_locality  : locality / sub-region as submitted (str or NaN)
     geo_iso3166   : ISO 3166-1 alpha-2 country code (str or 'HISTORICAL' or NaN)
-    geo_sea_ocean : ocean/sea name for marine samples (str or NaN)
-    geo_loc_raw   : original submitted string, present only when the value
-                    could not be fully parsed (coordinate-only entries).
+                    Special value 'XK' is used for Kosovo: this is a
+                    user-assigned code recognised by CLDR, the EU, and Kosovo
+                    authorities but is NOT part of the official ISO 3166-1
+                    standard and is not included in pycountry.
+    geo_sea_ocean : any named water body -- ocean, sea, gulf, bay, strait,
+                    fjord, lake, reservoir, etc. (str or NaN).  The column
+                    name is kept for historical compatibility; it covers all
+                    aquatic geographic features, not only marine ones.
+
+    Water body detection (two-tier)
+    --------------------------------
+    Tier 1 -- explicit set _OCEAN_SEA: exact case-insensitive lookup for
+              canonical names (zero false positives).
+    Tier 2 -- regex _WATER_BODY_RE: catches any token containing a water-body
+              keyword (ocean, sea, gulf, bay, strait, fjord, bight, sound,
+              inlet, lagoon, lake, reservoir, estuary, delta, reef, atoll)
+              that is NOT followed by "islands?", "territory", or "states?".
+              Applied only when Tier 1 misses.
+
+    Strings that cannot be parsed (unrecognised country names, free-text
+    descriptions, etc.) return all five columns as NaN.  Coordinate data
+    belongs in the lat_lon attribute, not geo_loc_name; strings that happen
+    to look like coordinates are treated as unparseable and return all-NaN.
     """
 
     NULL_PATTERNS = re.compile(
@@ -43,10 +69,31 @@ class GeoEngine:
         re.IGNORECASE,
     )
 
-    # LOW-8: Use negated char class [^)]* instead of greedy .* to strip only
-    # the LAST parenthetical group, not the entire span from first ( to last ).
-    # e.g. 'UK (Foo) and (Bar)' -> 'UK (Foo) and'  (not 'UK')
+    # Strips ONE trailing parenthetical group per application.
+    # Applied in a loop in _strip_parens() to remove all trailing groups.
     _PAREN_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+    # Tier-2 water body keyword regex.
+    # Negative lookahead blocks known false positives:
+    #   "Channel Islands"  -- channel + islands
+    #   "Pacific Islands"  -- not triggered (no keyword match)
+    #   "Gulf States"      -- gulf + states
+    #   "Island Territories" -- no keyword match
+    # "lake" and "reservoir" are included deliberately; geo_sea_ocean covers
+    # all named aquatic features (see column docstring above).
+    _WATER_BODY_RE = re.compile(
+        r"\b(ocean|sea|gulf|bay|strait|fjord|bight|sound|inlet|"
+        r"lagoon|lake|reservoir|estuary|delta|reef|atoll)\b"
+        r"(?!\s*(islands?|territory|states?))",
+        re.IGNORECASE,
+    )
+
+    # Minimum rapidfuzz token_sort_ratio score accepted for fuzzy country
+    # matches.  Scores below this reject the match and return NaN (prevents
+    # free-text strings like "Clinical lab sample" from matching "Samoa").
+    # Note: this threshold is only reached when the input does NOT directly
+    # match alpha_2, alpha_3, or common_name -- those are accepted first.
+    _FUZZY_MIN_SCORE = 80
 
     _UK_SUBCOUNTRY = {
         "england": "GB",
@@ -55,16 +102,43 @@ class GeoEngine:
         "northern ireland": "GB",
     }
 
+    # Manual alias table for country names that fail pycountry's search_fuzzy
+    # or score below _FUZZY_MIN_SCORE against the canonical diplomatic name.
+    # Keys are lowercase; values are ISO 3166-1 alpha-2 codes unless noted.
+    #
+    # Non-standard codes used here:
+    #   XK  Kosovo -- user-assigned code per CLDR, EU, and Kosovo authorities.
+    #               Not part of ISO 3166-1; not in pycountry.
+    #               Widely used in practice (UN bodies excluded).
+    #
+    # Administrative notes:
+    #   SJ  Svalbard and Jan Mayen -- single ISO entry covering both islands.
+    #       'Jan Mayen' alone maps to NO (Norway) as it has no separate code.
+    #   BQ  Bonaire, Sint Eustatius and Saba -- single ISO entry for all three
+    #       Caribbean special municipalities of the Netherlands.
     _COUNTRY_ALIASES = {
+        # --- Aliases that differ from pycountry canonical names ---
         "turkey": "TR",
         "t\u00fcrkiye": "TR",
         "namibia": "NA",
+        "russia": "RU",
+        "russian federation": "RU",
+        "czech republic": "CZ",
+        "czechia": "CZ",
+        # Congo disambiguation (CG = Republic of the Congo / Congo-Brazzaville)
+        # CD (DRC / Congo-Kinshasa) is handled separately below
+        "congo": "CG",
+        "republic of the congo": "CG",
+        "congo-brazzaville": "CG",
+        # DRC
         "democratic republic of the congo": "CD",
         "dr congo": "CD",
         "drc": "CD",
         "congo-kinshasa": "CD",
+        # Myanmar
         "burma": "MM",
         "myanmar (burma)": "MM",
+        # Palestinian territories
         "palestine": "PS",
         "palestinian territories": "PS",
         "palestinian territory": "PS",
@@ -72,6 +146,128 @@ class GeoEngine:
         "gaza strip": "PS",
         "gaza": "PS",
         "west bank": "PS",
+        # Territories where pycountry canonical name is much longer
+        "svalbard": "SJ",
+        "svalbard and jan mayen": "SJ",
+        "jan mayen": "NO",
+        "south georgia": "GS",
+        "south georgia and the south sandwich islands": "GS",
+        "faroe islands": "FO",
+        "faeroe islands": "FO",
+        "curacao": "CW",
+        "cura\u00e7ao": "CW",
+        "sint maarten": "SX",
+        "bonaire": "BQ",
+        "bonaire, sint eustatius and saba": "BQ",
+        "micronesia": "FM",
+        "federated states of micronesia": "FM",
+        "macedonia": "MK",
+        "north macedonia": "MK",
+        "east timor": "TL",
+        "timor-leste": "TL",
+        # Kosovo: XK is a user-assigned code (not ISO 3166-1 official)
+        "kosovo": "XK",
+
+        # --- Long diplomatic names with no common_name in pycountry ---
+        # pycountry name: "Brunei Darussalam"
+        "brunei": "BN",
+        "brunei darussalam": "BN",
+        # pycountry name: "Bolivia, Plurinational State of"
+        "bolivia": "BO",
+        # pycountry name: "Venezuela, Bolivarian Republic of"
+        "venezuela": "VE",
+        # pycountry name: "Tanzania, United Republic of"
+        "tanzania": "TZ",
+        # pycountry name: "Moldova, Republic of"
+        "moldova": "MD",
+        "republic of moldova": "MD",
+        # pycountry name: "Syrian Arab Republic"
+        "syria": "SY",
+        # pycountry name: "Lao People's Democratic Republic"
+        "laos": "LA",
+        "lao pdr": "LA",
+        "lao": "LA",
+        # pycountry name: "Korea, Democratic People's Republic of"
+        "north korea": "KP",
+        "dprk": "KP",
+        # pycountry name: "Korea, Republic of"
+        "south korea": "KR",
+        "republic of korea": "KR",
+        # pycountry name: "Viet Nam"
+        "vietnam": "VN",
+        # pycountry name: "Iran, Islamic Republic of"
+        "iran": "IR",
+        # pycountry name: "Taiwan, Province of China"
+        # (also handled by special case in _resolve_iso; alias is belt-and-braces)
+        "taiwan": "TW",
+
+        # --- SAR / territory variants common in NCBI BioSample ---
+        "hong kong": "HK",
+        "hong kong sar": "HK",
+        "hong kong sar, china": "HK",
+        "macau": "MO",
+        "macao": "MO",
+        "macao sar": "MO",
+
+        # --- Renamed countries (old names still appear in legacy records) ---
+        # pycountry name: "Cabo Verde"
+        "cape verde": "CV",
+        # pycountry name: "Eswatini" (renamed from Swaziland in 2018)
+        "swaziland": "SZ",
+        "eswatini": "SZ",
+
+        # --- Common English names for countries with non-English official names ---
+        # pycountry name: "Cote d'Ivoire"
+        "ivory coast": "CI",
+        "cote d'ivoire": "CI",
+        "cote divoire": "CI",
+        # pycountry name: "Reunion"
+        "reunion": "RE",
+        # pycountry name: "Western Sahara"
+        "western sahara": "EH",
+        "w. sahara": "EH",
+
+        # --- Short abbreviations and alternative names common in NCBI BioSample ---
+        "usa": "US",
+        "united states": "US",
+        "united states of america": "US",
+        "uk": "GB",
+        "great britain": "GB",
+        "uae": "AE",
+        "united arab emirates": "AE",
+
+        # --- Abbreviated / dot-notation names ---
+        "solomon islands": "SB",
+        "solomon is.": "SB",
+        "falkland islands": "FK",
+        "falklands": "FK",
+        "falkland is.": "FK",
+        "central african republic": "CF",
+        "central african rep.": "CF",
+        "car": "CF",
+        "dominican republic": "DO",
+        "dominican rep.": "DO",
+        "equatorial guinea": "GQ",
+        "eq. guinea": "GQ",
+        "south sudan": "SS",
+
+        # --- Diacritic-stripped variants ---
+        # pycountry name: "\u00c5land Islands"
+        "aland islands": "AX",
+        "\u00e5land islands": "AX",
+        # pycountry name: "S\u00e3o Tom\u00e9 and Pr\u00edncipe"
+        "sao tome and principe": "ST",
+        "s\u00e3o tom\u00e9 and pr\u00edncipe": "ST",
+
+        # --- Island territories with long or unusual pycountry names ---
+        # pycountry name: "Saint Barth\u00e9lemy"
+        "saint barthelemy": "BL",
+        "st barthelemy": "BL",
+        "st. barthelemy": "BL",
+        # pycountry name: "Saint Martin (French part)"
+        "saint martin": "MF",
+        "st martin": "MF",
+        "st. martin": "MF",
     }
 
     _HISTORICAL_COUNTRIES = {
@@ -98,8 +294,8 @@ class GeoEngine:
         "netherlands antilles",
     }
 
-    # MED-5: Expanded ocean/sea/gulf/bay set with 30+ additional water bodies
-    # commonly found in NCBI BioSample marine submissions.
+    # MED-5: Explicit set for canonical water body names (Tier 1).
+    # Tier 2 (_WATER_BODY_RE) catches anything not listed here.
     _OCEAN_SEA = {
         # Oceans
         "pacific ocean", "atlantic ocean", "indian ocean",
@@ -115,6 +311,12 @@ class GeoEngine:
         "sulu sea", "philippine sea", "sea of japan",
         "sea of okhotsk", "sea of azov", "ross sea",
         "weddell sea", "scotia sea",
+        # Arctic and marginal seas
+        "kara sea", "laptev sea", "east siberian sea",
+        "chukchi sea", "beaufort sea", "white sea",
+        "greenland sea", "irminger sea",
+        "mawson sea", "amundsen sea",
+        "davis strait",
         # Gulfs and bays
         "persian gulf", "gulf of mexico", "gulf of aden",
         "gulf of guinea", "gulf of oman", "gulf of california",
@@ -125,18 +327,40 @@ class GeoEngine:
         "strait of malacca",
     }
 
-    _COORD_RE = re.compile(
-        r"^[+-]?\d+\.?\d*\s*[NSns]?\s*[,;\s]+\s*[+-]?\d+\.?\d*\s*[EWew]?$"
-    )
+    # Column order guaranteed on every output DataFrame, including empty input.
+    _COLUMNS = ["geo_country", "geo_region", "geo_locality", "geo_iso3166", "geo_sea_ocean"]
 
     def _empty(self):
         return {
-            "geo_country": np.nan, "geo_region": np.nan,
-            "geo_locality": np.nan, "geo_iso3166": np.nan,
-            "geo_sea_ocean": np.nan, "geo_loc_raw": np.nan,
+            "geo_country": np.nan,
+            "geo_region": np.nan,
+            "geo_locality": np.nan,
+            "geo_iso3166": np.nan,
+            "geo_sea_ocean": np.nan,
         }
 
+    def _strip_parens(self, s):
+        """Strip all trailing parenthetical groups from s."""
+        while True:
+            stripped = self._PAREN_RE.sub("", s).strip()
+            if stripped == s:
+                return s
+            s = stripped
+
+    def _water_body_result(self, country_str_clean, region_str, locality_str):
+        """Build result dict for a detected water body token."""
+        result = self._empty()
+        result["geo_sea_ocean"] = country_str_clean
+        if region_str:
+            result["geo_locality"] = (
+                region_str if not locality_str else f"{region_str}, {locality_str}"
+            )
+        return result
+
     def parse(self, series):
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+
         empty = self._empty()
 
         unique_vals = series.dropna().unique()
@@ -151,7 +375,7 @@ class GeoEngine:
             cache[v] if pd.notna(v) and v in cache else empty
             for v in series
         ]
-        return pd.DataFrame(results, index=series.index)
+        return pd.DataFrame(results, index=series.index, columns=self._COLUMNS)
 
     def _parse_single(self, value):
         empty = self._empty()
@@ -162,24 +386,22 @@ class GeoEngine:
         if self.NULL_PATTERNS.match(value):
             return empty
 
-        if self._COORD_RE.match(value):
-            result = dict(empty)
-            result["geo_loc_raw"] = value
-            return result
-
         country_str, region_str, locality_str = self._split_geo_string(value)
 
-        country_str_clean = self._PAREN_RE.sub("", country_str).strip()
+        country_str_clean = self._strip_parens(country_str)
         lower_country = country_str_clean.lower()
 
+        # Tier 1: explicit canonical water body set
         if lower_country in self._OCEAN_SEA:
-            result = dict(empty)
-            result["geo_sea_ocean"] = country_str_clean
-            if region_str:
-                result["geo_locality"] = (
-                    region_str if not locality_str else f"{region_str}, {locality_str}"
-                )
-            return result
+            return self._water_body_result(country_str_clean, region_str, locality_str)
+
+        # Tier 2: regex fallback for any water body keyword not in the set
+        if self._WATER_BODY_RE.search(country_str_clean):
+            logger.debug(
+                "GeoEngine: %r matched water body regex (Tier 2) -> geo_sea_ocean.",
+                country_str_clean,
+            )
+            return self._water_body_result(country_str_clean, region_str, locality_str)
 
         if lower_country in self._UK_SUBCOUNTRY:
             display_country = "United Kingdom"
@@ -188,13 +410,22 @@ class GeoEngine:
 
         iso_code = self._resolve_iso(country_str_clean)
 
+        # If ISO resolution completely failed and the token is not a known
+        # historical entry, the country string is unrecognisable (free text,
+        # coordinate fragment, etc.) -- return all-NaN.
+        if pd.isna(iso_code) and lower_country not in self._HISTORICAL_COUNTRIES:
+            logger.debug(
+                "GeoEngine: unresolvable country token %r -- returning all-NaN.",
+                country_str_clean,
+            )
+            return empty
+
         return {
             "geo_country": display_country if country_str_clean else np.nan,
             "geo_region": region_str if region_str else np.nan,
             "geo_locality": locality_str if locality_str else np.nan,
             "geo_iso3166": iso_code,
             "geo_sea_ocean": np.nan,
-            "geo_loc_raw": np.nan,
         }
 
     def _split_geo_string(self, value):
@@ -254,7 +485,28 @@ class GeoEngine:
             return np.nan
 
         try:
-            result = pycountry.countries.search_fuzzy(country_str)
-            return result[0].alpha_2
+            matches = pycountry.countries.search_fuzzy(country_str)
+            if not matches:
+                return np.nan
+            best = matches[0]
+            # Accept directly if the input matches alpha-2, alpha-3, or
+            # common_name -- these bypass the score gate because short ISO
+            # codes and common short-form names (e.g. 'USA', 'Iran') score
+            # poorly against pycountry's long diplomatic names even though
+            # the match is unambiguous.
+            direct_matches = {best.alpha_2.lower(), best.alpha_3.lower()}
+            common = getattr(best, "common_name", None)
+            if common:
+                direct_matches.add(common.lower())
+            if lower in direct_matches:
+                return best.alpha_2
+            score = fuzz.token_sort_ratio(lower, best.name.lower())
+            if score < self._FUZZY_MIN_SCORE:
+                logger.debug(
+                    "GeoEngine: fuzzy match '%s' -> '%s' rejected (score %d < %d).",
+                    country_str, best.name, score, self._FUZZY_MIN_SCORE,
+                )
+                return np.nan
+            return best.alpha_2
         except Exception:
             return np.nan

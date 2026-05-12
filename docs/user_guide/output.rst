@@ -15,7 +15,7 @@ Supported Formats
 
 The following format identifiers are accepted by :func:`~biometaharmonizer.output.write`
 (case-insensitive). The full list is defined in the module-level constant
-``_VALID_FORMATS = ("csv", "tsv", "excel", "parquet")``.
+``_VALID_FORMATS = ("csv", "tsv", "excel", "parquet", "jsonl")``.
 
 .. list-table:: 
    :header-rows: 1
@@ -35,6 +35,9 @@ The following format identifiers are accepted by :func:`~biometaharmonizer.outpu
    * - ``parquet``
      - Apache Parquet columnar format.
      - pyarrow engine
+   * - ``jsonl``
+     - JSON Lines output, one JSON object per line.
+     - custom line writer using ``json.dumps``
 
 The ``write()`` function creates any missing parent directories automatically
 via ``Path.mkdir(parents=True, exist_ok=True)``. It logs the output path,
@@ -54,7 +57,7 @@ write() Signature
 - **path** — destination file path as a ``str`` or ``Path`` object.
 - **fmt** — output format; default ``"csv"``. Case-insensitive.
 - **Returns** the resolved absolute ``Path`` of the written file.
-- **Raises** ``ValueError`` if ``fmt`` is not one of the four valid formats.
+- **Raises** ``ValueError`` if ``fmt`` is not one of the five valid formats.
 
 write_summary() Signature
 --------------------------

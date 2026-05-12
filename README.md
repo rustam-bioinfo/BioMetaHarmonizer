@@ -3,6 +3,7 @@
 [![version](https://img.shields.io/badge/version-0.6.0-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
+[![PyPI](https://img.shields.io/pypi/v/biometaharmonizer)](https://pypi.org/project/biometaharmonizer/)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rustam-bioinfo.github.io/BioMetaHarmonizer/)
 
 A Python package for fetching, parsing, and standardizing NCBI BioSample metadata for large-scale genomic epidemiology.
@@ -11,7 +12,7 @@ A Python package for fetching, parsing, and standardizing NCBI BioSample metadat
 
 ## What it does
 
-NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, or Parquet.
+NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across submitters. BioMetaHarmonizer fetches BioSample XML records via the Entrez API, maps raw attribute names to a fixed set of standard columns, normalizes placeholder null values, parses dates and geographic strings, and assigns One Health categories. The result is a pandas DataFrame that can be written to CSV, TSV, Excel, Parquet, or JSON Lines (JSONL) — including multiple formats in a single run.
 
 Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
 
@@ -21,15 +22,23 @@ Records submitted under NCBI pathogen packages (e.g. `Pathogen.cl.1.0`, `Pathoge
 
 ## Installation
 
+Install from PyPI:
+
+```bash
+pip install biometaharmonizer
+```
+
+Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
+
+**Development install** (editable, from source):
+
 ```bash
 git clone https://github.com/rustam-bioinfo/BioMetaHarmonizer.git
 cd BioMetaHarmonizer
 pip install -e .
 ```
 
-Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
-
-The package ships with pre-built schema files (`unified.json`, `one_health_dictionaries.json`, `ncbi_attributes.xml`). The rebuild scripts in `scripts/` are only needed when you want to refresh those files from upstream sources — see [Rebuilding schema files](#rebuilding-schema-files).
+The package ships with a minimal hand-curated `one_health_dictionaries.json`. For complete One Health classification — in particular, full NCBI taxonomy coverage of host species names — rebuild this file before use. See [Rebuilding schema files](#rebuilding-schema-files).
 
 ---
 
@@ -38,80 +47,40 @@ The package ships with pre-built schema files (`unified.json`, `one_health_dicti
 ### Command line
 
 ```bash
+# Single output file (format inferred from extension)
 biometaharmonizer run \
     --input  accessions.txt \
     --email  your@email.com \
     --output harmonized.csv
+
+# Save to multiple formats in one run
+biometaharmonizer run \
+    --input  accessions.txt \
+    --email  your@email.com \
+    --output harmonized.csv \
+    --format csv tsv excel
+# Produces: harmonized.csv, harmonized.tsv, harmonized.xlsx
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--input FILE` | required | Path to accession list (one per line) |
 | `--email EMAIL` | required | Valid contact email for NCBI Entrez — must contain `@` and a domain |
-| `--output FILE` | required | Output file path |
+| `--output FILE` | required | Output file path (used as the base name for multi-format output) |
 | `--api-key KEY` | — | NCBI API key; raises rate limit from 3 to 10 requests/second |
 | `--cache-dir DIR` | `~/.biometaharmonizer/cache/` | Directory for assembly summary flat files |
-| `--format FORMAT` | inferred from file extension | `csv`, `tsv`, `excel`, `parquet` |
+| `--format FORMAT [FORMAT ...]` | inferred from file extension | One or more of: `csv`, `tsv`, `excel`, `parquet`, `jsonl`. When multiple formats are given the stem of `--output` is reused and the correct extension is substituted for each format. Omit to infer from the output file extension. |
 | `--summary FILE` | — | Write a per-column fill-rate CSV |
 | `--fetch-batch-size N` | `200` | Number of records per efetch request |
 | `--esearch-batch-size N` | `200` | Number of accessions per esearch term |
 | `--refresh-cache` | off | Force re-download of assembly summary flat files regardless of age |
 | `--verbose` | off | Enable DEBUG-level logging |
 
-### Python API
-
-```python
-from biometaharmonizer.ingestion import set_email, ingest
-from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier
-from biometaharmonizer import write, write_summary
-
-# Ingest: accepts a file path, a Python list, or a mix of both accession types
-set_email("your@email.com")
-df = ingest("accessions.txt")
-# or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
-
-# Force re-download of assembly summary flat files (bypasses 7-day TTL):
-# df = ingest("accessions.txt", refresh_cache=True)
-
-# Key harmonization — renames raw columns to standard keys, coalesces duplicates
-# Needed only if you bring your own DataFrame; ingest() already applies the schema
-mapper = KeyMapper()
-df = mapper.map_columns(df)
-
-# Date parsing: 40+ input formats -> ISO 8601 (YYYY / YYYY-MM / YYYY-MM-DD)
-de = DateEngine()
-date_df = de.parse_with_range(df["collection_date"])
-df["collection_date"] = date_df["collection_date"]
-df["collection_date_range"] = date_df["collection_date_range"]
-
-# Geography: splits geo_loc_name into country, region, locality, ISO code, sea
-ge = GeoEngine()
-geo_df = ge.parse(df["geo_loc_name"])
-for col in geo_df.columns:
-    df[col] = geo_df[col]
-
-# One Health classification across multiple source columns simultaneously
-oh = OneHealthClassifier()
-src = {col: df[col] for col in
-       ["isolation_source", "env_broad_scale", "env_local_scale",
-        "env_medium", "sample_type", "host"]
-       if col in df.columns}
-oh_df = oh.classify_multi_field(**src)
-for col in oh_df.columns:
-    df[col] = oh_df[col]
-
-# Write output
-write(df, "harmonized.csv")
-write_summary(df, "fill_rates.csv")
-```
-
 ---
-
 ## Output columns
 
-The output DataFrame contains **58 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
+The output DataFrame contains **57 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
-The first 52 columns come from ingestion. The final **6** are added by `OneHealthClassifier.classify_multi_field()` (`one_health_category` at column 28 is also produced by that step; the 6 new columns are rows 29–34).
 
 | # | Column | Source | Description |
 |---|--------|--------|-------------|
@@ -126,53 +95,52 @@ The first 52 columns come from ingestion. The final **6** are added by `OneHealt
 | 9 | `taxonomy_name` | BioSample XML | Taxon name for the assigned taxonomy_id |
 | 10 | `organism_name` | BioSample XML | Organism name from `<OrganismName>`; falls back to taxonomy_name |
 | 11 | `collection_date` | BioSample attribute → DateEngine | Collection date normalized to ISO 8601 |
-| 12 | `collection_date_range` | DateEngine | Inferred date range when only year or year-month was provided |
+| 12 | `collection_date_range` | DateEngine | Verbatim original string for range/approximate date inputs; NaN for point dates |
 | 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
 | 14 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
 | 15 | `geo_country` | GeoEngine | Country resolved from `geo_loc_name` |
 | 16 | `geo_region` | GeoEngine | Sub-national region; populated only from colon-format inputs (`"Country: Region, Locality"`); `NaN` for comma-only inputs |
 | 17 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
 | 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
-| 19 | `geo_sea_ocean` | GeoEngine | Sea or ocean name for marine locations |
-| 20 | `geo_loc_raw` | GeoEngine | Preserved raw string for coordinate-only inputs (e.g. `"40.71 N, 74.00 W"`); `NaN` for all other inputs |
-| 21 | `host` | BioSample attribute | Host organism name |
-| 22 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
-| 23 | `host_age` | BioSample attribute | Age of host |
-| 24 | `host_sex` | BioSample attribute | Biological sex of host |
-| 25 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
-| 26 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
-| 27 | `sample_type` | BioSample attribute | Sample type or specimen classification |
-| 28 | `one_health_category` | OneHealthClassifier | One of: Human, Animal, Aquatic, Wildlife, Plant, Food, Environmental, Lab, Unclassified |
-| 29 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
-| 30 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
-| 31 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
-| 32 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
-| 33 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`), if any |
-| 34 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
-| 35 | `isolate` | BioSample attribute | Isolate identifier |
-| 36 | `strain` | BioSample attribute | Strain designation |
-| 37 | `sub_strain` | BioSample attribute | Sub-strain designation |
-| 38 | `serotype` | BioSample attribute | Serotype |
-| 39 | `serovar` | BioSample attribute | Serovar |
-| 40 | `genotype` | BioSample attribute | Genotype or sequence type |
-| 41 | `culture_collection` | BioSample attribute | Culture collection identifier |
-| 42 | `outbreak` | BioSample attribute | Outbreak identifier |
-| 43 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
-| 44 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
-| 45 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
-| 46 | `sequencing_method` | BioSample attribute | Sequencing platform |
-| 47 | `assembly_method` | BioSample attribute | Genome assembly software |
-| 48 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
-| 49 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
-| 50 | `submission_date` | BioSample XML | Date first submitted |
-| 51 | `last_update` | BioSample XML | Date last modified |
-| 52 | `publication_date` | BioSample XML | Date made publicly available |
-| 53 | `access` | BioSample XML | `public` or `controlled-access` |
-| 54 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
-| 55 | `status_date` | BioSample XML | Date current status was assigned |
-| 56 | `title` | BioSample XML | Free-text title of the BioSample record |
-| 57 | `description_comment` | BioSample XML | Free-text description or comment block |
-| 58 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
+| 19 | `geo_sea_ocean` | GeoEngine | Named aquatic feature from `geo_loc_name` — covers oceans, seas, gulfs, bays, straits, fjords, lakes, reservoirs, and other water bodies |
+| 20 | `host` | BioSample attribute | Host organism name |
+| 21 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
+| 22 | `host_age` | BioSample attribute | Age of host |
+| 23 | `host_sex` | BioSample attribute | Biological sex of host |
+| 24 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
+| 25 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
+| 26 | `sample_type` | BioSample attribute | Sample type or specimen classification |
+| 27 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
+| 28 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
+| 29 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 30 | `one_health_category` | OneHealthClassifier | One of: `Human`, `Animal`, `Plant`, `Food`, `Environmental`, `Unclassified` |
+| 31 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
+| 32 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
+| 33 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
+| 34 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
+| 35 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`) |
+| 36 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
+| 37 | `isolate` | BioSample attribute | Isolate identifier |
+| 38 | `strain` | BioSample attribute | Strain designation |
+| 39 | `sub_strain` | BioSample attribute | Sub-strain designation |
+| 40 | `serotype` | BioSample attribute | Serotype |
+| 41 | `serovar` | BioSample attribute | Serovar |
+| 42 | `genotype` | BioSample attribute | Genotype or sequence type |
+| 43 | `culture_collection` | BioSample attribute | Culture collection identifier |
+| 44 | `outbreak` | BioSample attribute | Outbreak identifier |
+| 45 | `sequencing_method` | BioSample attribute | Sequencing platform |
+| 46 | `assembly_method` | BioSample attribute | Genome assembly software |
+| 47 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
+| 48 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
+| 49 | `submission_date` | BioSample XML | Date first submitted |
+| 50 | `last_update` | BioSample XML | Date last modified |
+| 51 | `publication_date` | BioSample XML | Date made publicly available |
+| 52 | `access` | BioSample XML | `public` or `controlled-access` |
+| 53 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
+| 54 | `status_date` | BioSample XML | Date current status was assigned |
+| 55 | `title` | BioSample XML | Free-text title of the BioSample record |
+| 56 | `description_comment` | BioSample XML | Free-text description or comment block |
+| 57 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
 
 ---
 
@@ -280,13 +248,6 @@ biometaharmonizer run --input ids.txt --email you@example.com \
 df = ingest("ids.txt", email="you@example.com", refresh_cache=True)
 ```
 
-In Colab:
-
-```python
-from biometaharmonizer.ingestion import set_cache_dir
-set_cache_dir("/content/bmh_cache")
-```
-
 ---
 
 ## Entrez rate limits
@@ -310,14 +271,18 @@ df = ingest("ids.txt", email="you@example.com", api_key="YOUR_KEY")
 
 ## Geospatial parsing
 
-`GeoEngine` splits `geo_loc_name` into `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, `geo_sea_ocean`, and `geo_loc_raw`.
+`GeoEngine` splits `geo_loc_name` into five structured columns: `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, and `geo_sea_ocean`.
 
 The parser recognizes two input formats:
 
 - **Colon format** `"Country: Region, Locality"` — the part before `:` becomes `geo_country`, the first segment after `:` becomes `geo_region`, and any remainder after the comma becomes `geo_locality`.
 - **Comma-only format** `"Country, Locality"` — the part before the first `,` becomes `geo_country` and the remainder becomes `geo_locality`. `geo_region` is left `NaN`.
 
-Parenthetical qualifiers (e.g. `"United Kingdom (England, Wales & N. Ireland)"`, `"Pacific Ocean (NE)"`) are stripped from the country token before any lookup. This means ocean and sea names with qualifiers are still correctly routed to `geo_sea_ocean` rather than falling through to the country resolver.
+Parenthetical qualifiers (e.g. `"United Kingdom (England, Wales & N. Ireland)"`, `"Pacific Ocean (NE)"`, `"Russia (European part)"`) are stripped from the country token before any lookup. This means both country names and water body names with parenthetical qualifiers are correctly resolved — countries are not missed by pycountry and water bodies are not misrouted to the country resolver.
+
+Water body detection (`geo_sea_ocean`) uses a two-tier lookup. Tier 1 is an explicit set of canonical names that covers all major oceans, seas, gulfs, bays, and straits — matched with an exact case-insensitive lookup for correctness and explicitness. Names in this set are consciously verified, and entries like `"English Channel"` and `"Mozambique Channel"` bypass the regex false-positive risk entirely because they are resolved before Tier 2 runs. Tier 2 is a regex fallback that catches any token containing a water-body keyword (`ocean`, `sea`, `gulf`, `bay`, `strait`, `fjord`, `bight`, `sound`, `inlet`, `lagoon`, `lake`, `reservoir`, `estuary`, `delta`, `reef`, `atoll`) not already in Tier 1. A negative lookahead blocks known false positives: `"Channel Islands"`, `"Gulf States"`, `"British Indian Ocean Territory"`, and similar compound names where the keyword is part of a political entity name rather than a water body.
+
+Coordinate data (e.g. `"40.71 N, 74.00 W"`) belongs in the `lat_lon` attribute, not `geo_loc_name`. Strings submitted to `geo_loc_name` that look like coordinates are treated as unparseable and return all-NaN geo columns.
 
 | Input | Result |
 |---|---|
@@ -329,11 +294,14 @@ Parenthetical qualifiers (e.g. `"United Kingdom (England, Wales & N. Ireland)"`,
 | `"Pacific Ocean (NE)"` | sea\_ocean=Pacific Ocean |
 | `"Pacific Ocean: Mariana Trench"` | sea\_ocean=Pacific Ocean, locality=Mariana Trench |
 | `"Red Sea (sampling site 3): surface"` | sea\_ocean=Red Sea, locality=surface |
-| `"40.71 N, 74.00 W"` | geo\_loc\_raw preserved; all other geo columns NaN |
 | `"Gaza Strip"` | country=Gaza Strip, iso=PS |
 | `"West Bank"` | country=West Bank, iso=PS |
 | `"United Kingdom (England, Wales & N. Ireland)"` | country=United Kingdom, iso=GB |
 | `"not applicable"` | all geo columns NaN |
+| `"Lake Baikal"` | sea\_ocean=Lake Baikal |
+| `"Gulf of Bothnia"` | sea\_ocean=Gulf of Bothnia |
+| `"Svalbard: Revvatnet basin, southern Spitsbergen"` | country=Svalbard, region=Revvatnet basin, locality=southern Spitsbergen, iso=SJ |
+| `"Kosovo"` | country=Kosovo, iso=XK |
 
 Handling notes:
 
@@ -342,15 +310,14 @@ Handling notes:
 - `Gaza Strip`, `West Bank`, `Gaza`, `Palestine`, `Palestinian territories` → iso `PS`
 - `Korea` (bare, no qualifier) → South Korea (`KR`); logged at INFO level
 - Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
-- Coordinate-only strings are preserved in `geo_loc_raw` and not reverse-geocoded; all other geo columns are `NaN`
-- `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo` and several aliases are resolved via a hardcoded table before pycountry fuzzy lookup
+- `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo`, `Russia`, `Czech Republic`, `Svalbard`, `Kosovo`, and several other names are resolved via a hardcoded alias table before pycountry fuzzy lookup. `Kosovo` uses code `XK` — a user-assigned code per CLDR and EU conventions, not part of the official ISO 3166-1 standard.
 - All unique `geo_loc_name` values are resolved once and cached; pycountry fuzzy lookup runs at most once per unique country string regardless of row count
 
 ---
 
 ## One Health classification
 
-`OneHealthClassifier` loads all biological knowledge from `schemas/one_health_dictionaries.json` and assigns each record one of nine categories: **Human**, **Animal**, **Aquatic**, **Wildlife**, **Plant**, **Food**, **Environmental**, **Lab**, **Unclassified**.
+`OneHealthClassifier` loads all biological knowledge from `schemas/one_health_dictionaries.json` and assigns each record one of six categories: **Human**, **Animal**, **Plant**, **Food**, **Environmental**, **Unclassified**.
 
 `classify_multi_field()` accepts up to six named `pd.Series` and returns a DataFrame with seven columns:
 
@@ -372,11 +339,13 @@ Handling notes:
 
 **Classification pipeline per record:**
 
-1. `host` field: institution guard (strips culture collection prefixes; returns Lab if residual < 4 chars), then `host_to_category` dictionary lookup, then text classification fallback.
+1. `host` field: institution guard (strips culture collection prefixes; returns Lab if residual < 4 chars), then bracket/parenthesis annotation stripping (e.g. `[NCBITaxon:9825]`, `(Linnaeus 1758)`), then `host_to_category` dictionary lookup with progressive right-token-drop fallback for trinomial/subspecies names, then text classification fallback.
 2. `isolation_source`, `env_medium`, `env_local_scale`: matched against unambiguous human/animal term lists, then tier1 patterns, then rapidfuzz fuzzy fallback against the ontology map.
 3. `sample_type`: domain-level signal; used to set category if no specimen field matched.
 4. `env_broad_scale`: supporting signal only; contributes a corroboration bonus but does not set the primary category on its own.
 5. Pass 2 resolves the winning category from accumulated domain/specimen/supporting evidence.
+
+**Host trinomial / subspecies fallback.** When a host value like `Equus ferus caballus` is not found as an exact entry in `host_to_category`, the classifier progressively drops tokens from the right (`Equus ferus`, then `Equus`) until a match is found or all prefixes are exhausted. This fallback is active only when every token in the name is composed solely of letters or hyphens (no digits or strain identifiers), so free-text phrases are never misclassified via this path. The bundled `one_health_dictionaries.json` contains only a hand-curated seed; after running `scripts/build_dictionaries.py` the full NCBI taxonomy is present and the fallback is rarely needed.
 
 ---
 
@@ -401,44 +370,72 @@ write(df, "out.csv")                        # CSV
 write(df, "out.tsv", fmt="tsv")             # TSV
 write(df, "out.xlsx", fmt="excel")          # Excel
 write(df, "out.parquet", fmt="parquet")     # Parquet
+write(df, "out.jsonl", fmt="jsonl")         # JSON Lines (one record per line)
 
 write_summary(df, "fill_rates.csv")         # column, non_null_count, fill_pct
 ```
 
-Format strings are case-insensitive. If `--format` is not specified on the CLI, the format is inferred from the output file extension.
+Format strings are case-insensitive. If `--format` is not specified on the CLI, the format is inferred from the output file extension (`.jsonl` → `jsonl`).
+
+The JSONL writer decodes the `_extra_attributes` field from its JSON string representation into a native Python dict before serialization, so downstream consumers receive a fully nested JSON object rather than a double-encoded string.
+
+### Multi-format output
+
+Pass multiple space-separated format names to `--format` to write all formats in a single pipeline run. The stem of `--output` is reused and the correct extension is substituted automatically:
+
+```bash
+biometaharmonizer run \
+    --input ids.txt \
+    --email you@example.com \
+    --output results/harmonized.csv \
+    --format csv tsv parquet jsonl
+# Writes:
+#   results/harmonized.csv
+#   results/harmonized.tsv
+#   results/harmonized.parquet
+#   results/harmonized.jsonl
+```
+
+When only a single format is given, the `--output` path is used exactly as specified.
+
+| Format | Extension substituted |
+|---|---|
+| `csv` | `.csv` |
+| `tsv` | `.tsv` |
+| `excel` | `.xlsx` |
+| `parquet` | `.parquet` |
+| `jsonl` | `.jsonl` |
 
 ---
 
-## Scripts
+## Rebuilding schema files
 
-### `generate_summary_report.py`
+The package ships with pre-built schema files. These are sufficient for basic use, but rebuilding them is strongly recommended before processing large or taxonomically diverse datasets.
 
-Generates a comprehensive HTML/JSON/CSV summary report with visualizations (fill rates, geographic distribution, temporal analysis, One Health breakdown, host species, unmapped attribute frequency) for any BioMetaHarmonizer output file.
+### `build_dictionaries.py` — One Health dictionary
 
-```bash
-# Single HTML report:
-python scripts/generate_summary_report.py \
-    --input harmonized.csv \
-    --output report.html
+The bundled `one_health_dictionaries.json` is a minimal hand-curated seed. It covers common host names and key ontology terms, but it does **not** include the full NCBI taxonomy. Without rebuilding, trinomial host names (e.g. `Equus ferus caballus`, `Bos taurus indicus`) and many uncommon species will fall back to the progressive prefix-drop heuristic instead of resolving from an authoritative entry.
 
-# All formats to a directory:
-python scripts/generate_summary_report.py \
-    --input harmonized.csv \
-    --output-dir reports/ \
-    --formats html json csv
-```
-
-Requires `plotly>=5.14` for HTML output (`pip install plotly`). `kaleido` is optional and only needed for PDF export.
-
-### `build_dictionaries.py`
-
-Rebuilds `one_health_dictionaries.json` from OLS4 ontologies, NCBI Taxonomy, and optional UMLS synonyms.
+To build the full dictionary, run:
 
 ```bash
 python scripts/build_dictionaries.py \
     --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
     --output src/biometaharmonizer/schemas/one_health_dictionaries.json
 ```
+
+This queries the OLS4 API (ENVO, FoodOn, UBERON, Plant Ontology) and downloads the NCBI taxonomy dump (~65 MB) to populate `host_to_category` with scientific names, common names, and equivalent names for all vertebrates and plants. The full build takes a few minutes depending on network speed.
+
+Options:
+
+| Flag | Description |
+|---|---|
+| `--taxdmp PATH` | Path to a pre-downloaded `taxdmp.zip` or an extracted directory containing `names.dmp` and `nodes.dmp`. Skips the ~65 MB NCBI download. |
+| `--skip-ncbi` | Skip NCBI taxonomy entirely (OLS4 terms only). |
+| `--skip-ols` | Skip OLS4 queries (NCBI taxonomy only). |
+| `--umls-key KEY` | Optional UMLS API key for additional synonym expansion. |
+
+The hand-curated entries in the base file always win over ontology-derived data (`merge_strategy: base_wins`).
 
 ### `build_ncbi_attribute_cache.py`
 
@@ -447,6 +444,32 @@ Downloads the official NCBI BioSample attribute harmonization table and stores i
 ```bash
 python scripts/build_ncbi_attribute_cache.py
 ```
+
+---
+
+## Scripts
+
+### `generate_summary_report.py`
+
+Generates an interactive, self-contained HTML report from a BioMetaHarmonizer
+output file. The report includes metadata completeness (fill rates), geographic
+distribution, temporal trends, taxonomy, One Health breakdown, and a searchable
+paginated data table — all embedded in a single HTML file with no server required.
+
+```bash
+# Output defaults to harmonized_report.html next to the input file
+python scripts/generate_summary_report.py harmonized.csv
+
+# Specify a custom output path
+python scripts/generate_summary_report.py harmonized.csv report.html
+```
+
+| Argument | Description |
+|---|---|
+| `input` | Path to a BioMetaHarmonizer output file (`.csv`, `.tsv`, `.xlsx`, `.parquet`) |
+| `output` | (optional) Output `.html` path. Defaults to `<stem>_report.html` next to the input. |
+
+Requires `plotly` (loaded from CDN — no local install needed at runtime) and `pandas`. For Excel input, also install `openpyxl`.
 
 ---
 
@@ -463,7 +486,7 @@ BioMetaHarmonizer/
 │   ├── date_engine.py          # date parsing, ISO 8601 output
 │   ├── geo_engine.py           # geo_loc_name splitting, ISO-3166 resolution
 │   ├── one_health.py           # One Health categorization
-│   ├── output.py               # write CSV / TSV / Excel / Parquet
+│   ├── output.py               # write CSV / TSV / Excel / Parquet / JSONL
 │   └── schemas/
 │       ├── unified.json                      # standard keys + synonym lists
 │       ├── one_health_dictionaries.json      # One Health keyword/ontology dict
@@ -493,6 +516,55 @@ pytest tests/ -v --tb=short
 ```
 
 All tests use synthetic data — no live NCBI calls are made.
+
+---
+
+### Python API
+
+```python
+from biometaharmonizer.ingestion import set_email, ingest
+from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier
+from biometaharmonizer import write, write_summary
+
+# Ingest: accepts a file path, a Python list, or a mix of both accession types
+set_email("your@email.com")
+df = ingest("accessions.txt")
+# or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
+
+# Force re-download of assembly summary flat files (bypasses 7-day TTL):
+# df = ingest("accessions.txt", refresh_cache=True)
+
+# Key harmonization — renames raw columns to standard keys, coalesces duplicates
+# Needed only if you bring your own DataFrame; ingest() already applies the schema
+mapper = KeyMapper()
+df = mapper.map_columns(df)
+
+# Date parsing: 40+ input formats -> ISO 8601 (YYYY / YYYY-MM / YYYY-MM-DD)
+de = DateEngine()
+date_df = de.parse_with_range(df["collection_date"])
+df["collection_date"] = date_df["collection_date"]
+df["collection_date_range"] = date_df["collection_date_range"]
+
+# Geography: splits geo_loc_name into country, region, locality, ISO code, sea
+ge = GeoEngine()
+geo_df = ge.parse(df["geo_loc_name"])
+for col in geo_df.columns:
+    df[col] = geo_df[col]
+
+# One Health classification across multiple source columns simultaneously
+oh = OneHealthClassifier()
+src = {col: df[col] for col in
+       ["isolation_source", "env_broad_scale", "env_local_scale",
+        "env_medium", "sample_type", "host"]
+       if col in df.columns}
+oh_df = oh.classify_multi_field(**src)
+for col in oh_df.columns:
+    df[col] = oh_df[col]
+
+# Write output
+write(df, "harmonized.csv")
+write_summary(df, "fill_rates.csv")
+```
 
 ---
 

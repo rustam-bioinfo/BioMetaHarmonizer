@@ -2,61 +2,45 @@
 """
 generate_summary_report.py
 
-Generates a comprehensive HTML summary report with visualizations for
-BioMetaHarmonizer output files.
+Generates an interactive, self-contained HTML report from a
+BioMetaHarmonizer output file (CSV, TSV, Excel, or Parquet).
+
+The report includes fill-rate completeness, geographic distribution,
+temporal trends, taxonomy, One Health breakdown, and a searchable
+data table — all embedded in a single HTML file with no server required.
 
 Usage
 -----
-  python scripts/generate_summary_report.py \
-      --input harmonized.csv \
-      --output report.html \
-      --format html
+  python scripts/generate_summary_report.py harmonized.csv
+  python scripts/generate_summary_report.py harmonized.csv report.html
 
-  # Generate all formats:
-  python scripts/generate_summary_report.py \
-      --input harmonized.csv \
-      --output-dir reports/ \
-      --formats html pdf json
+Arguments
+---------
+  input          Path to a BioMetaHarmonizer output file
+                 (.csv, .tsv, .xlsx, .xls, .xlsm, .parquet)
+  output         (optional) Output HTML path.
+                 Defaults to <input_stem>_report.html next to the input file.
 
 Dependencies
 ------------
   pandas>=1.5
-  plotly>=5.14
-  kaleido (for PDF export, optional)
+  numpy
+  plotly>=2.32  (loaded from CDN; no local install required at runtime)
+  openpyxl      (for .xlsx / .xls input)
+  pyarrow       (for .parquet input, optional)
 """
 
-import argparse
-import json
-import logging
 import sys
-from datetime import datetime
+import os
+import json
+import re
+import argparse
+import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
 
 import pandas as pd
-
-# Import plotly components conditionally
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-    # Define stub types for type hints when plotly is not available
-    class go:
-        Figure = None
-        Bar = None
-        Pie = None
-        Scatter = None
-        Histogram = None
-        Donut = None
-    
-    class px:
-        colors = type('colors', (), {'qualitative': type('qualitative', (), {'Set3': []})})()
-    
-    def make_subplots(*args, **kwargs):
-        raise ImportError("Plotly is required for visualization features")
+import numpy as np
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,719 +49,1080 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Column categories for grouped analysis
-COLUMN_CATEGORIES = {
-    "Structural": [
-        "biosample_accession", "biosample_id", "sra_accession", 
-        "bioproject_accession", "assembly_accession_refseq", 
-        "assembly_accession_genbank", "sample_name_id", 
-        "taxonomy_id", "taxonomy_name"
-    ],
-    "Organism": ["organism_name"],
-    "Temporal": ["collection_date", "collection_date_range"],
-    "Geospatial": [
-        "geo_loc_name", "geo_country", "geo_region", "geo_locality",
-        "geo_iso3166", "geo_sea_ocean", "geo_loc_raw"
-    ],
-    "Host Information": [
-        "host", "host_disease", "host_age", "host_sex", 
-        "host_tissue_sampled", "host_health_state", "host_subject_id",
-        "host_description", "host_disease_outcome", "host_disease_stage"
-    ],
-    "Sample/Isolation": ["isolation_source", "sample_type", "isolate"],
-    "One Health": ["one_health_category"],
-    "Strain/Typing": [
-        "strain", "sub_strain", "serotype", "serovar", "genotype",
-        "subtype", "subgroup", "pathotype", "passage_history"
-    ],
-    "Culture/Reference": [
-        "culture_collection", "specimen_voucher", 
-        "biomaterial_provider", "ref_biomaterial"
-    ],
-    "AMR": [
-        "antimicrobial_resistance", 
-        "antimicrobial_resistance_phenotype"
-    ],
-    "Epidemiology": ["outbreak"],
-    "Sequencing/Assembly": ["sequencing_method", "assembly_method"],
-    "Environmental": [
-        "env_broad_scale", "env_local_scale", "env_medium",
-        "samp_size", "samp_mat_process", "temp", "ph", "depth", "elev"
-    ],
-    "Curation": [
-        "collected_by", "ncbi_package", "submission_date", 
-        "last_update", "publication_date", "access", "status", 
-        "status_date", "title", "description_comment"
-    ],
-    "Special Categories": ["ifsac_category", "food_origin"],
-    "Extra": ["_extra_attributes"]
-}
-
-# Reverse mapping: column -> category
-COLUMN_TO_CATEGORY = {}
-for cat, cols in COLUMN_CATEGORIES.items():
-    for col in cols:
-        COLUMN_TO_CATEGORY[col] = cat
+# Maximum distinct values shown per bar chart.
+_CHART_TOP_N = 25
+# Maximum distinct values shown per pie chart.
+_PIE_TOP_N = 10
 
 
-def compute_fill_rates(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute fill rates for all columns."""
-    n = len(df)
-    rows = []
-    for col in df.columns:
-        non_null = int(df[col].notna().sum())
-        fill_pct = round(non_null / n * 100, 2) if n > 0 else 0.0
-        category = COLUMN_TO_CATEGORY.get(col, "Uncategorized")
-        rows.append({
-            "column_name": col,
-            "non_null_count": non_null,
-            "null_count": n - non_null,
-            "fill_pct": fill_pct,
-            "category": category
-        })
-    return pd.DataFrame(rows)
+# ── helpers ──────────────────────────────────────────────────────────────────
 
-
-def generate_quality_dashboard(df: pd.DataFrame, fill_df: pd.DataFrame) -> go.Figure:
-    """Generate overall data quality dashboard."""
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=(
-            "Column Fill Rates by Category",
-            "Overall Completeness Distribution",
-            "Category-wise Average Fill Rate",
-            "Top 15 Most Complete Columns"
-        ),
-        specs=[
-            [{"type": "bar"}, {"type": "histogram"}],
-            [{"type": "bar"}, {"type": "bar"}]
-        ],
-        vertical_spacing=0.12,
-        horizontal_spacing=0.10
-    )
-    
-    # Color scale for fill rates
-    colors = []
-    for pct in fill_df["fill_pct"]:
-        if pct >= 80:
-            colors.append("#2ecc71")  # Green
-        elif pct >= 50:
-            colors.append("#f39c12")  # Yellow
-        else:
-            colors.append("#e74c3c")  # Red
-    
-    # Plot 1: All columns fill rate
-    fig.add_trace(
-        go.Bar(
-            x=fill_df["column_name"],
-            y=fill_df["fill_pct"],
-            marker_color=colors,
-            name="Fill Rate",
-            hovertemplate="<b>%{x}</b><br>Fill: %{y:.1f}%<extra></extra>"
-        ),
-        row=1, col=1
-    )
-    
-    # Plot 2: Histogram of fill rates
-    fig.add_trace(
-        go.Histogram(
-            x=fill_df["fill_pct"],
-            nbinsx=20,
-            name="Distribution",
-            marker_color="#3498db",
-            opacity=0.7
-        ),
-        row=1, col=2
-    )
-    
-    # Plot 3: Category-wise average
-    cat_avg = fill_df.groupby("category")["fill_pct"].mean().sort_values(ascending=True)
-    fig.add_trace(
-        go.Bar(
-            x=cat_avg.values,
-            y=cat_avg.index,
-            orientation="h",
-            name="Category Avg",
-            marker_color="#9b59b6"
-        ),
-        row=2, col=1
-    )
-    
-    # Plot 4: Top 15 columns
-    top15 = fill_df.nlargest(15, "fill_pct")
-    fig.add_trace(
-        go.Bar(
-            x=top15["fill_pct"],
-            y=top15["column_name"],
-            orientation="h",
-            name="Top 15",
-            marker_color="#1abc9c"
-        ),
-        row=2, col=2
-    )
-    
-    fig.update_layout(
-        height=800,
-        showlegend=False,
-        title_text="Data Quality Dashboard",
-        title_font_size=20,
-        template="plotly_white"
-    )
-    
-    fig.update_xaxes(title_text="Fill Rate (%)", row=1, col=1)
-    fig.update_xaxes(title_text="Fill Rate (%)", row=1, col=2)
-    fig.update_xaxes(title_text="Avg Fill Rate (%)", row=2, col=1)
-    fig.update_xaxes(title_text="Fill Rate (%)", row=2, col=2)
-    
-    return fig
-
-
-def generate_geo_visualizations(df: pd.DataFrame) -> go.Figure:
-    """Generate geographic distribution visualizations."""
-    if "geo_country" not in df.columns:
-        logger.warning("No geo_country column found; skipping geo visualizations.")
+def safe_val(v):
+    if pd.isna(v) or v is None or str(v).strip() in ("", "nan", "NaN", "None"):
         return None
-    
-    country_counts = df["geo_country"].value_counts().reset_index()
-    country_counts.columns = ["country", "count"]
-    country_counts = country_counts.head(20)  # Top 20
-    
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=("Top 20 Countries", "Geographic Resolution Success"),
-        specs=[[{"type": "bar"}, {"type": "pie"}]]
-    )
-    
-    # Bar chart
-    fig.add_trace(
-        go.Bar(
-            x=country_counts["count"],
-            y=country_counts["country"],
-            orientation="h",
-            marker_color="#3498db",
-            name="Countries"
-        ),
-        row=1, col=1
-    )
-    
-    # Pie chart for resolution success
-    resolved = df["geo_country"].notna().sum()
-    unresolved = len(df) - resolved
-    
-    fig.add_trace(
-        go.Pie(
-            labels=["Resolved", "Unresolved"],
-            values=[resolved, unresolved],
-            marker_colors=["#2ecc71", "#e74c3c"],
-            name="Resolution"
-        ),
-        row=1, col=2
-    )
-    
-    fig.update_layout(
-        height=500,
-        showlegend=False,
-        title_text="Geographic Distribution",
-        title_font_size=18,
-        template="plotly_white"
-    )
-    
-    return fig
+    return v
 
 
-def generate_temporal_analysis(df: pd.DataFrame) -> go.Figure:
-    """Generate temporal analysis visualizations."""
-    if "collection_date" not in df.columns:
-        logger.warning("No collection_date column found; skipping temporal analysis.")
-        return None
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=("Collection Timeline", "Date Parsing Success"),
-        specs=[[{"type": "scatter"}], [{"type": "pie"}]]
-    )
-    
-    # Parse dates for timeline
-    date_col = df["collection_date"].dropna()
-    if len(date_col) > 0:
-        # Try to extract year for grouping
-        years = []
-        for val in date_col:
-            try:
-                if isinstance(val, str) and len(val) >= 4:
-                    years.append(int(val[:4]))
-                else:
-                    years.append(None)
-            except (ValueError, TypeError):
-                years.append(None)
-        
-        year_counts = pd.Series(years).value_counts().sort_index()
-        
-        fig.add_trace(
-            go.Scatter(
-                x=year_counts.index.astype(str),
-                y=year_counts.values,
-                mode="lines+markers",
-                marker_color="#e74c3c",
-                name="Timeline"
-            ),
-            row=1, col=1
-        )
-    
-    # Pie chart for parsing success
-    parsed = df["collection_date"].notna().sum()
-    unparsed = len(df) - parsed
-    
-    has_range = "collection_date_range" in df.columns
-    ranges = df["collection_date_range"].notna().sum() if has_range else 0
-    
-    labels = ["Parsed (ISO)", "Ranges", "Missing"]
-    values = [parsed - ranges, ranges, unparsed]
-    
-    fig.add_trace(
-        go.Pie(
-            labels=labels,
-            values=values,
-            marker_colors=["#2ecc71", "#f39c12", "#e74c3c"],
-            name="Parsing Status"
-        ),
-        row=2, col=1
-    )
-    
-    fig.update_layout(
-        height=700,
-        showlegend=False,
-        title_text="Temporal Analysis",
-        title_font_size=18,
-        template="plotly_white"
-    )
-    
-    return fig
+def load_data(path: str) -> pd.DataFrame:
+    ext = Path(path).suffix.lower()
+    if ext in (".xlsx", ".xls", ".xlsm"):
+        df = pd.read_excel(path, dtype=str)
+    elif ext == ".csv":
+        df = pd.read_csv(path, dtype=str)
+    elif ext == ".tsv":
+        df = pd.read_csv(path, sep="\t", dtype=str)
+    elif ext == ".parquet":
+        df = pd.read_parquet(path).astype(str).replace("nan", None)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+    df = df.where(df.notna(), None)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
-def generate_one_health_chart(df: pd.DataFrame) -> go.Figure:
-    """Generate One Health classification breakdown."""
-    if "one_health_category" not in df.columns:
-        logger.warning("No one_health_category column found; skipping One Health chart.")
-        return None
-    
-    oh_counts = df["one_health_category"].value_counts().reset_index()
-    oh_counts.columns = ["category", "count"]
-    
-    fig = go.Figure()
-    
-    fig.add_trace(
-        go.Pie(
-            labels=oh_counts["category"],
-            values=oh_counts["count"],
-            marker_colors=px.colors.qualitative.Set3,
-            hole=0.4,
-            textinfo="label+percent",
-            hovertemplate="<b>%{label}</b><br>Count: %{value}<br>Percent: %{percent}<extra></extra>"
-        )
-    )
-    
-    fig.update_layout(
-        height=600,
-        title_text="One Health Classification Breakdown",
-        title_font_size=18,
-        template="plotly_white",
-        showlegend=True,
-        legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.05)
-    )
-    
-    return fig
+def col(df: pd.DataFrame, *names) -> pd.Series | None:
+    """
+    Return the first column from *names* that exists in df.
+    Logs a DEBUG message when a fallback name is used instead of the first choice.
+    """
+    for i, n in enumerate(names):
+        if n in df.columns:
+            if i > 0:
+                logger.debug(
+                    "Column '%s' not found; falling back to '%s'.",
+                    names[0], n,
+                )
+            return df[n]
+    return None
 
 
-def generate_host_analysis(df: pd.DataFrame) -> go.Figure:
-    """Generate host species analysis."""
-    if "host" not in df.columns:
-        logger.warning("No host column found; skipping host analysis.")
-        return None
-    
-    host_counts = df["host"].value_counts().head(15).reset_index()
-    host_counts.columns = ["host", "count"]
-    
-    fig = go.Figure()
-    
-    fig.add_trace(
-        go.Bar(
-            x=host_counts["count"],
-            y=host_counts["host"],
-            orientation="h",
-            marker_color="#9b59b6",
-            hovertemplate="<b>%{y}</b><br>Count: %{x}<extra></extra>"
-        )
-    )
-    
-    fig.update_layout(
-        height=500,
-        title_text="Top 15 Host Species",
-        title_font_size=18,
-        xaxis_title="Count",
-        yaxis_title="Host",
-        template="plotly_white",
-        showlegend=False
-    )
-    
-    return fig
+def value_counts_json(series, top_n: int = _CHART_TOP_N) -> str:
+    """
+    Return a JSON object with the top *top_n* value counts.
+    The payload includes a 'capped' boolean so the JS layer can annotate
+    chart titles when only a subset of values is shown.
+    """
+    counts = series.dropna().value_counts()
+    counts = counts[counts.index.str.strip() != ""]
+    total_unique = len(counts)
+    capped = total_unique > top_n
+    counts = counts.iloc[:top_n]
+    return json.dumps({
+        "labels": counts.index.tolist(),
+        "values": counts.values.tolist(),
+        "capped": capped,
+        "top_n": top_n,
+    })
 
 
-def generate_extra_attributes_analysis(df: pd.DataFrame) -> Dict:
-    """Analyze _extra_attributes column for unmapped fields."""
-    if "_extra_attributes" not in df.columns:
-        return {"summary": "No _extra_attributes column found"}
-    
-    extra_col = df["_extra_attributes"].dropna()
-    if len(extra_col) == 0:
-        return {"summary": "All attributes mapped; no extra attributes"}
-    
-    # Parse JSON strings and count keys
-    all_keys = []
-    for val in extra_col:
-        try:
-            if isinstance(val, str):
-                data = json.loads(val)
-                if isinstance(data, dict):
-                    all_keys.extend(data.keys())
-        except (json.JSONDecodeError, TypeError):
-            continue
-    
-    key_counts = pd.Series(all_keys).value_counts().head(20)
-    
+def completeness_json(df: pd.DataFrame) -> str:
+    pct = (df.notna().sum() / len(df) * 100).round(1)
+    pct = pct.sort_values(ascending=False)
+    return json.dumps({"cols": pct.index.tolist(), "pct": pct.values.tolist()})
+
+
+def timeline_json(df: pd.DataFrame, total: int) -> str:
+    """
+    Collection date aggregated by year.
+    Returns year range, counts, and count of records missing the date.
+    """
+    date_col = col(df, "collection_date")
+    if date_col is None:
+        return "null"
+    parsed = pd.to_datetime(date_col, errors="coerce")
+    missing = int(parsed.isna().sum())
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return "null"
+    by_year = parsed.dt.year.value_counts().sort_index()
+    return json.dumps({
+        "years":   [int(y) for y in by_year.index.tolist()],
+        "counts":  by_year.values.tolist(),
+        "missing": missing,
+        "total":   total,
+    })
+
+
+def submission_timeline_json(df: pd.DataFrame, total: int) -> str:
+    """
+    Submission date aggregated by year (not month) for consistency with
+    the collection date chart. Returns year range, counts, and missing count.
+    """
+    c = col(df, "submission_date")
+    if c is None:
+        return "null"
+    parsed = pd.to_datetime(c, errors="coerce")
+    missing = int(parsed.isna().sum())
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return "null"
+    by_year = parsed.dt.year.value_counts().sort_index()
+    return json.dumps({
+        "years":   [int(y) for y in by_year.index.tolist()],
+        "counts":  by_year.values.tolist(),
+        "missing": missing,
+        "total":   total,
+    })
+
+
+def geo_json(df: pd.DataFrame) -> str:
+    """
+    Returns a JSON object with both 'labels'/'values' (for pie/bar charts)
+    and 'countries'/'counts' aliases (for the choropleth map).
+    """
+    c = col(df, "geo_country", "geo_loc_name")
+    if c is None:
+        return "null"
+    counts = c.dropna().value_counts()
+    counts = counts[counts.index.str.strip() != ""]
+    total = len(counts)
+    capped = total > 30
+    counts = counts.iloc[:30]
+    labels = counts.index.tolist()
+    values = counts.values.tolist()
+    return json.dumps({
+        "labels":    labels,
+        "values":    values,
+        "countries": labels,
+        "counts":    values,
+        "capped":    capped,
+        "top_n":     30,
+    })
+
+
+def host_json(df: pd.DataFrame) -> str:
+    c = col(df, "host")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def taxonomy_json(df: pd.DataFrame) -> str:
+    c = col(df, "organism_name", "taxonomy_name")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def oh_category_json(df: pd.DataFrame) -> str:
+    c = col(df, "one_health_category")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def confidence_json(df: pd.DataFrame) -> str:
+    """
+    Bin one_health_confidence (float 0-1) into four ranges so the chart
+    is readable instead of plotting individual float values as categories.
+    """
+    c = col(df, "one_health_confidence")
+    if c is None:
+        return "null"
+    numeric = pd.to_numeric(c, errors="coerce").dropna()
+    if numeric.empty:
+        return "null"
+    bins = [0.0, 0.30, 0.60, 0.85, 1.001]
+    labels = ["0.00-0.30", "0.30-0.60", "0.60-0.85", "0.85-1.00"]
+    counts = pd.cut(numeric, bins=bins, labels=labels, right=False).value_counts().sort_index()
+    return json.dumps({"labels": counts.index.tolist(), "values": counts.values.tolist(), "capped": False})
+
+
+def evidence_json(df: pd.DataFrame) -> str:
+    c = col(df, "one_health_evidence_level")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def bioproject_json(df: pd.DataFrame) -> str:
+    c = col(df, "bioproject_accession")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def sample_type_json(df: pd.DataFrame) -> str:
+    c = col(df, "sample_type")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def access_json(df: pd.DataFrame) -> str:
+    c = col(df, "access")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def status_json(df: pd.DataFrame) -> str:
+    c = col(df, "status")
+    if c is None:
+        return "null"
+    return value_counts_json(c)
+
+
+def host_disease_json(df: pd.DataFrame) -> str:
+    c = col(df, "host_disease")
+    if c is None:
+        return "null"
+    vals = c.dropna()
+    vals = vals[vals.str.strip() != ""]
+    if vals.empty:
+        return "null"
+    return value_counts_json(vals)
+
+
+def isolation_source_json(df: pd.DataFrame) -> str:
+    c = col(df, "isolation_source")
+    if c is None:
+        return "null"
+    vals = c.dropna()
+    vals = vals[vals.str.strip() != ""]
+    if vals.empty:
+        return "null"
+    return value_counts_json(vals)
+
+
+def df_to_records(df: pd.DataFrame) -> str:
+    # Priority columns; collection_date_range immediately follows collection_date.
+    display_cols = [
+        "biosample_accession", "organism_name", "strain",
+        "collection_date", "collection_date_range",
+        "geo_country", "host", "host_disease", "isolation_source",
+        "assembly_accession_refseq", "assembly_accession_genbank",
+        "bioproject_accession", "sra_accession", "one_health_category",
+        "one_health_confidence", "one_health_evidence_level",
+        "status", "access", "submission_date",
+    ]
+    available = [c for c in display_cols if c in df.columns]
+    remaining = [c for c in df.columns if c not in available and c != "_extra_attributes"]
+    final_cols = available + remaining
+    sub = df[final_cols].fillna("")
+    return json.dumps({"columns": final_cols, "rows": sub.values.tolist()})
+
+
+def kv_stats(df: pd.DataFrame) -> dict:
+    total = len(df)
+
+    c_ref = col(df, "assembly_accession_refseq")
+    c_gb  = col(df, "assembly_accession_genbank")
+    has_ref = (c_ref.notna() & (c_ref.str.strip() != "")) if c_ref is not None else pd.Series(False, index=df.index)
+    has_gb  = (c_gb.notna()  & (c_gb.str.strip()  != "")) if c_gb  is not None else pd.Series(False, index=df.index)
+    has_assembly = int((has_ref | has_gb).sum())
+
+    has_sra = 0
+    c_sra = col(df, "sra_accession")
+    if c_sra is not None:
+        has_sra = int((c_sra.notna() & (c_sra.str.strip() != "")).sum())
+
+    n_taxa = 0
+    c_tax = col(df, "organism_name", "taxonomy_name")
+    if c_tax is not None:
+        n_taxa = c_tax.dropna().nunique()
+
+    n_countries = 0
+    c_geo = col(df, "geo_country", "geo_loc_name")
+    if c_geo is not None:
+        n_countries = c_geo.dropna().nunique()
+
+    n_bioprojects = 0
+    c_bp = col(df, "bioproject_accession")
+    if c_bp is not None:
+        n_bioprojects = c_bp.dropna().nunique()
+
+    completeness = round(df.notna().values.sum() / (df.shape[0] * df.shape[1]) * 100, 1)
+
     return {
-        "total_records_with_extra": len(extra_col),
-        "unique_unmapped_keys": len(set(all_keys)),
-        "top_20_unmapped": key_counts.to_dict()
+        "total":         total,
+        "has_assembly":  has_assembly,
+        "has_sra":       has_sra,
+        "n_taxa":        int(n_taxa),
+        "n_countries":   int(n_countries),
+        "n_bioprojects": int(n_bioprojects),
+        "n_columns":     len(df.columns),
+        "completeness":  completeness,
     }
 
 
-def generate_full_html_report(
-    df: pd.DataFrame,
-    fill_df: pd.DataFrame,
-    output_path: Path
-) -> Path:
-    """Generate complete HTML report with all visualizations."""
-    if not PLOTLY_AVAILABLE:
-        raise ImportError("Plotly is required for HTML report generation. Install with: pip install plotly")
-    
-    sections = []
-    
-    # Header
-    sections.append(f"""
-    <div style="font-family: Arial, sans-serif; padding: 20px;">
-        <h1 style="color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px;">
-            BioMetaHarmonizer Summary Report
-        </h1>
-        <p style="color: #7f8c8d;">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    """)
-    
-    # Executive Summary
-    total_records = len(df)
-    total_columns = len(df.columns)
-    avg_fill = fill_df["fill_pct"].mean()
-    high_quality_cols = (fill_df["fill_pct"] >= 80).sum()
-    medium_quality_cols = ((fill_df["fill_pct"] >= 50) & (fill_df["fill_pct"] < 80)).sum()
-    low_quality_cols = (fill_df["fill_pct"] < 50).sum()
-    
-    sections.append(f"""
-    <div style="background-color: #ecf0f1; padding: 20px; border-radius: 8px; margin: 20px 0;">
-        <h2 style="color: #2c3e50;">Executive Summary</h2>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-            <div style="background: white; padding: 15px; border-radius: 5px; text-align: center;">
-                <h3 style="color: #3498db; margin: 0;">{total_records:,}</h3>
-                <p style="color: #7f8c8d; margin: 5px 0 0 0;">Total Records</p>
-            </div>
-            <div style="background: white; padding: 15px; border-radius: 5px; text-align: center;">
-                <h3 style="color: #3498db; margin: 0;">{total_columns}</h3>
-                <p style="color: #7f8c8d; margin: 5px 0 0 0;">Total Columns</p>
-            </div>
-            <div style="background: white; padding: 15px; border-radius: 5px; text-align: center;">
-                <h3 style="color: #3498db; margin: 0;">{avg_fill:.1f}%</h3>
-                <p style="color: #7f8c8d; margin: 5px 0 0 0;">Average Fill Rate</p>
-            </div>
-            <div style="background: white; padding: 15px; border-radius: 5px; text-align: center;">
-                <h3 style="color: #2ecc71; margin: 0;">{high_quality_cols}</h3>
-                <p style="color: #7f8c8d; margin: 5px 0 0 0;">High Quality (>80%)</p>
-            </div>
-            <div style="background: white; padding: 15px; border-radius: 5px; text-align: center;">
-                <h3 style="color: #f39c12; margin: 0;">{medium_quality_cols}</h3>
-                <p style="color: #7f8c8d; margin: 5px 0 0 0;">Medium Quality (50-80%)</p>
-            </div>
-            <div style="background: white; padding: 15px; border-radius: 5px; text-align: center;">
-                <h3 style="color: #e74c3c; margin: 0;">{low_quality_cols}</h3>
-                <p style="color: #7f8c8d; margin: 5px 0 0 0;">Low Quality (<50%)</p>
-            </div>
-        </div>
-    </div>
-    """)
-    
-    # Data Quality Dashboard
-    quality_fig = generate_quality_dashboard(df, fill_df)
-    sections.append(f"""
-    <div style="margin: 30px 0;">
-        <h2 style="color: #2c3e50;">Data Quality Dashboard</h2>
-        {quality_fig.to_html(full_html=False, include_plotlyjs='cdn', default_height='800px')}
-    </div>
-    """)
-    
-    # Geographic Distribution
-    geo_fig = generate_geo_visualizations(df)
-    if geo_fig:
-        sections.append(f"""
-        <div style="margin: 30px 0;">
-            <h2 style="color: #2c3e50;">Geographic Distribution</h2>
-            {geo_fig.to_html(full_html=False, include_plotlyjs='cdn', default_height='500px')}
-        </div>
-        """)
-    
-    # Temporal Analysis
-    temporal_fig = generate_temporal_analysis(df)
-    if temporal_fig:
-        sections.append(f"""
-        <div style="margin: 30px 0;">
-            <h2 style="color: #2c3e50;">Temporal Analysis</h2>
-            {temporal_fig.to_html(full_html=False, include_plotlyjs='cdn', default_height='700px')}
-        </div>
-        """)
-    
-    # One Health Classification
-    oh_fig = generate_one_health_chart(df)
-    if oh_fig:
-        sections.append(f"""
-        <div style="margin: 30px 0;">
-            <h2 style="color: #2c3e50;">One Health Classification</h2>
-            {oh_fig.to_html(full_html=False, include_plotlyjs='cdn', default_height='600px')}
-        </div>
-        """)
-    
-    # Host Analysis
-    host_fig = generate_host_analysis(df)
-    if host_fig:
-        sections.append(f"""
-        <div style="margin: 30px 0;">
-            <h2 style="color: #2c3e50;">Host Species Analysis</h2>
-            {host_fig.to_html(full_html=False, include_plotlyjs='cdn', default_height='500px')}
-        </div>
-        """)
-    
-    # Extra Attributes Analysis
-    extra_analysis = generate_extra_attributes_analysis(df)
-    sections.append(f"""
-    <div style="background-color: #f9f9f9; padding: 20px; border-radius: 8px; margin: 20px 0;">
-        <h2 style="color: #2c3e50;">Unmapped Attributes Analysis</h2>
-        <p><strong>Total records with extra attributes:</strong> {extra_analysis.get('total_records_with_extra', 'N/A')}</p>
-        <p><strong>Unique unmapped keys:</strong> {extra_analysis.get('unique_unmapped_keys', 'N/A')}</p>
-    """)
-    
-    if "top_20_unmapped" in extra_analysis and extra_analysis["top_20_unmapped"]:
-        sections.append("""
-        <h3>Top 20 Unmapped Attributes:</h3>
-        <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-            <tr style="background-color: #3498db; color: white;">
-                <th style="padding: 10px; text-align: left;">Attribute Name</th>
-                <th style="padding: 10px;">Frequency</th>
-            </tr>
-        """)
-        for attr, count in list(extra_analysis["top_20_unmapped"].items())[:20]:
-            sections.append(f"""
-            <tr style="border-bottom: 1px solid #ddd;">
-                <td style="padding: 10px;">{attr}</td>
-                <td style="padding: 10px; text-align: center;">{count}</td>
-            </tr>
-            """)
-        sections.append("</table>")
-    
-    sections.append("</div>")
-    
-    # Fill Rate Table
-    sections.append("""
-    <div style="margin: 30px 0;">
-        <h2 style="color: #2c3e50;">Complete Fill Rate Table</h2>
-        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-            <tr style="background-color: #3498db; color: white;">
-                <th style="padding: 10px; text-align: left;">Column Name</th>
-                <th style="padding: 10px;">Category</th>
-                <th style="padding: 10px; text-align: right;">Non-Null</th>
-                <th style="padding: 10px; text-align: right;">Null</th>
-                <th style="padding: 10px; text-align: right;">Fill %</th>
-            </tr>
-    """)
-    
-    for _, row in fill_df.sort_values("fill_pct", ascending=False).iterrows():
-        color = "#2ecc71" if row["fill_pct"] >= 80 else ("#f39c12" if row["fill_pct"] >= 50 else "#e74c3c")
-        sections.append(f"""
-        <tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 8px;">{row['column_name']}</td>
-            <td style="padding: 8px; color: #7f8c8d;">{row['category']}</td>
-            <td style="padding: 8px; text-align: right;">{row['non_null_count']:,}</td>
-            <td style="padding: 8px; text-align: right;">{row['null_count']:,}</td>
-            <td style="padding: 8px; text-align: right; color: {color}; font-weight: bold;">{row['fill_pct']:.1f}%</td>
-        </tr>
-        """)
-    
-    sections.append("</table></div>")
-    
-    # Footer
-    sections.append("""
-    <div style="margin-top: 40px; padding-top: 20px; border-top: 2px solid #ecf0f1; color: #7f8c8d; text-align: center;">
-        <p>BioMetaHarmonizer Summary Report | Generated by generate_summary_report.py</p>
-    </div>
-    </div>
-    """)
-    
-    # Write HTML
-    html_content = "\n".join(sections)
-    full_html = f"""<!DOCTYPE html>
+# ── HTML template ─────────────────────────────────────────────────────────────
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BioMetaHarmonizer Summary Report</title>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>BioSample Report</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a;
+    --accent: #4f8ef7; --accent2: #7c5cbf; --accent3: #2ec4b6;
+    --text: #e2e8f0; --muted: #8892a4; --border: #2a2f45;
+    --green: #22c55e; --yellow: #f59e0b; --red: #ef4444;
+    --card-radius: 12px; --font: 'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font);
+         font-size: 14px; line-height: 1.6; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
+             background: var(--surface); border-right: 1px solid var(--border);
+             padding: 20px 0; overflow-y: auto; z-index: 100; }
+  .sidebar-logo { padding: 0 20px 20px; border-bottom: 1px solid var(--border);
+                  font-weight: 700; font-size: 16px; color: var(--accent); }
+  .sidebar-logo span { display: block; font-size: 11px; color: var(--muted);
+                        font-weight: 400; margin-top: 2px; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 20px;
+              cursor: pointer; color: var(--muted); transition: all .2s;
+              font-size: 13px; }
+  .nav-item:hover, .nav-item.active { background: var(--surface2); color: var(--text); }
+  .nav-item.active { border-right: 3px solid var(--accent); }
+  .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+  .main { margin-left: 220px; padding: 30px; min-height: 100vh; }
+  .page-header { margin-bottom: 28px; }
+  .page-header h1 { font-size: 24px; font-weight: 700; }
+  .page-header p { color: var(--muted); margin-top: 4px; font-size: 13px; }
+
+  .section { display: none; }
+  .section.active { display: block; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+               gap: 16px; margin-bottom: 28px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border);
+               border-radius: var(--card-radius); padding: 20px 16px; }
+  .stat-value { font-size: 28px; font-weight: 700; color: var(--accent); line-height: 1; }
+  .stat-label { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  .chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+                gap: 20px; margin-bottom: 28px; }
+  .chart-card { background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--card-radius); padding: 20px; }
+  .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--text); }
+  .chart-card .chart-subtitle { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+  .chart-card.wide { grid-column: 1 / -1; }
+
+  .table-wrap { background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--card-radius); overflow: hidden; }
+  .table-toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+                   border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .table-toolbar input { background: var(--surface2); border: 1px solid var(--border);
+                          color: var(--text); padding: 7px 12px; border-radius: 8px;
+                          font-size: 13px; flex: 1; min-width: 200px; outline: none; }
+  .table-toolbar input:focus { border-color: var(--accent); }
+  .table-toolbar select { background: var(--surface2); border: 1px solid var(--border);
+                           color: var(--text); padding: 7px 10px; border-radius: 8px;
+                           font-size: 13px; outline: none; cursor: pointer; }
+  .table-count { font-size: 12px; color: var(--muted); margin-left: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th { background: var(--surface2); padding: 10px 14px; text-align: left;
+             font-size: 12px; color: var(--muted); white-space: nowrap;
+             border-bottom: 1px solid var(--border); cursor: pointer;
+             user-select: none; position: sticky; top: 0; }
+  thead th:hover { color: var(--text); }
+  thead th .sort-icon { margin-left: 4px; opacity: 0.4; font-style: normal; }
+  thead th.sort-asc .sort-icon::after { content: '▲'; opacity: 1; }
+  thead th.sort-desc .sort-icon::after { content: '▼'; opacity: 1; }
+  thead th:not(.sort-asc):not(.sort-desc) .sort-icon::after { content: '⇅'; }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+  tbody tr:hover { background: var(--surface2); }
+  td { padding: 9px 14px; font-size: 13px; max-width: 280px;
+       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td a { font-family: monospace; font-size: 12px; }
+  .table-scroll { overflow-x: auto; max-height: 560px; overflow-y: auto; }
+  .pagination { display: flex; align-items: center; gap: 8px; padding: 14px 16px;
+                border-top: 1px solid var(--border); }
+  .pag-btn { background: var(--surface2); border: 1px solid var(--border);
+             color: var(--text); padding: 5px 12px; border-radius: 6px;
+             font-size: 12px; cursor: pointer; }
+  .pag-btn:disabled { opacity: 0.35; cursor: default; }
+  .pag-btn:not(:disabled):hover { border-color: var(--accent); }
+  .pag-info { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: rgba(34,197,94,.15); color: var(--green); }
+  .badge-yellow { background: rgba(245,158,11,.15); color: var(--yellow); }
+  .badge-red { background: rgba(239,68,68,.15); color: var(--red); }
+  .badge-blue { background: rgba(79,142,247,.15); color: var(--accent); }
+
+  @media (max-width: 768px) {
+    .sidebar { transform: translateX(-220px); }
+    .main { margin-left: 0; padding: 16px; }
+    .chart-grid { grid-column: 1fr; }
+  }
+</style>
 </head>
-<body style="margin: 0; background-color: #ffffff;">
-{html_content}
-</body>
-</html>"""
-    
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(full_html, encoding="utf-8")
-    
-    logger.info("HTML report written to %s", output_path)
-    return output_path
+<body>
 
+<nav class="sidebar">
+  <div class="sidebar-logo">BioSample Report<span>BioMetaHarmonizer</span></div>
+  <div class="nav-item active" onclick="showSection('overview')" id="nav-overview">
+    <span class="nav-icon">📊</span> Overview
+  </div>
+  <div class="nav-item" onclick="showSection('taxonomy')" id="nav-taxonomy">
+    <span class="nav-icon">🔬</span> Taxonomy
+  </div>
+  <div class="nav-item" onclick="showSection('geography')" id="nav-geography">
+    <span class="nav-icon">🌍</span> Geography
+  </div>
+  <div class="nav-item" onclick="showSection('temporal')" id="nav-temporal">
+    <span class="nav-icon">📅</span> Temporal
+  </div>
+  <div class="nav-item" onclick="showSection('onehealth')" id="nav-onehealth">
+    <span class="nav-icon">🏥</span> One Health
+  </div>
+  <div class="nav-item" onclick="showSection('completeness')" id="nav-completeness">
+    <span class="nav-icon">✅</span> Completeness
+  </div>
+  <div class="nav-item" onclick="showSection('table')" id="nav-table">
+    <span class="nav-icon">📋</span> Data Table
+  </div>
+</nav>
 
-def generate_json_metrics(df: pd.DataFrame, fill_df: pd.DataFrame) -> Dict:
-    """Generate JSON metrics for machine processing."""
-    metrics = {
-        "generated_at": datetime.now().isoformat(),
-        "total_records": len(df),
-        "total_columns": len(df.columns),
-        "average_fill_rate": round(fill_df["fill_pct"].mean(), 2),
-        "columns_by_quality": {
-            "high_quality_80_plus": int((fill_df["fill_pct"] >= 80).sum()),
-            "medium_quality_50_80": int(((fill_df["fill_pct"] >= 50) & (fill_df["fill_pct"] < 80)).sum()),
-            "low_quality_below_50": int((fill_df["fill_pct"] < 50).sum())
-        },
-        "category_summary": {},
-        "column_details": fill_df.to_dict(orient="records"),
-        "extra_attributes_analysis": generate_extra_attributes_analysis(df)
+<main class="main">
+
+<!-- ── Overview ────────────────────────────────────────────────────────── -->
+<div class="section active" id="section-overview">
+  <div class="page-header">
+    <h1>Dataset Overview</h1>
+    <p>Generated: __GEN_DATE__ &nbsp;·&nbsp; Source: __SOURCE_FILE__</p>
+  </div>
+  <div class="stat-grid" id="stat-grid"></div>
+  <div class="chart-grid">
+    <div class="chart-card" style="min-height:340px">
+      <h3 id="title-geo-ov">Geographic Distribution</h3>
+      <div id="fig-geo-ov" style="height:300px"></div>
+    </div>
+    <div class="chart-card" style="min-height:340px">
+      <h3 id="title-host-ov">Host Distribution</h3>
+      <div id="fig-host-ov" style="height:300px"></div>
+    </div>
+    <div class="chart-card" style="min-height:340px">
+      <h3 id="title-isolation-ov">Isolation Source</h3>
+      <div id="fig-isolation-ov" style="height:300px"></div>
+    </div>
+    <div class="chart-card" style="min-height:340px">
+      <h3 id="title-access-ov">Access</h3>
+      <div id="fig-access-ov" style="height:300px"></div>
+    </div>
+    <div class="chart-card" style="min-height:340px">
+      <h3 id="title-status-ov">Status</h3>
+      <div id="fig-status-ov" style="height:300px"></div>
+    </div>
+    <div class="chart-card" style="min-height:340px">
+      <h3 id="title-bioprojects-ov">Top BioProjects</h3>
+      <div id="fig-bioprojects-ov" style="height:300px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Taxonomy ─────────────────────────────────────────────────────────── -->
+<div class="section" id="section-taxonomy">
+  <div class="page-header"><h1>Taxonomy</h1></div>
+  <div class="chart-grid">
+    <div class="chart-card wide" style="min-height:360px">
+      <h3 id="title-taxonomy-bar">Organism Names</h3>
+      <div id="fig-taxonomy-bar" style="height:320px"></div>
+    </div>
+    <div class="chart-card" style="min-height:380px">
+      <h3 id="title-host">Host Distribution</h3>
+      <div id="fig-host" style="height:340px"></div>
+    </div>
+    <div class="chart-card" style="min-height:360px">
+      <h3 id="title-host-disease">Host Disease</h3>
+      <div id="fig-host-disease" style="height:320px"></div>
+    </div>
+    <div class="chart-card" style="min-height:360px">
+      <h3 id="title-isolation">Isolation Source</h3>
+      <div id="fig-isolation" style="height:320px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Geography ───────────────────────────────────────────────────────── -->
+<div class="section" id="section-geography">
+  <div class="page-header"><h1>Geography</h1></div>
+  <div class="chart-grid">
+    <div class="chart-card wide" style="min-height:420px">
+      <h3 id="title-geo-bar">Samples by Country</h3>
+      <div id="fig-geo-bar" style="height:380px"></div>
+    </div>
+    <div class="chart-card wide" style="min-height:460px">
+      <h3>World Map</h3>
+      <div id="fig-geo-map" style="height:420px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Temporal ─────────────────────────────────────────────────────────── -->
+<div class="section" id="section-temporal">
+  <div class="page-header"><h1>Temporal</h1></div>
+  <div class="chart-grid">
+    <div class="chart-card wide" style="min-height:360px">
+      <h3>Collection Date by Year</h3>
+      <div class="chart-subtitle" id="subtitle-timeline"></div>
+      <div id="fig-timeline" style="height:300px"></div>
+    </div>
+    <div class="chart-card wide" style="min-height:360px">
+      <h3>Submission Date by Year</h3>
+      <div class="chart-subtitle" id="subtitle-submission"></div>
+      <div id="fig-submission" style="height:300px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── One Health ───────────────────────────────────────────────────────── -->
+<div class="section" id="section-onehealth">
+  <div class="page-header"><h1>One Health Annotation</h1></div>
+  <div class="chart-grid">
+    <div class="chart-card" style="min-height:360px">
+      <h3 id="title-oh-cat">Category</h3>
+      <div id="fig-oh-cat" style="height:320px"></div>
+    </div>
+    <div class="chart-card" style="min-height:340px">
+      <h3>Confidence Score Distribution</h3>
+      <div id="fig-oh-conf" style="height:300px"></div>
+    </div>
+    <div class="chart-card wide" style="min-height:340px">
+      <h3 id="title-oh-evid">Evidence Level</h3>
+      <div id="fig-oh-evid" style="height:300px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Completeness ─────────────────────────────────────────────────────── -->
+<div class="section" id="section-completeness">
+  <div class="page-header"><h1>Metadata Completeness</h1></div>
+  <div class="chart-card wide" id="completeness-card" style="margin-bottom:20px">
+    <h3>Field Completeness (%)</h3>
+    <div id="fig-completeness"></div>
+  </div>
+</div>
+
+<!-- ── Data Table ───────────────────────────────────────────────────────── -->
+<div class="section" id="section-table">
+  <div class="page-header"><h1>Data Table</h1></div>
+  <div class="table-wrap">
+    <div class="table-toolbar">
+      <input type="text" id="table-search" placeholder="Search all columns…" oninput="filterTable()"/>
+      <select id="col-filter" onchange="filterTable()"><option value="">All columns</option></select>
+      <span class="table-count" id="table-count"></span>
+    </div>
+    <div class="table-scroll">
+      <table id="data-table">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button class="pag-btn" id="btn-prev" onclick="changePage(-1)">← Prev</button>
+      <button class="pag-btn" id="btn-next" onclick="changePage(1)">Next →</button>
+      <span class="pag-info" id="pag-info"></span>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ── Data injected by Python ───────────────────────────────────────────────
+const STATS      = __STATS__;
+const TAX_DATA   = __TAX_DATA__;
+const GEO_DATA   = __GEO_DATA__;
+const HOST_DATA  = __HOST_DATA__;
+const TIMELINE   = __TIMELINE__;
+const SUBMIT_TL  = __SUBMIT_TL__;
+const OH_CAT     = __OH_CAT__;
+const OH_CONF    = __OH_CONF__;
+const OH_EVID    = __OH_EVID__;
+const COMP_DATA  = __COMP_DATA__;
+const STYPE_DATA = __STYPE_DATA__;
+const ACCESS_DATA= __ACCESS_DATA__;
+const STATUS_DATA= __STATUS_DATA__;
+const HDISC_DATA = __HDISC_DATA__;
+const ISOL_DATA  = __ISOL_DATA__;
+const BPROJ_DATA = __BPROJ_DATA__;
+const TABLE_DATA = __TABLE_DATA__;
+
+// ── Plotly layout defaults ────────────────────────────────────────────────
+const LAYOUT_BASE = {
+  paper_bgcolor: 'rgba(0,0,0,0)',
+  plot_bgcolor:  'rgba(0,0,0,0)',
+  font: { color: '#e2e8f0', family: 'Inter, system-ui, sans-serif', size: 12 },
+  margin: { t: 10, b: 40, l: 10, r: 10 },
+  colorway: ['#4f8ef7','#7c5cbf','#2ec4b6','#f59e0b','#ef4444',
+             '#22c55e','#f97316','#a855f7','#14b8a6','#e879f9'],
+};
+const CFG = { responsive: true, displayModeBar: false };
+
+function layout(extras) { return Object.assign({}, LAYOUT_BASE, extras); }
+
+function maybeAnnotateTitle(titleId, data) {
+  if (!data || !data.capped) return;
+  const el = document.getElementById(titleId);
+  if (el && !el.textContent.includes('top')) {
+    el.textContent += ` (top ${data.top_n})`;
+  }
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────
+function showSection(name) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('section-' + name).classList.add('active');
+  document.getElementById('nav-' + name).classList.add('active');
+  renderSection(name);
+}
+
+// ── Stat cards ────────────────────────────────────────────────────────────
+function buildStats() {
+  const items = [
+    { label: 'Total Samples', value: STATS.total.toLocaleString() },
+    { label: 'With Assembly', value: STATS.has_assembly.toLocaleString() },
+    { label: 'With SRA',      value: STATS.has_sra.toLocaleString() },
+    { label: 'Taxa',          value: STATS.n_taxa.toLocaleString() },
+    { label: 'Countries',     value: STATS.n_countries.toLocaleString() },
+    { label: 'BioProjects',   value: STATS.n_bioprojects.toLocaleString() },
+    { label: 'Columns',       value: STATS.n_columns.toLocaleString() },
+    { label: 'Completeness',  value: STATS.completeness + '%' },
+  ];
+  const grid = document.getElementById('stat-grid');
+  items.forEach(i => {
+    grid.insertAdjacentHTML('beforeend', `
+      <div class="stat-card">
+        <div class="stat-value">${i.value}</div>
+        <div class="stat-label">${i.label}</div>
+      </div>`);
+  });
+}
+
+// ── Chart helpers ─────────────────────────────────────────────────────────
+
+// Horizontal bar chart.
+// Labels are drawn inside bars ('inside') for large bars and suppressed for
+// tiny ones via cliponaxis:false + a generous right margin.  The x-axis range
+// is explicitly padded to 120% of the max value so outside labels never clip.
+function barH(el, data, height, titleId) {
+  if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
+  if (titleId) maybeAnnotateTitle(titleId, data);
+  const maxVal = Math.max(...data.values);
+  Plotly.newPlot(el, [{
+    type: 'bar', orientation: 'h',
+    x: data.values, y: data.labels,
+    marker: { color: '#4f8ef7', opacity: 0.85 },
+    text: data.values.map(String),
+    textposition: 'outside',
+    cliponaxis: false,
+  }], layout({
+    margin: { t: 10, b: 30, l: 10, r: 60 },
+    yaxis: { automargin: true, tickfont: { size: 11 } },
+    xaxis: { showgrid: true, gridcolor: '#2a2f45', range: [0, maxVal * 1.2] },
+    height: height || 280,
+  }), CFG);
+}
+
+// Pie chart: capped at PIE_TOP_N (10) entries, percent on slices, labels in legend.
+const PIE_TOP_N = 10;
+function pie(el, data, height, titleId) {
+  if (!data) { document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>'; return; }
+
+  // Slice to top 10 and annotate title if capped.
+  let labels = data.labels;
+  let values = data.values;
+  const wasCapped = labels.length > PIE_TOP_N;
+  if (wasCapped) {
+    labels = labels.slice(0, PIE_TOP_N);
+    values = values.slice(0, PIE_TOP_N);
+  }
+  if (titleId) {
+    const el2 = document.getElementById(titleId);
+    if (el2 && wasCapped && !el2.textContent.includes('top')) {
+      el2.textContent += ` (top ${PIE_TOP_N})`;
     }
-    
-    # Category-wise summary
-    for category in COLUMN_CATEGORIES.keys():
-        cat_data = fill_df[fill_df["category"] == category]
-        if len(cat_data) > 0:
-            metrics["category_summary"][category] = {
-                "column_count": len(cat_data),
-                "avg_fill_rate": round(cat_data["fill_pct"].mean(), 2),
-                "min_fill_rate": round(cat_data["fill_pct"].min(), 2),
-                "max_fill_rate": round(cat_data["fill_pct"].max(), 2)
-            }
-    
-    return metrics
+  }
+
+  const total = values.reduce((a, b) => a + b, 0);
+  const hoverText = labels.map((lbl, i) => {
+    const pct = (values[i] / total * 100).toFixed(1);
+    return `${lbl}<br>${values[i].toLocaleString()} (${pct}%)`;
+  });
+  Plotly.newPlot(el, [{
+    type: 'pie',
+    labels: labels,
+    values: values,
+    hole: 0.42,
+    textinfo: 'percent',
+    textfont: { size: 11 },
+    hovertemplate: '%{customdata}<extra></extra>',
+    customdata: hoverText,
+  }], layout({
+    margin: { t: 10, b: 10, l: 10, r: 10 },
+    showlegend: true,
+    legend: {
+      orientation: 'v',
+      x: 1.02, xanchor: 'left',
+      y: 1,    yanchor: 'top',
+      font: { size: 11 },
+      bgcolor: 'rgba(0,0,0,0)',
+      bordercolor: 'rgba(0,0,0,0)',
+    },
+    height: height || 300,
+  }), CFG);
+}
+
+function barV(el, labels, values, color, height) {
+  const maxVal = values.length ? Math.max(...values) : 1;
+  Plotly.newPlot(el, [{
+    type: 'bar', x: labels, y: values,
+    marker: { color: color || '#4f8ef7', opacity: 0.85 },
+    text: values.map(String),
+    textposition: 'outside',
+    cliponaxis: false,
+  }], layout({
+    margin: { t: 30, b: 70, l: 55, r: 10 },
+    xaxis: { tickangle: -45, showgrid: false, dtick: 1, type: 'category' },
+    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples', range: [0, maxVal * 1.2] },
+    height: height || 300,
+  }), CFG);
+}
+
+// Temporal bar: years kept as numbers so the shared numeric range works correctly.
+function temporalBar(el, tl, color, sharedRange) {
+  if (!tl) {
+    document.getElementById(el).innerHTML = '<p style="color:var(--muted);padding:20px">No data</p>';
+    return;
+  }
+  const msg = tl.missing > 0
+    ? `${tl.missing.toLocaleString()} of ${tl.total.toLocaleString()} records missing date (${(tl.missing / tl.total * 100).toFixed(1)}%)`
+    : 'all records have a date';
+  const subtitleEl = document.getElementById(
+    el === 'fig-timeline' ? 'subtitle-timeline' : 'subtitle-submission');
+  if (subtitleEl) subtitleEl.textContent = msg;
+
+  const maxVal = Math.max(...tl.counts);
+  Plotly.newPlot(el, [{
+    type: 'bar',
+    x: tl.years,
+    y: tl.counts,
+    marker: { color: color, opacity: 0.85 },
+    text: tl.counts.map(String),
+    textposition: 'outside',
+    cliponaxis: false,
+  }], layout({
+    margin: { t: 30, b: 60, l: 55, r: 10 },
+    xaxis: {
+      tickformat: 'd',
+      dtick: 1,
+      showgrid: false,
+      tickangle: -45,
+      range: sharedRange ? [sharedRange[0] - 0.5, sharedRange[1] + 0.5] : undefined,
+    },
+    yaxis: { showgrid: true, gridcolor: '#2a2f45', title: 'Samples', range: [0, maxVal * 1.2] },
+    height: 300,
+  }), CFG);
+}
+
+// ── Section renderers ─────────────────────────────────────────────────────
+const rendered = {};
+function renderSection(name) {
+  if (rendered[name]) return;
+  rendered[name] = true;
+
+  if (name === 'overview') {
+    pie('fig-geo-ov',       GEO_DATA,    300, 'title-geo-ov');
+    pie('fig-host-ov',      HOST_DATA,   300, 'title-host-ov');
+    pie('fig-isolation-ov', ISOL_DATA,   300, 'title-isolation-ov');
+    pie('fig-access-ov',    ACCESS_DATA, 300, 'title-access-ov');
+    pie('fig-status-ov',    STATUS_DATA, 300, 'title-status-ov');
+    barH('fig-bioprojects-ov', BPROJ_DATA, 300, 'title-bioprojects-ov');
+  }
+
+  if (name === 'taxonomy') {
+    barH('fig-taxonomy-bar', TAX_DATA,   320, 'title-taxonomy-bar');
+    pie('fig-host',          HOST_DATA,  340, 'title-host');
+    barH('fig-host-disease', HDISC_DATA, 320, 'title-host-disease');
+    barH('fig-isolation',    ISOL_DATA,  320, 'title-isolation');
+  }
+
+  if (name === 'geography') {
+    barH('fig-geo-bar', GEO_DATA, 380, 'title-geo-bar');
+    if (GEO_DATA) {
+      Plotly.newPlot('fig-geo-map', [{
+        type: 'choropleth', locationmode: 'country names',
+        locations: GEO_DATA.countries,
+        z: GEO_DATA.counts,
+        zmin: 0, zmax: Math.max(...GEO_DATA.counts),
+        colorscale: [
+          [0,     '#2a3a5c'],
+          [0.05,  '#2e5fa3'],
+          [0.2,   '#4f8ef7'],
+          [0.5,   '#7ec8e3'],
+          [1,     '#ffffff'],
+        ],
+        showscale: true,
+        colorbar: {
+          bgcolor: 'rgba(0,0,0,0)', tickcolor: '#8892a4',
+          tickfont: { color: '#8892a4' }, title: { text: 'Samples', font: { color: '#8892a4' } },
+        },
+        hovertemplate: '%{location}: %{z}<extra></extra>',
+      }], layout({
+        geo: {
+          bgcolor: 'rgba(0,0,0,0)',
+          landcolor: '#2d3250',
+          showland: true,
+          showocean: true, oceancolor: '#1a2035',
+          showcoastlines: true, coastlinecolor: '#4a5280',
+          showcountries: true, countrycolor: '#3a4060',
+          showframe: false,
+          projection: { type: 'natural earth' },
+        },
+        margin: { t: 0, b: 0, l: 0, r: 0 },
+        height: 420,
+      }), CFG);
+    } else {
+      document.getElementById('fig-geo-map').innerHTML = '<p style="color:var(--muted);padding:20px">No geo data</p>';
+    }
+  }
+
+  if (name === 'temporal') {
+    const tlYears  = TIMELINE  ? TIMELINE.years  : [];
+    const subYears = SUBMIT_TL ? SUBMIT_TL.years : [];
+    const allYears = [...tlYears, ...subYears];
+    const sharedRange = allYears.length
+      ? [Math.min(...allYears), Math.max(...allYears)]
+      : null;
+    temporalBar('fig-timeline',   TIMELINE,  '#2ec4b6', sharedRange);
+    temporalBar('fig-submission', SUBMIT_TL, '#f59e0b', sharedRange);
+  }
+
+  if (name === 'onehealth') {
+    pie('fig-oh-cat', OH_CAT, 320, 'title-oh-cat');
+    barV('fig-oh-conf', OH_CONF ? OH_CONF.labels : [], OH_CONF ? OH_CONF.values : [], '#7c5cbf', 300);
+    barV('fig-oh-evid', OH_EVID ? OH_EVID.labels : [], OH_EVID ? OH_EVID.values : [], '#2ec4b6', 300);
+    if (OH_EVID) maybeAnnotateTitle('title-oh-evid', OH_EVID);
+  }
+
+  if (name === 'completeness') {
+    if (COMP_DATA) {
+      const n = COMP_DATA.cols.length;
+      const plotH = Math.max(400, n * 26);
+      const cardEl = document.getElementById('completeness-card');
+      cardEl.style.minHeight = (plotH + 60) + 'px';
+      const figEl = document.getElementById('fig-completeness');
+      figEl.style.height = plotH + 'px';
+      const colors = COMP_DATA.pct.map(p =>
+        p >= 80 ? '#22c55e' : p >= 40 ? '#f59e0b' : '#ef4444');
+      Plotly.newPlot('fig-completeness', [{
+        type: 'bar', orientation: 'h',
+        x: COMP_DATA.pct, y: COMP_DATA.cols,
+        marker: { color: colors },
+        text: COMP_DATA.pct.map(p => p + '%'),
+        textposition: 'outside',
+        cliponaxis: false,
+      }], layout({
+        margin: { t: 10, b: 30, l: 10, r: 60 },
+        xaxis: { range: [0, 120], showgrid: true, gridcolor: '#2a2f45' },
+        yaxis: { automargin: true, tickfont: { size: 11 } },
+        height: plotH,
+      }), CFG);
+    }
+  }
+}
+
+// ── Data Table ────────────────────────────────────────────────────────────
+let tblAll = [], tblFiltered = [];
+let tblPage = 0, tblPageSize = 50;
+let sortCol = -1, sortDir = 1;
+
+function buildTable() {
+  if (!TABLE_DATA) return;
+  const cols = TABLE_DATA.columns;
+  const rows = TABLE_DATA.rows;
+  tblAll = rows;
+  tblFiltered = rows;
+
+  const thead = document.getElementById('thead');
+  const tr = document.createElement('tr');
+  cols.forEach((c, i) => {
+    const th = document.createElement('th');
+    th.innerHTML = c + ' <i class="sort-icon"></i>';
+    th.onclick = () => sortTable(i);
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr);
+
+  const sel = document.getElementById('col-filter');
+  cols.forEach((c, i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = c;
+    sel.appendChild(opt);
+  });
+
+  renderTable();
+}
+
+// ── Accession link rules ──────────────────────────────────────────────────
+// Each entry: [regex, urlFn]
+// BioSample: SAM[A-Z]+\d+ covers all INSDC prefixes of any length:
+//   SAMN (NCBI), SAME (EBI), SAMA (DDBJ), SAMD (DDBJ), SAMEA (EBI long form)
+const ACCESSION_RULES = [
+  // BioSample — SAM followed by one or more uppercase letters then digits
+  [/^SAM[A-Z]+\d+$/,           v => 'https://www.ncbi.nlm.nih.gov/biosample/' + v],
+  // Assembly — RefSeq (GCF) and GenBank (GCA)
+  [/^GC[FA]_\d+\.\d+$/,        v => 'https://www.ncbi.nlm.nih.gov/datasets/genome/' + v],
+  // SRA / ENA / DDBJ runs
+  [/^SRR\d+$/,                  v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
+  [/^ERR\d+$/,                  v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^DRR\d+$/,                  v => 'https://ddbj.nig.ac.jp/resource/sra-run/' + v],
+  // SRA / ENA / DDBJ experiments
+  [/^SRX\d+$/,                  v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
+  [/^ERX\d+$/,                  v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^DRX\d+$/,                  v => 'https://ddbj.nig.ac.jp/resource/sra-experiment/' + v],
+  // SRA / ENA / DDBJ samples
+  [/^SRS\d+$/,                  v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
+  [/^ERS\d+$/,                  v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^DRS\d+$/,                  v => 'https://ddbj.nig.ac.jp/resource/sra-sample/' + v],
+  // BioProject
+  [/^PRJNA\d+$/,                v => 'https://www.ncbi.nlm.nih.gov/bioproject/' + v],
+  [/^PRJEB\d+$/,                v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^PRJDB\d+$/,                v => 'https://ddbj.nig.ac.jp/resource/bioproject/' + v],
+];
+
+function makeLink(v) {
+  if (!v || v === '') return '';
+  for (const [re, urlFn] of ACCESSION_RULES) {
+    if (re.test(v)) return `<a href="${urlFn(v)}" target="_blank">${v}</a>`;
+  }
+  return escHtml(v);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderTable() {
+  const start = tblPage * tblPageSize;
+  const slice = tblFiltered.slice(start, start + tblPageSize);
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = '';
+  slice.forEach(row => {
+    const tr = document.createElement('tr');
+    row.forEach(cell => {
+      const td = document.createElement('td');
+      td.innerHTML = makeLink(cell == null ? '' : String(cell));
+      td.title = cell == null ? '' : String(cell);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  document.getElementById('table-count').textContent =
+    tblFiltered.length.toLocaleString() + ' rows';
+  document.getElementById('pag-info').textContent =
+    `Page ${tblPage + 1} / ${Math.max(1, Math.ceil(tblFiltered.length / tblPageSize))}`;
+  document.getElementById('btn-prev').disabled = tblPage === 0;
+  document.getElementById('btn-next').disabled =
+    (tblPage + 1) * tblPageSize >= tblFiltered.length;
+}
+
+function filterTable() {
+  const q = document.getElementById('table-search').value.toLowerCase();
+  const colIdx = document.getElementById('col-filter').value;
+  tblFiltered = tblAll.filter(row => {
+    if (!q) return true;
+    if (colIdx !== '') {
+      const v = row[+colIdx];
+      return v != null && String(v).toLowerCase().includes(q);
+    }
+    return row.some(v => v != null && String(v).toLowerCase().includes(q));
+  });
+  tblPage = 0;
+  renderTable();
+}
+
+function changePage(dir) {
+  tblPage += dir;
+  renderTable();
+}
+
+function sortTable(idx) {
+  const ths = document.querySelectorAll('#thead th');
+  ths.forEach(th => th.classList.remove('sort-asc', 'sort-desc'));
+  if (sortCol === idx) { sortDir *= -1; }
+  else { sortCol = idx; sortDir = 1; }
+  ths[idx].classList.add(sortDir === 1 ? 'sort-asc' : 'sort-desc');
+  tblFiltered.sort((a, b) => {
+    const av = a[idx] ?? '';
+    const bv = b[idx] ?? '';
+    if (!isNaN(av) && !isNaN(bv) && av !== '' && bv !== '')
+      return (Number(av) - Number(bv)) * sortDir;
+    return String(av).localeCompare(String(bv)) * sortDir;
+  });
+  tblPage = 0;
+  renderTable();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+buildStats();
+renderSection('overview');
+buildTable();
+</script>
+</body>
+</html>
+"""
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def generate_report(input_path: str, output_path: str | None = None) -> str:
+    df = load_data(input_path)
+    total = len(df)
+
+    if output_path is None:
+        stem = Path(input_path).stem
+        output_path = str(Path(input_path).parent / f"{stem}_report.html")
+
+    stats = kv_stats(df)
+
+    html = HTML_TEMPLATE
+    html = html.replace("__GEN_DATE__",    datetime.now().strftime("%Y-%m-%d %H:%M"))
+    html = html.replace("__SOURCE_FILE__", Path(input_path).name)
+    html = html.replace("__STATS__",       json.dumps(stats))
+    html = html.replace("__TAX_DATA__",    taxonomy_json(df))
+    html = html.replace("__GEO_DATA__",    geo_json(df))
+    html = html.replace("__HOST_DATA__",   host_json(df))
+    html = html.replace("__TIMELINE__",    timeline_json(df, total))
+    html = html.replace("__SUBMIT_TL__",   submission_timeline_json(df, total))
+    html = html.replace("__OH_CAT__",      oh_category_json(df))
+    html = html.replace("__OH_CONF__",     confidence_json(df))
+    html = html.replace("__OH_EVID__",     evidence_json(df))
+    html = html.replace("__COMP_DATA__",   completeness_json(df))
+    html = html.replace("__STYPE_DATA__",  sample_type_json(df))
+    html = html.replace("__ACCESS_DATA__", access_json(df))
+    html = html.replace("__STATUS_DATA__", status_json(df))
+    html = html.replace("__HDISC_DATA__",  host_disease_json(df))
+    html = html.replace("__ISOL_DATA__",   isolation_source_json(df))
+    html = html.replace("__BPROJ_DATA__",  bioproject_json(df))
+    html = html.replace("__TABLE_DATA__",  df_to_records(df))
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    logger.info("Report written to: %s", output_path)
+    return output_path
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate comprehensive summary report for BioMetaHarmonizer output",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Generate HTML report only:
-  python scripts/generate_summary_report.py --input harmonized.csv --output report.html
-  
-  # Generate all formats:
-  python scripts/generate_summary_report.py \\
-      --input harmonized.csv \\
-      --output-dir reports/ \\
-      --formats html json csv
-  
-  # Generate with verbose logging:
-  python scripts/generate_summary_report.py -i harmonized.csv -o report.html -v
-        """
-    )
-    
-    parser.add_argument("--input", "-i", required=True, metavar="FILE",
-                        help="Input harmonized CSV/TSV/Excel/Parquet file")
-    parser.add_argument("--output", "-o", metavar="FILE", default=None,
-                        help="Output file path (format inferred from extension)")
-    parser.add_argument("--output-dir", "-d", metavar="DIR", default=None,
-                        help="Output directory (generates multiple formats)")
-    parser.add_argument("--formats", "-f", nargs="+", 
-                        choices=["html", "json", "csv"], default=["html"],
-                        help="Output formats (default: html)")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Enable verbose logging")
-    
+        description="Generate an interactive HTML report from a BioMetaHarmonizer Excel/CSV/TSV/Parquet file.")
+    parser.add_argument("input", help="Input .xlsx, .csv, .tsv, or .parquet file")
+    parser.add_argument("output", nargs="?", default=None,
+                        help="Output HTML file (default: <input>_report.html)")
     args = parser.parse_args()
-    
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # Determine input format
-    input_path = Path(args.input)
-    if not input_path.exists():
-        logger.error("Input file not found: %s", input_path)
-        sys.exit(1)
-    
-    suffix = input_path.suffix.lower()
-    if suffix in [".csv", ".tsv", ".txt"]:
-        df = pd.read_csv(input_path)
-    elif suffix in [".xlsx", ".xls"]:
-        df = pd.read_excel(input_path)
-    elif suffix == ".parquet":
-        df = pd.read_parquet(input_path)
-    else:
-        logger.error("Unsupported input format: %s", suffix)
-        sys.exit(1)
-    
-    logger.info("Loaded %d records x %d columns from %s", len(df), len(df.columns), input_path)
-    
-    # Compute fill rates
-    fill_df = compute_fill_rates(df)
-    
-    # Determine output strategy
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        base_name = input_path.stem
-        
-        for fmt in args.formats:
-            if fmt == "html":
-                out_path = output_dir / f"{base_name}_report.html"
-                generate_full_html_report(df, fill_df, out_path)
-            elif fmt == "json":
-                out_path = output_dir / f"{base_name}_metrics.json"
-                metrics = generate_json_metrics(df, fill_df)
-                out_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-                logger.info("JSON metrics written to %s", out_path)
-            elif fmt == "csv":
-                out_path = output_dir / f"{base_name}_fill_rates.csv"
-                fill_df.to_csv(out_path, index=False)
-                logger.info("Fill rates CSV written to %s", out_path)
-    elif args.output:
-        output_path = Path(args.output)
-        suffix = output_path.suffix.lower()
-        
-        if suffix == ".html":
-            generate_full_html_report(df, fill_df, output_path)
-        elif suffix == ".json":
-            metrics = generate_json_metrics(df, fill_df)
-            output_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-            logger.info("JSON metrics written to %s", output_path)
-        elif suffix == ".csv":
-            fill_df.to_csv(output_path, index=False)
-            logger.info("Fill rates CSV written to %s", output_path)
-        else:
-            logger.error("Unsupported output format: %s", suffix)
-            sys.exit(1)
-    else:
-        logger.error("Either --output or --output-dir must be specified")
-        sys.exit(1)
-    
-    print(f"Done. Summary report generated successfully.", file=sys.stdout)
+    generate_report(args.input, args.output)
 
 
 if __name__ == "__main__":

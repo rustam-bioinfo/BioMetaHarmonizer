@@ -99,19 +99,55 @@ _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
 
-_LAB_CONTEXT_RE = re.compile(
-    r"\b(?:laboratory|laboratories|lab\b|in\s+vitro|in\s+vivo)\b",
+# Strips bracket and parenthesis annotations from host values only.
+# Applied before host_to_category lookup in _integrate_evidence.
+# Examples: "Sus scrofa domesticus [NCBITaxon:9825]" -> "Sus scrofa domesticus"
+#           "Gallus gallus (Linnaeus 1758)" -> "Gallus gallus"
+_HOST_BRACKET_RE = re.compile(r"\s*[\[\(][^\]\)]*[\]\)]\s*")
+
+# Used by _taxonomic_fallback to detect tokens that look like taxonomic words.
+_TAXON_TOKEN_RE = re.compile(r"^[a-zA-Z\-]+$")
+
+# Matches "tissue/organ (species name)" patterns in specimen fields.
+# Captures the parenthetical content for host_to_category lookup.
+# Examples: "Feces (Canis lupus familiaris)", "Kidney (Equus Caballus)"
+_SPECIES_IN_PARENS_RE = re.compile(r"^[^(]+\(([^)]+)\)\s*$")
+
+# Matches "a blood/feces/... sample of <animal> origin" patterns.
+# Captures the animal noun for host_to_category lookup.
+_ANIMAL_ORIGIN_RE = re.compile(
+    r"\ba\s+(?:blood|feces|fecal|urine|tissue|swab)\s+(?:sample\s+)?of\s+(\w+)\s+origin\b",
     re.IGNORECASE,
 )
 
-# MED-10: matches culture collection accession numbers (digits only, or
-# letter-prefix + digits, e.g. "25922", "BAA-1705", "ATCC-25922").
-# Used after stripping institution prefixes to decide if residual is a
-# collection number (-> Lab) rather than a biological term (-> continue).
-_COLLECTION_NUMBER_RE = re.compile(
-    r"^\s*[A-Z]{0,4}-?\d+[A-Z]?\s*$",
-    re.IGNORECASE,
-)
+
+def _taxonomic_fallback(name_lower, host_to_category):
+    """
+    Progressive right-token-drop fallback for trinomial / subspecies names.
+
+    Given a name like "equus ferus caballus" that is absent from
+    host_to_category, tries progressively shorter prefixes:
+      "equus ferus caballus" -> miss
+      "equus ferus"          -> hit (if present) -> return category
+      "equus"                -> (would try if still no hit)
+
+    Only fires when:
+      - the name has 2-4 tokens (binomial, trinomial, quadrinomial)
+      - every token consists solely of letters or hyphens (no digits,
+        no punctuation that would indicate a non-taxonomic string)
+
+    Returns the category string on the first prefix hit, or None.
+    """
+    tokens = name_lower.split()
+    if not (2 <= len(tokens) <= 4):
+        return None
+    if not all(_TAXON_TOKEN_RE.match(t) for t in tokens):
+        return None
+    for n in range(len(tokens) - 1, 0, -1):
+        candidate = " ".join(tokens[:n])
+        if candidate in host_to_category:
+            return host_to_category[candidate]
+    return None
 
 
 def _is_institution_host(text):
@@ -211,15 +247,16 @@ _CLASSIFY_TEXT_KEYS = frozenset({
     "one_health_setting",
 })
 
+# Categories that may appear as output of the classifier.
+# 'Lab' is intentionally excluded: Lab signals are handled via
+# processing_terms and institution_patterns, not emitted as a
+# classifiable One Health category.
 _VALID_CATEGORIES = frozenset({
     "Human",
     "Animal",
-    "Aquatic",
-    "Wildlife",
     "Plant",
     "Food",
     "Environmental",
-    "Lab",
     "Unclassified",
 })
 
@@ -288,7 +325,6 @@ class OneHealthClassifier:
             k.lower(): v
             for k, v in self._dicts.get("host_to_category", {}).items()
         }
-
         self._ambiguous_terms = {
             t.lower() for t in self._dicts.get("ambiguous_specimen_terms", [])
         }
@@ -348,6 +384,12 @@ class OneHealthClassifier:
         tier1_order = self._dicts.get("tier1_order", list(tier1_raw.keys()))
         self._TIER1_PATTERNS = []
         for category in tier1_order:
+            # Skip categories that must not appear as classifier output.
+            # 'Lab' signals are handled upstream via processing_terms and
+            # institution_patterns; emitting 'Lab' as a category is not
+            # part of the One Health taxonomy used in this module.
+            if category not in _VALID_CATEGORIES:
+                continue
             if category in tier1_raw:
                 self._TIER1_PATTERNS.append(
                     (category, _tier1_to_pattern(tier1_raw[category]))
@@ -358,6 +400,9 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
             for category, terms in ont_map.items():
+                # Also exclude invalid categories from the fuzzy corpus.
+                if category not in _VALID_CATEGORIES:
+                    continue
                 for term in terms:
                     term_lower = term.lower()
                     if term_lower in self._ambiguous_category_set:
@@ -368,10 +413,6 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
 
-        # MED-4: per-instance LRU cache for _classify_text to avoid redundant
-        # pattern matching when the same text value appears in many records.
-        # maxsize=4096 covers the long tail of common isolation_source values
-        # (e.g. "blood", "human", "clinical") without unbounded memory growth.
         self._classify_text = functools.lru_cache(maxsize=4096)(self._classify_text_uncached)
 
     # ------------------------------------------------------------------
@@ -465,6 +506,29 @@ class OneHealthClassifier:
     # Two-pass evidence integration
     # ------------------------------------------------------------------
 
+    def _lookup_species_in_parens(self, val_str):
+        """
+        For specimen fields (isolation_source, env_medium, env_local_scale),
+        detect the pattern '<tissue> (<species name>)' and resolve the
+        parenthetical content via host_to_category + _taxonomic_fallback.
+
+        Returns (category, species_key) or (None, None).
+        """
+        m = _SPECIES_IN_PARENS_RE.match(val_str.strip())
+        if not m:
+            return None, None
+        species_raw = m.group(1).strip().lower()
+        cat = self._host_to_category.get(species_raw)
+        if cat is None:
+            cat = _taxonomic_fallback(species_raw, self._host_to_category)
+        if cat is None:
+            norm = _normalize_host_name(m.group(1).strip())
+            cat = self._host_to_category.get(norm)
+            if cat is None:
+                cat = _taxonomic_fallback(norm, self._host_to_category)
+            species_raw = norm if cat else species_raw
+        return cat, species_raw
+
     def _integrate_evidence(self, row):
         out = {
             "one_health_category":       "Unclassified",
@@ -510,13 +574,30 @@ class OneHealthClassifier:
                 if _is_institution_host(val_str):
                     continue
 
-                host_key = val_str.lower()
+                # Strip bracket/parenthesis annotations from the host value
+                # before lookup (e.g. [NCBITaxon:9825], (Linnaeus 1758)).
+                # Applied only here; other fields may carry useful () / [] content.
+                host_clean = _HOST_BRACKET_RE.sub(" ", val_str).strip()
+
+                host_key = host_clean.lower()
                 host_cat = self._host_to_category.get(host_key)
+
                 if host_cat is None:
-                    norm_key = _normalize_host_name(val_str)
+                    norm_key = _normalize_host_name(host_clean)
                     host_cat = self._host_to_category.get(norm_key)
                     lookup_term = norm_key
                 else:
+                    lookup_term = host_key
+
+                # Progressive right-token-drop fallback for trinomials /
+                # subspecies names not yet in host_to_category.
+                if host_cat is None:
+                    host_cat = _taxonomic_fallback(host_key, self._host_to_category)
+                    if host_cat is None:
+                        host_cat = _taxonomic_fallback(
+                            _normalize_host_name(host_clean),
+                            self._host_to_category,
+                        )
                     lookup_term = host_key
 
                 if host_cat is not None:
@@ -544,7 +625,7 @@ class OneHealthClassifier:
                     out["one_health_setting"] = layer["one_health_setting"]
 
                 cat = layer.get("one_health_category")
-                if cat is None or cat == "Unclassified":
+                if cat is None or cat not in _VALID_CATEGORIES or cat == "Unclassified":
                     continue
                 term_lower = str(layer.get("one_health_term") or val_str).lower()
                 if term_lower in self._ambiguous_category_set:
@@ -567,6 +648,22 @@ class OneHealthClassifier:
                     corroborated = True
                 continue
 
+            # For specimen fields, try species-in-parens extraction before
+            # the standard text classification pipeline.
+            if field in self._SPECIMEN_FIELDS:
+                paren_cat, paren_term = self._lookup_species_in_parens(val_str)
+                if paren_cat is not None:
+                    fw = _FIELD_WEIGHTS.get(field, 1.00)
+                    if specimen_category is None:
+                        specimen_category     = paren_cat
+                        specimen_term         = paren_term
+                        specimen_field        = field
+                        specimen_specificity  = 0.90
+                        specimen_field_weight = fw
+                    elif specimen_category == paren_cat:
+                        corroborated = True
+                    continue
+
             layer = self._classify_text(val_str)
 
             if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
@@ -576,10 +673,7 @@ class OneHealthClassifier:
 
             cat = layer.get("one_health_category")
 
-            if cat == "Lab":
-                continue
-
-            if cat is None or cat == "Unclassified":
+            if cat is None or cat not in _VALID_CATEGORIES or cat == "Unclassified":
                 continue
 
             term_lower = str(layer.get("one_health_term") or val_str).lower()
@@ -733,10 +827,6 @@ class OneHealthClassifier:
         Returns dict with keys:
           one_health_category, one_health_term, one_health_confidence,
           one_health_term_source, one_health_processing, one_health_setting
-
-        Lab category is returned ONLY when a culture collection prefix (ATCC,
-        DSM, NCTC, etc.) is the sole meaningful content after stripping,
-        determined by _COLLECTION_NUMBER_RE (MED-10).
         """
         unclassified = {
             "one_health_category":    "Unclassified",
@@ -754,29 +844,38 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
-        # Institution guard — two levels:
-        # Level 1: culture collection prefixes (ATCC, DSM, NCTC, ...)
-        #   Strip them; if residual is empty or matches _COLLECTION_NUMBER_RE
-        #   (digits / letter-prefix+digits like "25922" or "BAA-1705") -> Lab.
-        # Level 2: broad institution keywords -> strip and continue.
+        # Normalize underscores to spaces so that values like
+        # "Environmental_bathroom" or "Blood_Blood" are tokenized correctly.
+        text = text.replace("_", " ")
+
+        # Strip culture collection prefixes (ATCC, DSM, NCTC, ...) and broad
+        # institution keywords, then continue classification on the residual.
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
-            stripped = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
-            # MED-10: use regex to match collection accession numbers of any
-            # length rather than the old hard-coded < 4 char threshold.
-            if not stripped or _COLLECTION_NUMBER_RE.match(stripped):
+            text = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
+            if not text:
+                return unclassified
+
+        text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
+        if not text:
+            return unclassified
+
+        # Resolve "a <specimen> of <animal> origin" before abbreviation
+        # expansion so the pattern matches the original capitalization.
+        origin_m = _ANIMAL_ORIGIN_RE.search(text)
+        if origin_m:
+            animal_noun = origin_m.group(1).lower()
+            cat = self._host_to_category.get(animal_noun)
+            if cat is None:
+                cat = _taxonomic_fallback(animal_noun, self._host_to_category)
+            if cat is not None:
                 return {
-                    "one_health_category":    "Lab",
-                    "one_health_term":        text[:60],
-                    "one_health_confidence":  0.9,
-                    "one_health_term_source": "institution",
+                    "one_health_category":    cat,
+                    "one_health_term":        animal_noun,
+                    "one_health_confidence":  0.90,
+                    "one_health_term_source": "host_dict",
                     "one_health_processing":  np.nan,
                     "one_health_setting":     np.nan,
                 }
-
-        text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
-        text = _LAB_CONTEXT_RE.sub("", text).strip()
-        if not text:
-            return unclassified
 
         text = self._expand_abbreviations(text)
         working = self._normalize_synonyms(text)

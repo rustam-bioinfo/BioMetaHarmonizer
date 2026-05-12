@@ -5,7 +5,7 @@ Schema Reference
 ================
 
 Every call to :func:`~biometaharmonizer.ingestion.ingest` returns a DataFrame
-with exactly **51 columns** in the order defined by ``_load_final_schema()``.
+with exactly **57 columns** in the order defined by ``_load_final_schema()``.
 All columns are initialized to ``None``/NaN for records that do not carry the
 corresponding attribute.
 
@@ -70,96 +70,6 @@ Output Columns
      - ``<OrganismName>`` or fallback
      - Organism name as submitted; falls back to ``taxonomy_name``.
      - ``K. pneumoniae subsp.``
-   * - ``collection_date``
-     - str/NaN
-     - Attribute + DateEngine
-     - ISO 8601 point collection date (YYYY, YYYY-MM, YYYY-MM-DD).
-     - ``2021-06-15``
-   * - ``collection_date_range``
-     - str/NaN
-     - Attribute + DateEngine
-     - Verbatim original date string for range/approximate inputs.
-     - ``2020-01/2020-06``
-   * - ``geo_loc_name``
-     - str/NaN
-     - Attribute
-     - Original ``geo_loc_name`` as submitted to NCBI.
-     - ``Russia: Novosibirsk``
-   * - ``lat_lon``
-     - str/NaN
-     - Attribute
-     - Latitude/longitude as submitted (free-text string).
-     - ``56.0153 N 92.8932 E``
-   * - ``geo_country``
-     - str/NaN
-     - GeoEngine
-     - Normalised country display name.
-     - ``Russia``
-   * - ``geo_region``
-     - str/NaN
-     - GeoEngine
-     - Sub-national region as submitted.
-     - ``Novosibirsk Oblast``
-   * - ``geo_locality``
-     - str/NaN
-     - GeoEngine
-     - Locality or sub-region as submitted.
-     - ``Akademgorodok``
-   * - ``geo_iso3166``
-     - str/NaN
-     - GeoEngine + pycountry
-     - ISO 3166-1 alpha-2 code; ``"HISTORICAL"`` for defunct countries.
-     - ``RU``
-   * - ``geo_sea_ocean``
-     - str/NaN
-     - GeoEngine
-     - Ocean or sea name for marine samples.
-     - ``Pacific Ocean``
-   * - ``geo_loc_raw``
-     - str/NaN
-     - GeoEngine
-     - Original string for coordinate-only entries; NaN otherwise.
-     - ``45.3 N, 30.1 E``
-   * - ``host``
-     - str/NaN
-     - Attribute
-     - Host organism as submitted.
-     - ``Homo sapiens``
-   * - ``host_disease``
-     - str/NaN
-     - Attribute
-     - Disease of the host.
-     - ``pneumonia``
-   * - ``host_age``
-     - str/NaN
-     - Attribute
-     - Age of the host at time of sampling.
-     - ``45``
-   * - ``host_sex``
-     - str/NaN
-     - Attribute
-     - Biological sex of the host.
-     - ``male``
-   * - ``host_tissue_sampled``
-     - str/NaN
-     - Attribute
-     - Tissue or body site sampled.
-     - ``lung``
-   * - ``isolation_source``
-     - str/NaN
-     - Attribute
-     - Physical, chemical, or biological material of sample.
-     - ``blood``
-   * - ``sample_type``
-     - str/NaN
-     - Attribute
-     - Type of sample (e.g. clinical, environmental).
-     - ``clinical``
-   * - ``one_health_category``
-     - str
-     - OneHealthClassifier
-     - One Health tier. Always a string; never NaN. Possible values: Human, Animal, Aquatic, Wildlife, Plant, Food, Environmental, Lab, Unclassified.
-     - ``Human``
    * - ``isolate``
      - str/NaN
      - Attribute
@@ -195,11 +105,41 @@ Output Columns
      - Attribute
      - Culture collection number/ID.
      - ``ATCC:700603``
-   * - ``outbreak``
+   * - ``host``
      - str/NaN
      - Attribute
-     - Outbreak identifier or name.
-     - ``2011 Germany HUS``
+     - Host organism as submitted.
+     - ``Homo sapiens``
+   * - ``host_disease``
+     - str/NaN
+     - Attribute
+     - Disease of the host.
+     - ``pneumonia``
+   * - ``host_age``
+     - str/NaN
+     - Attribute
+     - Age of the host at time of sampling.
+     - ``45``
+   * - ``host_sex``
+     - str/NaN
+     - Attribute
+     - Biological sex of the host.
+     - ``male``
+   * - ``host_tissue_sampled``
+     - str/NaN
+     - Attribute
+     - Tissue or body site sampled.
+     - ``lung``
+   * - ``isolation_source``
+     - str/NaN
+     - Attribute
+     - Physical, chemical, or biological material of sample.
+     - ``blood``
+   * - ``sample_type``
+     - str/NaN
+     - Attribute
+     - Type of sample (e.g. clinical, environmental).
+     - ``clinical``
    * - ``env_broad_scale``
      - str/NaN
      - Attribute (MIxS)
@@ -215,6 +155,93 @@ Output Columns
      - Attribute (MIxS)
      - Environmental medium (MIxS field).
      - ``soil``
+   * - ``geo_loc_name``
+     - str/NaN
+     - Attribute
+     - Original ``geo_loc_name`` as submitted to NCBI.
+     - ``Russia: Novosibirsk``
+   * - ``lat_lon``
+     - str/NaN
+     - Attribute
+     - Latitude/longitude as submitted (free-text string).
+     - ``56.0153 N 92.8932 E``
+   * - ``geo_country``
+     - str/NaN
+     - GeoEngine
+     - Normalised country display name.
+     - ``Russia``
+   * - ``geo_region``
+     - str/NaN
+     - GeoEngine
+     - Sub-national region as submitted.
+     - ``Novosibirsk Oblast``
+   * - ``geo_locality``
+     - str/NaN
+     - GeoEngine
+     - Locality or sub-region as submitted.
+     - ``Akademgorodok``
+   * - ``geo_iso3166``
+     - str/NaN
+     - GeoEngine + pycountry
+     - ISO 3166-1 alpha-2 code; ``"HISTORICAL"`` for defunct countries.
+     - ``RU``
+   * - ``geo_sea_ocean``
+     - str/NaN
+     - GeoEngine
+     - Ocean, sea, gulf, bay, or other named water body for aquatic samples.
+     - ``Pacific Ocean``
+   * - ``collection_date``
+     - str/NaN
+     - Attribute + DateEngine
+     - ISO 8601 point collection date (YYYY, YYYY-MM, YYYY-MM-DD).
+     - ``2021-06-15``
+   * - ``collection_date_range``
+     - str/NaN
+     - Attribute + DateEngine
+     - Verbatim original date string for range/approximate inputs.
+     - ``2020-01/2020-06``
+   * - ``one_health_category``
+     - str
+     - OneHealthClassifier
+     - One Health tier. Always a string; never NaN. Possible values: ``Human``, ``Animal``, ``Plant``, ``Food``, ``Environmental``, ``Unclassified``.
+     - ``Human``
+   * - ``one_health_term``
+     - str/NaN
+     - OneHealthClassifier
+     - The matched term that drove the classification.
+     - ``blood``
+   * - ``one_health_confidence``
+     - float
+     - OneHealthClassifier
+     - Numeric confidence score in the range [0.0, 1.0].
+     - ``0.85``
+   * - ``one_health_evidence_level``
+     - str
+     - OneHealthClassifier
+     - Discretized confidence: ``high``, ``medium``, ``low``, or ``unresolved``.
+     - ``high``
+   * - ``one_health_processing``
+     - str/NaN
+     - OneHealthClassifier
+     - Detected processing/preservation term (e.g. ``frozen``).
+     - ``frozen``
+   * - ``one_health_setting``
+     - str/NaN
+     - OneHealthClassifier
+     - Detected setting term (e.g. ``hospital``).
+     - ``hospital``
+   * - ``one_health_source_field``
+     - str/NaN
+     - OneHealthClassifier
+     - Name of the input field that provided the winning evidence, or
+       ``"setting_inference"`` when the category was derived from a setting
+       term with no direct biological evidence.
+     - ``isolation_source``
+   * - ``outbreak``
+     - str/NaN
+     - Attribute
+     - Outbreak identifier or name.
+     - ``2011 Germany HUS``
    * - ``sequencing_method``
      - str/NaN
      - Attribute
@@ -285,7 +312,7 @@ _extra_attributes
 -----------------
 
 ``_extra_attributes`` is a JSON-serialized dict. It captures all attribute
-key–value pairs from the BioSample XML that do not map to any of the 50 named
+key-value pairs from the BioSample XML that do not map to any of the 56 named
 schema columns via the synonym lookup.
 
 **JSON structure:**
@@ -306,12 +333,13 @@ schema columns via the synonym lookup.
      ],
      "panel_id": "TREKAMRO",
      "submission_contact": "John Smith",
-     "submission_owner": "University Hospital Lab"
+     "submission_owner": "University Hospital Lab",
+     "_dup_isolation_source": "wound swab"
    }
 
 **Known sub-keys:**
 
-.. list-table:: Output column schema
+.. list-table:: _extra_attributes sub-keys
    :header-rows: 1
 
    * - Sub-key
@@ -329,12 +357,35 @@ schema columns via the synonym lookup.
    * - ``submission_owner``
      - str
      - Submitting organization name.
+   * - ``_dup_<field>``
+     - str
+     - **Attribute collision on a schema column.** When two ``<Attribute>``
+       elements on the same BioSample record both resolve to the same standard
+       schema column (e.g. two ``isolation_source`` attributes), the first
+       value is stored in the schema column and any additional values are
+       stored here under the key ``_dup_<standard_key>`` (e.g.
+       ``_dup_isolation_source``). Multiple overflow values are joined with
+       ``|``. This differs from the plain pipe-joining of truly extra
+       (non-schema) attributes.
    * - (other attribute keys)
      - str
-     - Any other attribute that did not resolve to a named schema column. Multiple values for the same key are joined with ``|``.
+     - Any other attribute that did not resolve to a named schema column.
+       Multiple values for the same key are joined with ``|``.
 
 **Pipe-separated values:** When NCBI XML contains multiple ``<Attribute>``
 elements with the same key on a single BioSample record, the values are
 concatenated with a ``|`` pipe separator inside the JSON string. This is
 an intentional design decision to preserve all submitted values without
 data loss.
+
+**Recovering duplicate schema-column values:**
+
+.. code-block:: python
+
+   import json
+
+   ea = json.loads(row["_extra_attributes"] or "{}")
+   # Primary isolation_source value:
+   primary = row["isolation_source"]
+   # Any duplicate isolation_source values submitted by the depositor:
+   dups = ea.get("_dup_isolation_source", "").split("|")

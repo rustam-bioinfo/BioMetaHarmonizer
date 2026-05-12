@@ -9,7 +9,15 @@ import time
 from pathlib import Path
 
 
-_VALID_FORMATS = ["csv", "tsv", "excel", "parquet"]
+_VALID_FORMATS = ["csv", "tsv", "excel", "parquet", "jsonl"]
+
+_FMT_TO_EXT = {
+    "csv": ".csv",
+    "tsv": ".tsv",
+    "excel": ".xlsx",
+    "parquet": ".parquet",
+    "jsonl": ".jsonl",
+}
 
 
 def _lower_format(s: str) -> str:
@@ -44,11 +52,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Input file format: one accession per line.\n"
             "Accepted prefixes: SAMN/SAME/SAMD (BioSample) or GCF_/GCA_ (assembly).\n"
             "Mixed files are handled automatically.\n\n"
-            "Example:\n"
+            "Examples:\n"
             "    biometaharmonizer run \\\n"
             "        --input ids.txt \\\n"
             "        --email your@email.com \\\n"
-            "        --output harmonized.csv"
+            "        --output harmonized.csv\n\n"
+            "    # Save to multiple formats at once:\n"
+            "    biometaharmonizer run \\\n"
+            "        --input ids.txt \\\n"
+            "        --email your@email.com \\\n"
+            "        --output harmonized.csv \\\n"
+            "        --format csv tsv excel"
         ),
     )
 
@@ -60,10 +74,19 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--format", "-f",
         type=_lower_format,
+        nargs="+",
         default=None,
         metavar="FORMAT",
-        help="Output format: csv, tsv, excel, parquet (case-insensitive). "
-             "Inferred from output file extension when omitted.",
+        help=(
+            "One or more output formats: csv, tsv, excel, parquet, jsonl "
+            "(case-insensitive, space-separated). "
+            "When a single format is given the output path is used as-is. "
+            "When multiple formats are given the stem of --output is reused and "
+            "the correct extension is appended for each format "
+            "(e.g. --output out.csv --format csv tsv excel produces "
+            "out.csv, out.tsv, out.xlsx). "
+            "Omit to infer the format from the --output file extension."
+        ),
     )
     run_p.add_argument("--summary", metavar="FILE", default=None)
     run_p.add_argument("--verbose", "-v", action="store_true", default=False)
@@ -112,8 +135,23 @@ def _infer_format(path: Path) -> str:
         ".xlsx": "excel",
         ".xls": "excel",
         ".parquet": "parquet",
+        ".jsonl": "jsonl",
     }
     return mapping.get(suffix, "csv")
+
+
+def _resolve_output_targets(output_path: Path, formats: list) -> list:
+    """
+    Return a list of (fmt, resolved_path) pairs.
+
+    - Single format: use output_path unchanged.
+    - Multiple formats: replace the extension of output_path with the
+      canonical extension for each format.
+    """
+    if len(formats) == 1:
+        return [(formats[0], output_path)]
+    stem = output_path.parent / output_path.stem
+    return [(fmt, Path(str(stem) + _FMT_TO_EXT[fmt])) for fmt in formats]
 
 
 def _looks_like_filepath(s: str) -> bool:
@@ -152,7 +190,12 @@ def _run(args: argparse.Namespace) -> int:
         source = accessions
 
     output_path = Path(args.output)
-    fmt = args.format or _infer_format(output_path)
+
+    if args.format:
+        targets = _resolve_output_targets(output_path, args.format)
+    else:
+        fmt = _infer_format(output_path)
+        targets = [(fmt, output_path)]
 
     try:
         from biometaharmonizer.ingestion import set_email, ingest
@@ -271,18 +314,25 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("         One Health skipped (no source columns present).")
 
     if "one_health_category" in df.columns:
-        classified = df["one_health_category"].notna().sum()
-        logger.info("         %d / %d records classified.", classified, len(df))
+        classified = (df["one_health_category"].notna() & (df["one_health_category"] != "Unclassified")).sum()
+        unclassified = len(df) - classified
+        logger.info(
+            "         %d / %d records classified (%d unclassified).",
+            classified, len(df), unclassified,
+        )
 
-    logger.info("Writing output to %s (format=%s)", output_path, fmt)
-    t0 = time.perf_counter()
-    try:
-        write(df, output_path, fmt=fmt)
-    except Exception as exc:
-        print(f"ERROR writing output: {exc}", file=sys.stderr)
-        logger.debug("", exc_info=True)
-        return 2
-    logger.info("         Written in %.1fs.", time.perf_counter() - t0)
+    written_paths = []
+    for fmt, out_path in targets:
+        logger.info("Writing output to %s (format=%s)", out_path, fmt)
+        t0 = time.perf_counter()
+        try:
+            write(df, out_path, fmt=fmt)
+            written_paths.append(out_path)
+        except Exception as exc:
+            print(f"ERROR writing output ({fmt}): {exc}", file=sys.stderr)
+            logger.debug("", exc_info=True)
+            return 2
+        logger.info("         Written in %.1fs.", time.perf_counter() - t0)
 
     if args.summary:
         summary_path = Path(args.summary)
@@ -294,7 +344,8 @@ def _run(args: argparse.Namespace) -> int:
             logger.debug("", exc_info=True)
             return 2
 
-    print(f"Done. {len(df)} records x {len(df.columns)} columns -> {output_path}", file=sys.stdout)
+    paths_str = ", ".join(str(p) for p in written_paths)
+    print(f"Done. {len(df)} records x {len(df.columns)} columns -> {paths_str}", file=sys.stdout)
     return 0
 
 

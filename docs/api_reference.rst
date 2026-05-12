@@ -5,7 +5,7 @@ API Reference
 =============
 
 This page documents every public function and class exported by
-BioMetaHarmonizer v0.6.0. Parameter names, defaults, and types are
+BioMetaHarmonizer. Parameter names, defaults, and types are
 derived directly from the source code.
 
 biometaharmonizer.ingestion
@@ -36,21 +36,33 @@ biometaharmonizer.ingestion
    :param cache_dir: Directory for assembly summary flat-file cache.
        Defaults to ``~/.biometaharmonizer/cache/``.
    :type cache_dir: str, Path, or None
-   :param fetch_batch_size: Records per ``efetch`` request. Defaults to 200.
-       Higher values reduce round trips but increase per-request payload.
+   :param fetch_batch_size: Records per ``efetch`` request. Defaults to 200
+       (``_BATCH_SIZE``). Values above 500 (``_NCBI_EFETCH_MAX``) are
+       silently clamped to 500 with a WARNING log.
    :type fetch_batch_size: int or None
    :param esearch_batch_size: Accessions per ``esearch`` term (BioSample
-       and elink paths). Defaults to 100.
+       and elink paths). Module default is 100 (``_ESEARCH_BATCH``);
+       CLI default is 200.
    :type esearch_batch_size: int or None
    :param refresh_cache: When ``True``, delete and re-download the assembly
        summary files unconditionally. Defaults to ``False``.
    :type refresh_cache: bool
-   :returns: DataFrame conforming to the 51-column fixed schema defined by
+   :returns: DataFrame conforming to the 57-column fixed schema defined by
        ``_load_final_schema()``. Every column is initialized to ``None``/NaN
-       for records that lack the attribute.
+       for records that lack the attribute. When the input is empty (after
+       deduplication), returns an empty DataFrame with all 57 columns rather
+       than raising an exception.
    :rtype: pandas.DataFrame
-   :raises ValueError: If no valid email is provided (neither via ``email``
-       parameter nor via prior :func:`set_email` call).
+   :raises ValueError: If no valid email is provided; or if the email is
+       a known placeholder address; or if all input IDs are unrecognized
+       or unresolvable after classification and assembly resolution.
+   :raises FileNotFoundError: If ``source`` is a path-like string that does
+       not exist on disk.
+
+   .. note::
+
+      ``ingest()`` deduplicates the input accession list before any network
+      call. Duplicate IDs are logged at INFO level and counted.
 
    .. code-block:: python
 
@@ -70,9 +82,18 @@ biometaharmonizer.ingestion
    ``ingest()`` calls.
 
    :param email: Valid e-mail address. Validated against the pattern
-       ``^[^@\s]+@[^@\s]+\.[^@\s]+$``.
+       ``^[^@\s]+@[^@\s]+\.[^@\s]+$``. The following well-known placeholder
+       addresses are also explicitly rejected:
+       ``your@email.com``, ``example@example.com``, ``user@example.org``,
+       ``test@test.com``, ``email@example.com``.
    :type email: str
-   :raises ValueError: If ``email`` does not match the pattern.
+   :raises ValueError: If ``email`` does not match the pattern or is a
+       known placeholder address.
+
+   .. note::
+
+      Not thread-safe: writes a module-level global. See the
+      :ref:`thread-safety` section in :ref:`ingestion`.
 
    .. code-block:: python
 
@@ -89,6 +110,11 @@ biometaharmonizer.ingestion
        https://www.ncbi.nlm.nih.gov/account/
    :type key: str
 
+   .. note::
+
+      Not thread-safe: writes a module-level global. See the
+      :ref:`thread-safety` section in :ref:`ingestion`.
+
    .. code-block:: python
 
       import biometaharmonizer as bmh
@@ -98,11 +124,17 @@ biometaharmonizer.ingestion
 .. function:: biometaharmonizer.ingestion.set_cache_dir(path) -> None
 
    Override the directory used for assembly summary flat-file caching.
-   Clears the internal ``_read_assembly_summary_cached`` LRU cache so
-   that subsequent calls use the new path.
+   **Side effect:** clears the internal ``_read_assembly_summary_cached``
+   LRU cache so that subsequent calls use the new path and do not serve
+   stale data from the old directory.
 
    :param path: New cache directory path.
    :type path: str or Path
+
+   .. note::
+
+      Not thread-safe: writes a module-level global. See the
+      :ref:`thread-safety` section in :ref:`ingestion`.
 
    .. code-block:: python
 
@@ -123,11 +155,11 @@ biometaharmonizer.output
        automatically.
    :type path: str or Path
    :param fmt: Output format. One of ``"csv"``, ``"tsv"``, ``"excel"``,
-       ``"parquet"``. Case-insensitive. Defaults to ``"csv"``.
+       ``"parquet"``, ``"jsonl"``. Case-insensitive. Defaults to ``"csv"``.
    :type fmt: str
    :returns: Resolved absolute path to the written file.
    :rtype: pathlib.Path
-   :raises ValueError: If ``fmt`` is not one of the four supported formats.
+   :raises ValueError: If ``fmt`` is not one of the five supported formats.
 
    .. code-block:: python
 
@@ -202,13 +234,12 @@ biometaharmonizer.geo_engine
 
    .. method:: parse(series) -> pd.DataFrame
 
-      Parse a Series of ``geo_loc_name`` strings into a six-column DataFrame.
+      Parse a Series of ``geo_loc_name`` strings into a five-column DataFrame.
 
       :param series: Series of ``geo_loc_name`` strings.
       :type series: pandas.Series
       :returns: DataFrame with columns: ``geo_country``, ``geo_region``,
-          ``geo_locality``, ``geo_iso3166``, ``geo_sea_ocean``,
-          ``geo_loc_raw``.
+          ``geo_locality``, ``geo_iso3166``, ``geo_sea_ocean``.
       :rtype: pandas.DataFrame
 
    .. code-block:: python
@@ -225,10 +256,17 @@ biometaharmonizer.geo_engine
 biometaharmonizer.one_health
 ------------------------------
 
-.. class:: biometaharmonizer.one_health.OneHealthClassifier
+.. class:: biometaharmonizer.one_health.OneHealthClassifier(dictionary_path=None, fuzzy_threshold=92)
 
    One Health categorization classifier. Loads biological knowledge
    exclusively from ``one_health_dictionaries.json``.
+
+   :param dictionary_path: Path to a custom ``one_health_dictionaries.json``.
+       ``None`` uses the bundled file.
+   :type dictionary_path: str, Path, or None
+   :param fuzzy_threshold: Minimum ``rapidfuzz.fuzz.WRatio`` score (0–100)
+       for a fuzzy match to be accepted. Default ``92``.
+   :type fuzzy_threshold: int
 
    .. method:: classify(series) -> pd.Series
 
@@ -269,11 +307,22 @@ biometaharmonizer.one_health
       of: ``isolation_source``, ``host``, ``env_medium``,
       ``env_local_scale``, ``env_broad_scale``, ``sample_type``.
 
+      Unknown keyword arguments emit a ``UserWarning`` and are ignored;
+      they do not raise an exception.
+
       :returns: DataFrame with columns: ``one_health_category``,
           ``one_health_term``, ``one_health_confidence``,
           ``one_health_evidence_level``, ``one_health_processing``,
           ``one_health_setting``, ``one_health_source_field``.
       :rtype: pandas.DataFrame
+      :raises ValueError: If no valid (non-None, non-empty) Series is provided.
+
+      .. note::
+
+         When all input fields lack sufficient evidence but a setting term
+         was detected (e.g. ``"hospital"``), the category is inferred from
+         ``setting_to_category`` in the dictionary and
+         ``one_health_source_field`` is set to ``"setting_inference"``.
 
    .. code-block:: python
 
@@ -306,6 +355,14 @@ biometaharmonizer.key_mapper
       :type df: pandas.DataFrame
       :returns: DataFrame reindexed to ``BIOSAMPLE_SCHEMA``.
       :rtype: pandas.DataFrame
+
+      .. warning::
+
+         ``reindex(columns=BIOSAMPLE_SCHEMA)`` **silently drops** any column
+         not present in ``BIOSAMPLE_SCHEMA``. A ``WARNING`` is logged before
+         the drop listing the affected column names. Encode extra columns
+         into ``_extra_attributes`` before calling this method to preserve
+         them.
 
 
 biometaharmonizer.synonyms
