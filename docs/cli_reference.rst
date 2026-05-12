@@ -44,7 +44,9 @@ Runs the full harmonization pipeline: ingest → key-map → date/geo/One Health
 The ``--input`` argument accepts:
 
 - A path to a plain-text file containing one accession per line.
-- A comma-separated list of accessions passed directly as a string.
+- A comma-separated list of accessions passed directly as a string
+  (e.g. ``-i "SAMN02436525,SAMN02434874"``). This is detected automatically
+  when the argument does not look like an existing file path.
 
 Accepted accession prefixes: ``SAMN``, ``SAME``, ``SAMD`` (BioSample) or
 ``GCF_``, ``GCA_`` (assembly). Mixed files are handled automatically.
@@ -134,7 +136,7 @@ Flags
      - —
      - int
      - 200
-     - Records per efetch request.
+     - Records per efetch request (clamped to 500 maximum).
    * - ``--esearch-batch-size``
      - —
      - int
@@ -155,6 +157,25 @@ Flags
      - flag
      - —
      - Print version string and exit.
+
+Exit Codes
+----------
+
+``biometaharmonizer run`` returns one of three exit codes:
+
+.. list-table:: CLI exit codes
+   :header-rows: 1
+
+   * - Code
+     - Meaning
+   * - ``0``
+     - Success — output file(s) written.
+   * - ``1``
+     - User input error — invalid email, input file not found, unrecognized
+       format string, or no valid BioSample IDs could be resolved.
+   * - ``2``
+     - Runtime error — ingestion failure (network, XML parse), empty
+       DataFrame after ingestion, write failure, or import error.
 
 CLI Flag ↔ Python API Mapping
 -------------------------------

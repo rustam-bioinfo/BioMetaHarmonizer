@@ -233,7 +233,9 @@ Output Columns
    * - ``one_health_source_field``
      - str/NaN
      - OneHealthClassifier
-     - Name of the input field that provided the winning evidence.
+     - Name of the input field that provided the winning evidence, or
+       ``"setting_inference"`` when the category was derived from a setting
+       term with no direct biological evidence.
      - ``isolation_source``
    * - ``outbreak``
      - str/NaN
@@ -331,12 +333,13 @@ schema columns via the synonym lookup.
      ],
      "panel_id": "TREKAMRO",
      "submission_contact": "John Smith",
-     "submission_owner": "University Hospital Lab"
+     "submission_owner": "University Hospital Lab",
+     "_dup_isolation_source": "wound swab"
    }
 
 **Known sub-keys:**
 
-.. list-table:: Output column schema
+.. list-table:: _extra_attributes sub-keys
    :header-rows: 1
 
    * - Sub-key
@@ -354,12 +357,35 @@ schema columns via the synonym lookup.
    * - ``submission_owner``
      - str
      - Submitting organization name.
+   * - ``_dup_<field>``
+     - str
+     - **Attribute collision on a schema column.** When two ``<Attribute>``
+       elements on the same BioSample record both resolve to the same standard
+       schema column (e.g. two ``isolation_source`` attributes), the first
+       value is stored in the schema column and any additional values are
+       stored here under the key ``_dup_<standard_key>`` (e.g.
+       ``_dup_isolation_source``). Multiple overflow values are joined with
+       ``|``. This differs from the plain pipe-joining of truly extra
+       (non-schema) attributes.
    * - (other attribute keys)
      - str
-     - Any other attribute that did not resolve to a named schema column. Multiple values for the same key are joined with ``|``.
+     - Any other attribute that did not resolve to a named schema column.
+       Multiple values for the same key are joined with ``|``.
 
 **Pipe-separated values:** When NCBI XML contains multiple ``<Attribute>``
 elements with the same key on a single BioSample record, the values are
 concatenated with a ``|`` pipe separator inside the JSON string. This is
 an intentional design decision to preserve all submitted values without
 data loss.
+
+**Recovering duplicate schema-column values:**
+
+.. code-block:: python
+
+   import json
+
+   ea = json.loads(row["_extra_attributes"] or "{}")
+   # Primary isolation_source value:
+   primary = row["isolation_source"]
+   # Any duplicate isolation_source values submitted by the depositor:
+   dups = ea.get("_dup_isolation_source", "").split("|")

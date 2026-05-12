@@ -161,12 +161,26 @@ Special handling rules:
   others are tagged ``geo_iso3166 = "HISTORICAL"`` and a WARNING is logged.
 - **Coordinate-only entries:** values matching the coordinate pattern are not
   parsed into geo columns and return all-NaN geo outputs.
-- **Parenthetical qualifiers:** trailing parenthetical suffixes such as
-  ``"United Kingdom (England, Wales & N. Ireland)"`` are stripped before
-  country lookup so the comma inside the parentheses does not break parsing.
+- **Parenthetical qualifiers in country names:** trailing parenthetical suffixes
+  such as ``"United Kingdom (England, Wales & N. Ireland)"`` are stripped
+  before country lookup so the comma inside the parentheses does not break
+  parsing.
+- **Parenthetical qualifiers in water body names:** ocean and sea names that
+  include a regional qualifier in parentheses (e.g. ``"Pacific Ocean (NE)"``)
+  have the parenthetical portion stripped before the water-body lookup, so the
+  matched value stored in ``geo_sea_ocean`` is the canonical name without the
+  qualifier (e.g. ``"Pacific Ocean"``).
 - **Ocean/sea lookup:** when the country token (after stripping parenthetical
   qualifiers) matches one of the named ocean/sea entries, the value is
   stored in ``geo_sea_ocean`` instead of ``geo_country``.
+- **Bare "Korea" ambiguity:** the string ``"Korea"`` without a North/South
+  qualifier is resolved to **South Korea** (``geo_iso3166 = "KR"``) and an
+  INFO-level log is emitted to flag the ambiguity:
+
+  .. code-block:: text
+
+     INFO  biometaharmonizer.geo_engine:
+       'Korea' resolved to South Korea (KR) — verify if North Korea was intended.
 
 Geo Parsing Examples
 ~~~~~~~~~~~~~~~~~~~~~
@@ -210,6 +224,11 @@ Geo Parsing Examples
      - NaN
      - NaN
      - NaN
+   * - ``Pacific Ocean (NE)``
+     - NaN
+     - NaN
+     - NaN
+     - NaN
    * - ``USSR``
      - USSR
      - NaN
@@ -242,6 +261,93 @@ using deterministic, multi-layer semantic analysis. All biological knowledge
 is loaded from ``one_health_dictionaries.json``; no terms are hardcoded in the
 Python source.
 
+Constructor Parameters
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   OneHealthClassifier(dictionary_path=None, fuzzy_threshold=92)
+
+- **``dictionary_path``** (default ``None``) — path to a custom
+  ``one_health_dictionaries.json`` file. When ``None``, the bundled file at
+  ``src/biometaharmonizer/schemas/one_health_dictionaries.json`` is used.
+  Raises ``FileNotFoundError`` if a non-``None`` path does not exist, and
+  ``ValueError`` if the file is missing required top-level keys.
+
+- **``fuzzy_threshold``** (default ``92``) — minimum ``rapidfuzz.fuzz.WRatio``
+  score (0–100) for a fuzzy match to be accepted. Increase for stricter
+  matching (fewer false positives); decrease to accept more approximate
+  matches. Only applies when ``rapidfuzz`` is installed.
+
+``rapidfuzz`` Optional Dependency
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Fuzzy matching is powered by the ``rapidfuzz`` library (``>=3.0.0``). This
+dependency is **optional at runtime**: if ``rapidfuzz`` is not importable,
+the classifier logs a WARNING and disables the fuzzy fallback layer
+gracefully — all other classification layers (tier1 patterns, host
+dictionary, synonym map, setting inference) remain active:
+
+.. code-block:: text
+
+   WARNING  biometaharmonizer.one_health:
+     rapidfuzz not installed; fuzzy fallback disabled.
+     pip install rapidfuzz>=3.0.0
+
+Records that would have been classified by fuzzy matching alone receive
+``one_health_category = "Unclassified"`` when ``rapidfuzz`` is absent.
+
+Text Preprocessing Pipeline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Before any category lookup the classifier runs the following preprocessing
+steps on every value, in order:
+
+1. **Null check** — values matching ``NULL_PATTERNS`` return ``Unclassified``
+   immediately.
+2. **Underscore normalization** — underscores are replaced with spaces
+   (e.g. ``"Environmental_bathroom"`` → ``"Environmental bathroom"``).
+3. **Institution/culture-collection stripping** — values that contain
+   institution keywords (``university``, ``laboratory``, ``hospital``, etc.)
+   or match patterns from ``institution_patterns`` / ``culture_collection_prefixes``
+   in the dictionary have those tokens removed. If nothing remains after
+   stripping, ``Unclassified`` is returned.
+4. **"Animal origin" pattern** — ``"a <specimen> of <animal> origin"``
+   patterns are resolved directly via ``host_to_category`` before
+   abbreviation expansion.
+5. **Abbreviation expansion** (``abbreviation_map``) — tokens matching
+   entries in the ``abbreviation_map`` dictionary section are expanded to
+   their canonical forms (e.g. ``"CSF"`` → ``"cerebrospinal fluid"``,
+   ``"GIT"`` → ``"gastrointestinal tract"``).
+6. **Synonym normalization** (``synonym_map``) — multi-word phrases matching
+   entries in the ``synonym_map`` dictionary section are replaced with a
+   canonical form (e.g. ``"clinical isolate"`` → ``"clinical"``,
+   ``"gut flora"`` → ``"intestinal microbiota"``) using longest-match-first
+   ordering.
+7. **Processing term extraction** — terms in ``processing_terms`` (e.g.
+   ``"frozen"``, ``"lyophilized"``) are detected and stored in
+   ``one_health_processing``; the matched token is removed from the working
+   string so it does not interfere with category matching.
+8. **Setting term extraction** — terms in ``setting_patterns`` (e.g.
+   ``"hospital"``, ``"clinical"``) are detected and stored in
+   ``one_health_setting``; the matched token is removed from the working
+   string.
+
+Classification Layers
+~~~~~~~~~~~~~~~~~~~~~
+
+After preprocessing, the working string passes through classification in
+this priority order:
+
+1. **Tier1 pattern matching** — compiled regex patterns from
+   ``tier1_patterns`` in the dictionary, applied in the order defined by
+   ``tier1_order``. Returns the first matching category.
+2. **Fuzzy matching** (``rapidfuzz``) — if no tier1 pattern matched and
+   ``rapidfuzz`` is available, ``WRatio`` similarity is computed against the
+   full ``ontology_map`` corpus (filtered to remove ambiguous terms). The
+   best match above ``fuzzy_threshold`` is returned.
+3. **Unclassified** — if neither layer produces a result.
+
 **Valid output categories for** ``one_health_category``:
 
 - ``Human`` — isolates from human clinical specimens or hosts
@@ -253,6 +359,59 @@ Python source.
 
 The ``one_health_category`` column is always a string; it is never ``NaN``.
 Unclassifiable records receive the string ``"Unclassified"``.
+
+Multi-field Evidence Integration (``classify_multi_field``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`~biometaharmonizer.one_health.OneHealthClassifier.classify_multi_field`
+runs a two-pass evidence integration over up to six input fields:
+``isolation_source``, ``host``, ``env_medium``, ``env_local_scale``,
+``env_broad_scale``, ``sample_type``.
+
+Field weights (used in the confidence formula):
+
++----------------------+--------+
+| Field                | Weight |
++======================+========+
+| ``isolation_source`` | 1.00   |
++----------------------+--------+
+| ``host``             | 1.00   |
++----------------------+--------+
+| ``env_medium``       | 0.85   |
++----------------------+--------+
+| ``env_local_scale``  | 0.80   |
++----------------------+--------+
+| ``sample_type``      | 0.70   |
++----------------------+--------+
+| ``env_broad_scale``  | 0.50   |
++----------------------+--------+
+
+A **corroboration bonus** of 0.10 is added when two or more fields agree on
+the same category.
+
+**Setting-inference fallback:** If no field produces any positive category
+signal but a setting term was detected during preprocessing (e.g. the value
+contained ``"hospital"`` or ``"clinical"``), the setting is mapped to a
+category via ``setting_to_category`` and ``setting_confidence`` from the
+dictionary JSON. In this case ``one_health_source_field`` is set to the
+special value ``"setting_inference"`` to indicate that the category came
+from setting context rather than a direct biological term.
+
+**UserWarning for unknown field names:** If a keyword argument is passed to
+``classify_multi_field()`` that is not one of the six known field names, a
+``UserWarning`` is emitted (not a ``ValueError``) and the unknown series is
+ignored:
+
+.. code-block:: python
+
+   clf.classify_multi_field(
+       isolation_source=df["isolation_source"],
+       typo_field=df["host"],          # Unknown field name
+   )
+   # UserWarning: classify_multi_field received unknown field name 'typo_field'.
+   # Valid field names: ['env_broad_scale', 'env_local_scale', 'env_medium',
+   #                     'host', 'isolation_source', 'sample_type'].
+   # The series will be ignored.
 
 **Public methods:**
 
@@ -290,6 +449,19 @@ Confidence is discretized by ``discretize_confidence()``::
    >= 0.30  → "low"
    <  0.30  → "unresolved"
 
+LRU Cache (Performance)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The internal ``_classify_text()`` method is wrapped with
+``functools.lru_cache(maxsize=4096)`` per classifier instance. This means
+that if the same text value (e.g. ``"blood"``, ``"human"``, ``"clinical"``)
+appears in thousands of records, the full preprocessing and pattern-matching
+pipeline runs only **once** for that value. The result is reused for all
+subsequent occurrences in the same process.
+
+The cache is instance-bound: creating a new ``OneHealthClassifier()`` starts
+with an empty cache. The cache is not shared across instances or processes.
+
 Category and Example Isolation Sources
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -310,6 +482,51 @@ Category and Example Isolation Sources
      - soil, river sediment, wastewater, biofilm, air sample, drinking water, estuary water
    * - ``Unclassified``
      - terms with no resolvable category evidence
+
+Key Mapper
+----------
+
+Module: :mod:`biometaharmonizer.key_mapper`
+Class: :class:`~biometaharmonizer.key_mapper.KeyMapper`
+
+``KeyMapper`` is designed for **custom or non-ingestion workflows** where a
+DataFrame arrives from an external source with non-standard column names and
+needs to be mapped to the canonical ``BIOSAMPLE_SCHEMA``.
+
+.. warning::
+
+   ``map_columns()`` calls ``df.reindex(columns=BIOSAMPLE_SCHEMA)`` as its
+   final step. **Any column not present in ``BIOSAMPLE_SCHEMA`` is silently
+   dropped.** If you have extra computed columns you want to preserve, encode
+   them into ``_extra_attributes`` (as a JSON string) *before* calling
+   ``map_columns()``. A WARNING is logged listing the columns that will be
+   dropped:
+
+   .. code-block:: text
+
+      WARNING  biometaharmonizer.key_mapper:
+        map_columns(): 3 column(s) not in BIOSAMPLE_SCHEMA will be dropped
+        by reindex: ['custom_score', 'lab_id', 'project_tag'].
+        Encode them into _extra_attributes before calling map_columns()
+        to preserve them.
+
+``map_columns()`` performs three steps in order:
+
+1. **Synonym renaming** — for each column whose lowercase name appears in the
+   synonym lookup table, it is renamed to the corresponding standard key.
+   Columns whose names are already in ``_PROTECTED_COLUMNS`` (i.e. already
+   canonical) are skipped entirely to avoid accidental re-mapping.
+
+2. **Duplicate coalescing** (``_coalesce_duplicates()``) — if renaming
+   produces two columns with the same name, they are merged using
+   ``combine_first()``. The **leftmost** column (i.e. the column that
+   appeared first in the original DataFrame) has priority; its non-null
+   values are kept and the rightmost column's values fill in only where the
+   leftmost is null.
+
+3. **Schema reindex** — the DataFrame is reindexed to the exact column order
+   of ``BIOSAMPLE_SCHEMA``. Columns missing from the DataFrame are added with
+   all-null values; extra columns are dropped.
 
 Synonym Resolution
 ------------------
