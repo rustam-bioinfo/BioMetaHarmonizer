@@ -5,7 +5,7 @@ API Reference
 =============
 
 This page documents every public function and class exported by
-BioMetaHarmonizer v0.6.0. Parameter names, defaults, and types are
+BioMetaHarmonizer. Parameter names, defaults, and types are
 derived directly from the source code.
 
 biometaharmonizer.ingestion
@@ -45,7 +45,7 @@ biometaharmonizer.ingestion
    :param refresh_cache: When ``True``, delete and re-download the assembly
        summary files unconditionally. Defaults to ``False``.
    :type refresh_cache: bool
-   :returns: DataFrame conforming to the 51-column fixed schema defined by
+   :returns: DataFrame conforming to the 57-column fixed schema defined by
        ``_load_final_schema()``. Every column is initialized to ``None``/NaN
        for records that lack the attribute.
    :rtype: pandas.DataFrame
@@ -123,11 +123,11 @@ biometaharmonizer.output
        automatically.
    :type path: str or Path
    :param fmt: Output format. One of ``"csv"``, ``"tsv"``, ``"excel"``,
-       ``"parquet"``. Case-insensitive. Defaults to ``"csv"``.
+       ``"parquet"``, ``"jsonl"``. Case-insensitive. Defaults to ``"csv"``.
    :type fmt: str
    :returns: Resolved absolute path to the written file.
    :rtype: pathlib.Path
-   :raises ValueError: If ``fmt`` is not one of the four supported formats.
+   :raises ValueError: If ``fmt`` is not one of the five supported formats.
 
    .. code-block:: python
 
@@ -202,13 +202,12 @@ biometaharmonizer.geo_engine
 
    .. method:: parse(series) -> pd.DataFrame
 
-      Parse a Series of ``geo_loc_name`` strings into a six-column DataFrame.
+      Parse a Series of ``geo_loc_name`` strings into a five-column DataFrame.
 
       :param series: Series of ``geo_loc_name`` strings.
       :type series: pandas.Series
       :returns: DataFrame with columns: ``geo_country``, ``geo_region``,
-          ``geo_locality``, ``geo_iso3166``, ``geo_sea_ocean``,
-          ``geo_loc_raw``.
+          ``geo_locality``, ``geo_iso3166``, ``geo_sea_ocean``.
       :rtype: pandas.DataFrame
 
    .. code-block:: python
