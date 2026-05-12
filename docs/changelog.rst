@@ -15,16 +15,15 @@ v0.6.0 — 2025
 Added
 ~~~~~
 
-- **Fixed 51-column output schema** defined in ``_load_final_schema()``
-  (``ingestion.py``). Every record is pre-initialised with all 51 columns so
+- **Fixed 57-column output schema** defined in ``_load_final_schema()``
+  (``ingestion.py``). Every record is pre-initialised with all 57 columns so
   downstream code never needs to handle missing columns.
 
 - **GeoEngine** (``geo_engine.py``) — structured parsing of ``geo_loc_name``
-  strings into six output columns: ``geo_country``, ``geo_region``,
-  ``geo_locality``, ``geo_iso3166``, ``geo_sea_ocean``, ``geo_loc_raw``.
+  strings into five output columns: ``geo_country``, ``geo_region``,
+  ``geo_locality``, ``geo_iso3166``, ``geo_sea_ocean``.
   Includes ISO 3166-1 resolution via ``pycountry``, UK sub-country handling,
-  country alias table, historical country detection, ocean/sea lookup, and
-  coordinate-only entry detection.
+  country alias table, historical country detection, and ocean/sea lookup.
 
 - **DateEngine** (``date_engine.py``) — ISO 8601 truncated date parsing with
   seven range-detection patterns applied before ``dateutil`` to prevent silent
@@ -36,7 +35,8 @@ Added
   ``classify()``, ``classify_joint()``, ``classify_with_confidence()``, and
   ``classify_multi_field()`` methods. Confidence model with ``high``,
   ``medium``, ``low``, and ``unresolved`` evidence levels. Optional
-  ``rapidfuzz`` fuzzy fallback layer.
+  ``rapidfuzz`` fuzzy fallback layer. Valid output categories: ``Human``,
+  ``Animal``, ``Plant``, ``Food``, ``Environmental``, ``Unclassified``.
 
 - **Antibiogram extraction** (``_parse_antibiogram()`` in ``ingestion.py``) —
   automatic parsing of ``<Table class="Antibiogram.1.0">`` XML tables from
@@ -67,11 +67,13 @@ Added
   custom/non-ingestion workflows using the shared synonym lookup.
 
 - **Output module** (``output.py``) — ``write()`` and ``write_summary()``
-  functions supporting CSV, TSV, Excel (openpyxl), and Parquet (pyarrow).
+  functions supporting CSV, TSV, Excel (openpyxl), Parquet (pyarrow), and
+  JSONL output formats.
 
 - **CLI** (``cli.py``) — ``biometaharmonizer run`` subcommand with full
-  pipeline: ingest → key-map → date/geo/One Health → output. Supports format
-  auto-inference from file extension, comma-separated accession input,
+  pipeline: ingest → key-map → date/geo/One Health → output. Supports
+  one or more simultaneous output formats (``--format csv tsv excel jsonl``),
+  format auto-inference from file extension, comma-separated accession input,
   ``--summary`` fill-rate output, ``--refresh-cache`` flag.
 
 - **``build_dictionaries.py`` script** — builds ``one_health_dictionaries.json``
@@ -112,6 +114,12 @@ Changed
 
 - Assembly summary files are now read with ``functools.lru_cache`` keyed on
   path and ``mtime`` to avoid redundant disk reads within a session.
+
+- **Removed ``Aquatic``, ``Wildlife``, and ``Lab`` One Health categories.**
+  These values are no longer emitted by ``OneHealthClassifier``. Lab signals
+  are captured in the ``one_health_processing`` and ``one_health_setting``
+  columns instead. Aquatic and Wildlife signals are subsumed by
+  ``Environmental`` and ``Animal`` respectively.
 
 Fixed
 ~~~~~
