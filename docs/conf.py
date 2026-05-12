@@ -10,13 +10,19 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
+    "sphinx_autodoc_typehints",
 ]
 
 html_theme = "sphinx_rtd_theme"
 
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+
+html_static_path = []
+templates_path = []
+
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "pandas": ("https://pandas.pydata.org/docs", None),
+    "pandas": ("https://pandas.pydata.org/docs/", None),
 }
 
 autodoc_default_options = {
