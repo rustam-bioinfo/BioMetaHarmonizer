@@ -3,6 +3,7 @@
 [![version](https://img.shields.io/badge/version-0.6.0-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
+[![PyPI](https://img.shields.io/pypi/v/biometaharmonizer)](https://pypi.org/project/biometaharmonizer/)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rustam-bioinfo.github.io/BioMetaHarmonizer/)
 
 A Python package for fetching, parsing, and standardizing NCBI BioSample metadata for large-scale genomic epidemiology.
@@ -21,13 +22,21 @@ Records submitted under NCBI pathogen packages (e.g. `Pathogen.cl.1.0`, `Pathoge
 
 ## Installation
 
+Install from PyPI:
+
+```bash
+pip install biometaharmonizer
+```
+
+Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
+
+**Development install** (editable, from source):
+
 ```bash
 git clone https://github.com/rustam-bioinfo/BioMetaHarmonizer.git
 cd BioMetaHarmonizer
 pip install -e .
 ```
-
-Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
 
 The package ships with a minimal hand-curated `one_health_dictionaries.json`. For production-quality One Health classification — in particular, full NCBI taxonomy coverage of host species names — you should rebuild this file before use. See [Rebuilding schema files](#rebuilding-schema-files).
 
