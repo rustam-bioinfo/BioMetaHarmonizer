@@ -38,7 +38,7 @@ cd BioMetaHarmonizer
 pip install -e .
 ```
 
-The package ships with a minimal hand-curated one_health_dictionaries.json. For complete One Health classification — in particular, full NCBI taxonomy coverage of host species names — rebuild this file before use. See [Rebuilding schema files](#rebuilding-schema-files).
+The package ships with a minimal hand-curated `one_health_dictionaries.json`. For complete One Health classification — in particular, full NCBI taxonomy coverage of host species names — rebuild this file before use. See [Rebuilding schema files](#rebuilding-schema-files).
 
 ---
 
