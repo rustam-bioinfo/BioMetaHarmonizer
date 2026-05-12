@@ -130,7 +130,7 @@ Geo Engine
 Module: :mod:`biometaharmonizer.geo_engine`
 Class: :class:`~biometaharmonizer.geo_engine.GeoEngine`
 
-The geo engine parses NCBI ``geo_loc_name`` strings into six structured output
+The geo engine parses NCBI ``geo_loc_name`` strings into five structured output
 columns. The expected input format is ``"Country: Region, Locality"``; the
 fallback format is ``"Country, Locality"`` (no colon).
 
@@ -142,11 +142,9 @@ fallback format is ``"Country, Locality"`` (no colon).
 - ``geo_iso3166`` — ISO 3166-1 alpha-2 country code (e.g. ``"GB"``), or the
   string ``"HISTORICAL"`` for defunct countries, or NaN if not resolvable
 - ``geo_sea_ocean`` — ocean or sea name for marine samples (e.g. ``"Pacific Ocean"``)
-- ``geo_loc_raw`` — original submitted string, set **only** for coordinate-only
-  entries (e.g. ``"45.3 N, 30.1 E"``); NaN for all successfully parsed records
 
 The public method is :meth:`~biometaharmonizer.geo_engine.GeoEngine.parse`,
-which accepts a :class:`pandas.Series` and returns a six-column
+which accepts a :class:`pandas.Series` and returns a five-column
 :class:`pandas.DataFrame`.
 
 Special handling rules:
@@ -161,13 +159,13 @@ Special handling rules:
 - **Historical countries:** ``"USSR"``, ``"Soviet Union"``, ``"Yugoslavia"``,
   ``"Czechoslovakia"``, ``"German Democratic Republic"``, ``"Zaire"``, and
   others are tagged ``geo_iso3166 = "HISTORICAL"`` and a WARNING is logged.
-- **Coordinate-only entries:** values matching the pattern
-  ``"[±]DDD.DDD [NS], [±]DDD.DDD [EW]"`` are stored in ``geo_loc_raw``.
+- **Coordinate-only entries:** values matching the coordinate pattern are not
+  parsed into geo columns and return all-NaN geo outputs.
 - **Parenthetical qualifiers:** trailing parenthetical suffixes such as
   ``"United Kingdom (England, Wales & N. Ireland)"`` are stripped before
   country lookup so the comma inside the parentheses does not break parsing.
 - **Ocean/sea lookup:** when the country token (after stripping parenthetical
-  qualifiers) matches one of the 15 named ocean/sea entries, the value is
+  qualifiers) matches one of the named ocean/sea entries, the value is
   stored in ``geo_sea_ocean`` instead of ``geo_country``.
 
 Geo Parsing Examples
@@ -248,12 +246,9 @@ Python source.
 
 - ``Human`` — isolates from human clinical specimens or hosts
 - ``Animal`` — domestic and companion animals, livestock, veterinary samples
-- ``Aquatic`` — aquatic animal hosts and water-column samples
-- ``Wildlife`` — wild-animal isolates (birds, rodents, bats, wild ungulates)
 - ``Plant`` — plant material, rhizosphere, phytopathological samples
 - ``Food`` — food products, ingredients, food-processing environments
 - ``Environmental`` — soil, sediment, air, water, biofilms not otherwise classified
-- ``Lab`` — culture collections, ATCC strains, in-vitro/in-vivo laboratory samples
 - ``Unclassified`` — no category could be determined with sufficient confidence
 
 The ``one_health_category`` column is always a string; it is never ``NaN``.
@@ -307,18 +302,14 @@ Category and Example Isolation Sources
      - blood, urine, cerebrospinal fluid, rectal swab, wound, surgical site, sputum, Homo sapiens
    * - ``Animal``
      - bovine feces, swine nasal swab, chicken, cow, dog, pig, horse fecal, poultry litter, Bos taurus
-   * - ``Aquatic``
-     - fish, salmon, shrimp, aquaculture water, trout, tilapia, oyster, clam
-   * - ``Wildlife``
-     - wild bird, bat, rodent, deer, wild boar, migratory bird, fox, raccoon
    * - ``Plant``
      - plant root, rhizosphere, leaf surface, tomato, rice, wheat stem, Arabidopsis
    * - ``Food``
      - ground beef, raw milk, cheese, lettuce, retail chicken, food processing surface, ready-to-eat meat
    * - ``Environmental``
      - soil, river sediment, wastewater, biofilm, air sample, drinking water, estuary water
-   * - ``Lab``
-     - ATCC strain, in vitro culture, laboratory stock, type strain, passage culture
+   * - ``Unclassified``
+     - terms with no resolvable category evidence
 
 Synonym Resolution
 ------------------
