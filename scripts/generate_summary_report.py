@@ -967,35 +967,29 @@ function buildTable() {
 
 // ── Accession link rules ──────────────────────────────────────────────────
 // Each entry: [regex, urlFn]
-// Ordered from most-specific to least-specific to avoid prefix collisions.
-// All INSDC accession families are covered:
-//   BioSample : SAMN / SAME / SAMA / SAMD
-//   Assembly  : GCF_ / GCA_
-//   SRA run   : SRR / ERR / DRR
-//   SRA expt  : SRX / ERX / DRX
-//   SRA sample: SRS / ERS / DRS
-//   BioProject: PRJNA / PRJEB / PRJDB
+// BioSample: SAM[A-Z]+\d+ covers all INSDC prefixes of any length:
+//   SAMN (NCBI), SAME (EBI), SAMA (DDBJ), SAMD (DDBJ), SAMEA (EBI long form)
 const ACCESSION_RULES = [
-  // BioSample (NCBI: SAMN/SAME/SAMA; DDBJ: SAMD)
-  [/^SAM[NEAD]\d+$/,          v => 'https://www.ncbi.nlm.nih.gov/biosample/' + v],
+  // BioSample — SAM followed by one or more uppercase letters then digits
+  [/^SAM[A-Z]+\d+$/,           v => 'https://www.ncbi.nlm.nih.gov/biosample/' + v],
   // Assembly — RefSeq (GCF) and GenBank (GCA)
-  [/^GC[FA]_\d+\.\d+$/,       v => 'https://www.ncbi.nlm.nih.gov/datasets/genome/' + v],
+  [/^GC[FA]_\d+\.\d+$/,        v => 'https://www.ncbi.nlm.nih.gov/datasets/genome/' + v],
   // SRA / ENA / DDBJ runs
-  [/^SRR\d+$/,                 v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
-  [/^ERR\d+$/,                 v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
-  [/^DRR\d+$/,                 v => 'https://ddbj.nig.ac.jp/resource/sra-run/' + v],
+  [/^SRR\d+$/,                  v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
+  [/^ERR\d+$/,                  v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^DRR\d+$/,                  v => 'https://ddbj.nig.ac.jp/resource/sra-run/' + v],
   // SRA / ENA / DDBJ experiments
-  [/^SRX\d+$/,                 v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
-  [/^ERX\d+$/,                 v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
-  [/^DRX\d+$/,                 v => 'https://ddbj.nig.ac.jp/resource/sra-experiment/' + v],
+  [/^SRX\d+$/,                  v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
+  [/^ERX\d+$/,                  v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^DRX\d+$/,                  v => 'https://ddbj.nig.ac.jp/resource/sra-experiment/' + v],
   // SRA / ENA / DDBJ samples
-  [/^SRS\d+$/,                 v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
-  [/^ERS\d+$/,                 v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
-  [/^DRS\d+$/,                 v => 'https://ddbj.nig.ac.jp/resource/sra-sample/' + v],
+  [/^SRS\d+$/,                  v => 'https://www.ncbi.nlm.nih.gov/sra/' + v],
+  [/^ERS\d+$/,                  v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^DRS\d+$/,                  v => 'https://ddbj.nig.ac.jp/resource/sra-sample/' + v],
   // BioProject
-  [/^PRJNA\d+$/,               v => 'https://www.ncbi.nlm.nih.gov/bioproject/' + v],
-  [/^PRJEB\d+$/,               v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
-  [/^PRJDB\d+$/,               v => 'https://ddbj.nig.ac.jp/resource/bioproject/' + v],
+  [/^PRJNA\d+$/,                v => 'https://www.ncbi.nlm.nih.gov/bioproject/' + v],
+  [/^PRJEB\d+$/,                v => 'https://www.ebi.ac.uk/ena/browser/view/' + v],
+  [/^PRJDB\d+$/,                v => 'https://ddbj.nig.ac.jp/resource/bioproject/' + v],
 ];
 
 function makeLink(v) {
