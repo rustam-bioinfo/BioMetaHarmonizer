@@ -117,7 +117,7 @@ class GeoEngine:
     #   BQ  Bonaire, Sint Eustatius and Saba -- single ISO entry for all three
     #       Caribbean special municipalities of the Netherlands.
     _COUNTRY_ALIASES = {
-        # Aliases that differ from pycountry canonical names
+        # --- Aliases that differ from pycountry canonical names ---
         "turkey": "TR",
         "t\u00fcrkiye": "TR",
         "namibia": "NA",
@@ -167,6 +167,107 @@ class GeoEngine:
         "timor-leste": "TL",
         # Kosovo: XK is a user-assigned code (not ISO 3166-1 official)
         "kosovo": "XK",
+
+        # --- Long diplomatic names with no common_name in pycountry ---
+        # pycountry name: "Brunei Darussalam"
+        "brunei": "BN",
+        "brunei darussalam": "BN",
+        # pycountry name: "Bolivia, Plurinational State of"
+        "bolivia": "BO",
+        # pycountry name: "Venezuela, Bolivarian Republic of"
+        "venezuela": "VE",
+        # pycountry name: "Tanzania, United Republic of"
+        "tanzania": "TZ",
+        # pycountry name: "Moldova, Republic of"
+        "moldova": "MD",
+        "republic of moldova": "MD",
+        # pycountry name: "Syrian Arab Republic"
+        "syria": "SY",
+        # pycountry name: "Lao People's Democratic Republic"
+        "laos": "LA",
+        "lao pdr": "LA",
+        "lao": "LA",
+        # pycountry name: "Korea, Democratic People's Republic of"
+        "north korea": "KP",
+        "dprk": "KP",
+        # pycountry name: "Korea, Republic of"
+        "south korea": "KR",
+        "republic of korea": "KR",
+        # pycountry name: "Viet Nam"
+        "vietnam": "VN",
+        # pycountry name: "Iran, Islamic Republic of"
+        "iran": "IR",
+        # pycountry name: "Taiwan, Province of China"
+        # (also handled by special case in _resolve_iso; alias is belt-and-braces)
+        "taiwan": "TW",
+
+        # --- SAR / territory variants common in NCBI BioSample ---
+        "hong kong": "HK",
+        "hong kong sar": "HK",
+        "hong kong sar, china": "HK",
+        "macau": "MO",
+        "macao": "MO",
+        "macao sar": "MO",
+
+        # --- Renamed countries (old names still appear in legacy records) ---
+        # pycountry name: "Cabo Verde"
+        "cape verde": "CV",
+        # pycountry name: "Eswatini" (renamed from Swaziland in 2018)
+        "swaziland": "SZ",
+        "eswatini": "SZ",
+
+        # --- Common English names for countries with non-English official names ---
+        # pycountry name: "Cote d'Ivoire"
+        "ivory coast": "CI",
+        "cote d'ivoire": "CI",
+        "cote divoire": "CI",
+        # pycountry name: "Reunion"
+        "reunion": "RE",
+        # pycountry name: "Western Sahara"
+        "western sahara": "EH",
+        "w. sahara": "EH",
+
+        # --- Short abbreviations and alternative names common in NCBI BioSample ---
+        "usa": "US",
+        "united states": "US",
+        "united states of america": "US",
+        "uk": "GB",
+        "great britain": "GB",
+        "uae": "AE",
+        "united arab emirates": "AE",
+
+        # --- Abbreviated / dot-notation names ---
+        "solomon islands": "SB",
+        "solomon is.": "SB",
+        "falkland islands": "FK",
+        "falklands": "FK",
+        "falkland is.": "FK",
+        "central african republic": "CF",
+        "central african rep.": "CF",
+        "car": "CF",
+        "dominican republic": "DO",
+        "dominican rep.": "DO",
+        "equatorial guinea": "GQ",
+        "eq. guinea": "GQ",
+        "south sudan": "SS",
+
+        # --- Diacritic-stripped variants ---
+        # pycountry name: "\u00c5land Islands"
+        "aland islands": "AX",
+        "\u00e5land islands": "AX",
+        # pycountry name: "S\u00e3o Tom\u00e9 and Pr\u00edncipe"
+        "sao tome and principe": "ST",
+        "s\u00e3o tom\u00e9 and pr\u00edncipe": "ST",
+
+        # --- Island territories with long or unusual pycountry names ---
+        # pycountry name: "Saint Barth\u00e9lemy"
+        "saint barthelemy": "BL",
+        "st barthelemy": "BL",
+        "st. barthelemy": "BL",
+        # pycountry name: "Saint Martin (French part)"
+        "saint martin": "MF",
+        "st martin": "MF",
+        "st. martin": "MF",
     }
 
     _HISTORICAL_COUNTRIES = {
