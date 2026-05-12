@@ -446,7 +446,7 @@ The HTML report is produced by ``generate_full_html_report()`` and includes:
 
 **Metrics computed** (``compute_fill_rates()`` and ``generate_json_metrics()``):
 
-- Per-column ``non_null_count``, ``null_count``, ``fill_pct`` for all 51 schema
+- Per-column ``non_null_count``, ``null_count``, ``fill_pct`` for all 57 schema
   columns.
 - Category-level average fill rates (using ``COLUMN_CATEGORIES`` groupings).
 - Overall dataset completeness summary.
