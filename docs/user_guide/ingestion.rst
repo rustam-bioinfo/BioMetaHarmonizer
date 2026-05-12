@@ -14,7 +14,7 @@ Overview
 data retrieval. It accepts a list of NCBI accessions (or a path to a text file
 containing them), fetches the corresponding BioSample XML records from NCBI
 Entrez, parses and harmonizes each record, and returns a
-:class:`pandas.DataFrame` conforming to the fixed 51-column output schema
+:class:`pandas.DataFrame` conforming to the fixed 57-column output schema
 defined in ``_load_final_schema()``.
 
 ID Classification
