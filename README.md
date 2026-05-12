@@ -80,7 +80,7 @@ biometaharmonizer run \
 ---
 ## Output columns
 
-The output DataFrame contains **58 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
+The output DataFrame contains **57 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
 
 | # | Column | Source | Description |
@@ -141,8 +141,7 @@ The output DataFrame contains **58 columns**. Columns with no data for a given d
 | 54 | `status_date` | BioSample XML | Date current status was assigned |
 | 55 | `title` | BioSample XML | Free-text title of the BioSample record |
 | 56 | `description_comment` | BioSample XML | Free-text description or comment block |
-| 57 | `sample_type_detected` | OneHealthClassifier | Detected sample type: `isolate`, `MAG`, `metagenome`, `single-cell`, or `unknown` |
-| 58 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
+| 57 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
 
 ---
 
