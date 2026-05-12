@@ -4,7 +4,7 @@
 Quickstart
 ==========
 
-All three examples below use the actual public API of BioMetaHarmonizer v0.6.0.
+All three examples below use the actual public API of BioMetaHarmonizer.
 Every parameter name matches the signature of :func:`biometaharmonizer.ingestion.ingest`
 exactly as it appears in the source code.
 
@@ -23,10 +23,10 @@ Fetch three NCBI BioSample records and save the result to a CSV file.
    )
 
    bmh.write(df, "output.csv", fmt="csv")
-   print(df.shape)         # (3, 51)
+   print(df.shape)         # (3, 57)
    print(df.columns.tolist())
 
-The returned DataFrame always has exactly **51 columns** in the order listed
+The returned DataFrame always has exactly **57 columns** in the order listed
 in :ref:`schema_reference`. Every column is pre-initialised to ``None``/NaN
 for records that do not carry that attribute.
 
@@ -46,7 +46,7 @@ authentication, override the cache directory, and tune batch sizes.
        api_key="YOUR_NCBI_API_KEY",
        cache_dir="/data/bmh_cache",      # Custom cache for assembly summary files
        fetch_batch_size=500,             # Records per efetch request (default: 200)
-       esearch_batch_size=200,           # Accessions per esearch term (default: 100)
+       esearch_batch_size=200,           # Overrides the module default of 100; CLI default is 200
        refresh_cache=False,              # Set True to force re-download of assembly index
    )
 
@@ -96,28 +96,48 @@ Output Columns
 --------------
 
 The fixed output schema (returned by every ``ingest()`` call) contains
-exactly **51 columns** in the following order:
+exactly **57 columns** in the following order (matching ``_load_final_schema()``):
 
 .. code-block:: python
 
    [
+       # Block 1 — Record identity
        "biosample_accession", "biosample_id", "sra_accession",
        "bioproject_accession", "assembly_accession_refseq",
        "assembly_accession_genbank", "sample_name_id",
+       # Block 2 — Taxonomy
        "taxonomy_id", "taxonomy_name", "organism_name",
-       "collection_date", "collection_date_range",
+       # Block 3 — Specimen identity
+       "isolate", "strain", "sub_strain",
+       "serotype", "serovar", "genotype", "culture_collection",
+       # Block 4 — Host
+       "host", "host_disease", "host_age", "host_sex",
+       "host_tissue_sampled",
+       # Block 5 — Isolation source + environmental context
+       "isolation_source", "sample_type",
+       "env_broad_scale", "env_local_scale", "env_medium",
+       # Block 6 — Geography
        "geo_loc_name", "lat_lon",
        "geo_country", "geo_region", "geo_locality",
-       "geo_iso3166", "geo_sea_ocean", "geo_loc_raw",
-       "host", "host_disease", "host_age", "host_sex",
-       "host_tissue_sampled", "isolation_source", "sample_type",
-       "one_health_category", "isolate", "strain", "sub_strain",
-       "serotype", "serovar", "genotype", "culture_collection",
-       "outbreak", "env_broad_scale", "env_local_scale", "env_medium",
-       "sequencing_method", "assembly_method", "collected_by",
+       "geo_iso3166", "geo_sea_ocean",
+       # Block 7 — Temporal
+       "collection_date", "collection_date_range",
+       # Block 8 — One Health (derived)
+       "one_health_category", "one_health_term", "one_health_confidence",
+       "one_health_evidence_level", "one_health_processing",
+       "one_health_setting", "one_health_source_field",
+       # Block 9 — Epidemiology
+       "outbreak",
+       # Block 10 — Sequencing / assembly
+       "sequencing_method", "assembly_method",
+       # Block 11 — Collection provenance
+       "collected_by",
+       # Block 12 — NCBI administrative
        "ncbi_package", "submission_date", "last_update",
        "publication_date", "access", "status", "status_date",
-       "title", "description_comment", "_extra_attributes",
+       "title", "description_comment",
+       # Overflow
+       "_extra_attributes",
    ]
 
 See :ref:`schema_reference` for the full description of every column.
