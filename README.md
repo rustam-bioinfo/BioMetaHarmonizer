@@ -95,7 +95,7 @@ The output DataFrame contains **57 columns**. Columns with no data for a given d
 | 9 | `taxonomy_name` | BioSample XML | Taxon name for the assigned taxonomy_id |
 | 10 | `organism_name` | BioSample XML | Organism name from `<OrganismName>`; falls back to taxonomy_name |
 | 11 | `collection_date` | BioSample attribute → DateEngine | Collection date normalized to ISO 8601 |
-| 12 | `collection_date_range` | DateEngine | Inferred date range when only year or year-month was provided |
+| 12 | `collection_date_range` | DateEngine | Verbatim original string for range/approximate date inputs; NaN for point dates |
 | 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
 | 14 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
 | 15 | `geo_country` | GeoEngine | Country resolved from `geo_loc_name` |
@@ -110,24 +110,24 @@ The output DataFrame contains **57 columns**. Columns with no data for a given d
 | 24 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
 | 25 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
 | 26 | `sample_type` | BioSample attribute | Sample type or specimen classification |
-| 27 | `one_health_category` | OneHealthClassifier | One of: Human, Animal, Aquatic, Wildlife, Plant, Food, Environmental, Lab, Unclassified |
-| 28 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
-| 29 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
-| 30 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
-| 31 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
-| 32 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`), if any |
-| 33 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
-| 34 | `isolate` | BioSample attribute | Isolate identifier |
-| 35 | `strain` | BioSample attribute | Strain designation |
-| 36 | `sub_strain` | BioSample attribute | Sub-strain designation |
-| 37 | `serotype` | BioSample attribute | Serotype |
-| 38 | `serovar` | BioSample attribute | Serovar |
-| 39 | `genotype` | BioSample attribute | Genotype or sequence type |
-| 40 | `culture_collection` | BioSample attribute | Culture collection identifier |
-| 41 | `outbreak` | BioSample attribute | Outbreak identifier |
-| 42 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
-| 43 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
-| 44 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 27 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
+| 28 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
+| 29 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 30 | `one_health_category` | OneHealthClassifier | One of: `Human`, `Animal`, `Plant`, `Food`, `Environmental`, `Unclassified` |
+| 31 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
+| 32 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
+| 33 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
+| 34 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
+| 35 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`) |
+| 36 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
+| 37 | `isolate` | BioSample attribute | Isolate identifier |
+| 38 | `strain` | BioSample attribute | Strain designation |
+| 39 | `sub_strain` | BioSample attribute | Sub-strain designation |
+| 40 | `serotype` | BioSample attribute | Serotype |
+| 41 | `serovar` | BioSample attribute | Serovar |
+| 42 | `genotype` | BioSample attribute | Genotype or sequence type |
+| 43 | `culture_collection` | BioSample attribute | Culture collection identifier |
+| 44 | `outbreak` | BioSample attribute | Outbreak identifier |
 | 45 | `sequencing_method` | BioSample attribute | Sequencing platform |
 | 46 | `assembly_method` | BioSample attribute | Genome assembly software |
 | 47 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
@@ -271,7 +271,7 @@ df = ingest("ids.txt", email="you@example.com", api_key="YOUR_KEY")
 
 ## Geospatial parsing
 
-`GeoEngine` splits `geo_loc_name` into `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, and `geo_sea_ocean`.
+`GeoEngine` splits `geo_loc_name` into five structured columns: `geo_country`, `geo_region`, `geo_locality`, `geo_iso3166`, and `geo_sea_ocean`.
 
 The parser recognizes two input formats:
 
@@ -317,7 +317,7 @@ Handling notes:
 
 ## One Health classification
 
-`OneHealthClassifier` loads all biological knowledge from `schemas/one_health_dictionaries.json` and assigns each record one of nine categories: **Human**, **Animal**, **Aquatic**, **Wildlife**, **Plant**, **Food**, **Environmental**, **Lab**, **Unclassified**.
+`OneHealthClassifier` loads all biological knowledge from `schemas/one_health_dictionaries.json` and assigns each record one of six categories: **Human**, **Animal**, **Plant**, **Food**, **Environmental**, **Unclassified**.
 
 `classify_multi_field()` accepts up to six named `pd.Series` and returns a DataFrame with seven columns:
 
