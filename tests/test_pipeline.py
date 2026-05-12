@@ -529,9 +529,11 @@ class TestRunFunction:
     def test_write_failure_returns_2(self, tmp_path, ids_file, minimal_df):
         out = tmp_path / "out.csv"
         args = _make_run_args(tmp_path, input=str(ids_file), output=str(out))
+        # write is imported locally inside _run, so we must patch it at its
+        # definition site (biometaharmonizer.output), not on the cli module.
         with patch("biometaharmonizer.ingestion.set_email"), \
              patch("biometaharmonizer.ingestion.ingest", return_value=minimal_df.copy()), \
-             patch("biometaharmonizer.cli.write", side_effect=OSError("disk full")):
+             patch("biometaharmonizer.output.write", side_effect=OSError("disk full")):
             code = _run(args)
         assert code == 2
 

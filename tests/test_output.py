@@ -23,6 +23,7 @@ from biometaharmonizer.output import write, write_summary
 
 @pytest.fixture
 def sample_df():
+    """Three rows where organism_name is None for the THIRD row (index 2)."""
     return pd.DataFrame({
         "biosample_accession": ["SAMN001", "SAMN002", "SAMN003"],
         "organism_name":       ["Escherichia coli", "Salmonella enterica", None],
@@ -99,9 +100,16 @@ class TestWriteCSV:
         loaded = pd.read_csv(out, encoding="utf-8")
         assert loaded.iloc[0]["geo_loc_name"] == "Россия"
 
-    def test_none_values_written_as_empty_cell(self, tmp_path, sample_df):
+    def test_none_values_written_as_empty_cell(self, tmp_path):
+        """A None in organism_name must survive the CSV round-trip as NaN."""
+        # Use a DataFrame where organism_name is explicitly None for one row
+        # and no taxonomy_name or fallback column is present to backfill it.
+        df = pd.DataFrame({
+            "biosample_accession": ["SAMN001", "SAMN002"],
+            "organism_name":       ["Escherichia coli", None],
+        })
         out = tmp_path / "out.csv"
-        write(sample_df, out, fmt="csv")
+        write(df, out, fmt="csv")
         loaded = pd.read_csv(out)
         assert pd.isna(loaded.iloc[1]["organism_name"])
 
