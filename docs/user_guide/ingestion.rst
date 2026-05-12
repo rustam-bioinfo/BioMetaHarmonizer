@@ -209,7 +209,8 @@ Batch Size Constants
 +---------------------+---------+-------------------------------------+
 | ``_ESEARCH_BATCH``  | 100     | Accessions per ``esearch`` term     |
 |                     |         | (BioSample and elink paths).        |
-|                     |         | Override via ``esearch_batch_size``.|+---------------------+---------+-------------------------------------+
+|                     |         | Override via ``esearch_batch_size``.|
++---------------------+---------+-------------------------------------+
 
 Higher ``fetch_batch_size`` values reduce HTTP round trips but produce larger
 XML payloads per response and may increase per-request latency.
