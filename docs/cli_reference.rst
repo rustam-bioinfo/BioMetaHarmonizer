@@ -32,7 +32,7 @@ Runs the full harmonization pipeline: ingest → key-map → date/geo/One Health
        --output  <FILE> \
        [--api-key <KEY>] \
        [--cache-dir <DIR>] \
-       [--format <FORMAT>] \
+       [--format <FORMAT> [<FORMAT> ...]] \
        [--summary <FILE>] \
        [--fetch-batch-size <N>] \
        [--esearch-batch-size <N>] \
@@ -54,7 +54,7 @@ Accepted accession prefixes: ``SAMN``, ``SAME``, ``SAMD`` (BioSample) or
 If ``--format`` is not specified, the output format is inferred from the
 file extension of ``--output``:
 
-.. list-table:: CLI flags
+.. list-table:: Format inference from file extension
    :header-rows: 1
 
    * - Extension
@@ -70,9 +70,19 @@ file extension of ``--output``:
    * - ``.xls``
      - ``excel``
    * - ``.parquet``
-     - | ``parquet``
+     - ``parquet``
+   * - ``.jsonl``
+     - ``jsonl``
    * - (other)
      - ``csv``
+
+**Multiple output formats:**
+
+``--format`` accepts one or more space-separated format names. When a single
+format is given the ``--output`` path is used as-is. When multiple formats
+are given the stem of ``--output`` is reused and the correct extension is
+appended for each format (e.g. ``--output out.csv --format csv tsv excel``
+produces ``out.csv``, ``out.tsv``, ``out.xlsx``).
 
 Flags
 -----
@@ -112,9 +122,9 @@ Flags
      - Assembly summary cache directory.
    * - ``--format``
      - ``-f``
-     - choice
+     - choice(s)
      - None
-     - Output format: ``csv``, ``tsv``, ``excel``, ``parquet``.
+     - Output format(s): ``csv``, ``tsv``, ``excel``, ``parquet``, ``jsonl``. One or more space-separated values.
    * - ``--summary``
      - —
      - str
@@ -126,7 +136,7 @@ Flags
      - 200
      - Records per efetch request.
    * - ``--esearch-batch-size``
-     - | —
+     - —
      - int
      - 200
      - Accessions per esearch term.
@@ -171,8 +181,8 @@ CLI Flag ↔ Python API Mapping
      - ``fetch_batch_size``
      - 200
    * - ``--esearch-batch-size``
-     - | ``esearch_batch_size``
-     - 100
+     - ``esearch_batch_size``
+     - 200
    * - ``--refresh-cache``
      - ``refresh_cache``
      - ``False``
@@ -220,6 +230,16 @@ Complete Invocation Examples
        -e your@email.com \
        -o out.csv
 
+**Example 4 — Multiple output formats at once:**
+
+.. code-block:: bash
+
+   biometaharmonizer run \
+       --input  ids.txt \
+       --email  your@email.com \
+       --output harmonized.csv \
+       --format csv tsv excel jsonl
+
 Log Output Format
 -----------------
 
@@ -239,13 +259,13 @@ For example:
    14:35:12  INFO     biometaharmonizer.ingestion: INGEST SUMMARY
    14:35:12  INFO     biometaharmonizer.ingestion:   Input IDs provided  : 1500
    14:35:12  INFO     biometaharmonizer.ingestion:   fetch_batch_size    : 200
-   14:35:12  INFO     biometaharmonizer.ingestion:   esearch_batch_size  : 100
+   14:35:12  INFO     biometaharmonizer.ingestion:   esearch_batch_size  : 200
    14:35:12  INFO     biometaharmonizer.ingestion:   Records in output   : 1498
    14:35:12  INFO     biometaharmonizer.ingestion:   bioproject_accession filled : 1350 / 1498
    14:35:12  INFO     biometaharmonizer.ingestion:   assembly_accession_refseq   filled : 1200 / 1498
    14:35:12  INFO     biometaharmonizer.ingestion:   assembly_accession_genbank  filled : 1100 / 1498
    14:35:12  INFO     biometaharmonizer.ingestion: ============================================================
    14:35:14  INFO     biometaharmonizer.cli: Writing output to harmonized.csv (format=csv)
-   Done. 1498 records x 51 columns -> harmonized.csv
+   Done. 1498 records x 57 columns -> harmonized.csv
 
 The final ``Done.`` line is printed to ``stdout``.
