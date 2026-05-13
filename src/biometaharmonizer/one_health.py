@@ -385,6 +385,10 @@ class OneHealthClassifier:
           pass over the concatenation of all non-null field values.
       #8  Per-category specificity overrides via "specificity_overrides" dict
           in the JSON, enabling curators to tune individual term scores.
+      #9  Category yield priority: in mixed-signal fields Animal yields to
+          Food, Environmental, Plant, and Human when any of those categories
+          also match (prevents animal ingredient names in food dishes or
+          environmental sample descriptions from overriding context).
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
@@ -703,8 +707,27 @@ class OneHealthClassifier:
         return host_cat, lookup_term
 
     # ------------------------------------------------------------------
-    # Improvement #3: multi-term voting within a single field value
+    # Improvement #3 + #9: multi-term voting with category yield priority
     # ------------------------------------------------------------------
+
+    # Priority for mixed-signal fields: lower number wins over higher.
+    # Animal yields to every other category when both have tier-1 matches
+    # in the same field value. This prevents animal ingredient/species names
+    # in food dish descriptions or environmental phrases from overriding the
+    # contextually dominant category.
+    # Examples fixed:
+    #   "barbecued chicken"        -> Food (Food beats Animal)
+    #   "shrimp farming water"     -> Environmental (Environmental beats Animal)
+    #   "cat grass plant"          -> Plant (Plant beats Animal)
+    #   "soil of feather dumping"  -> Environmental (Environmental beats Animal)
+    _CATEGORY_YIELD_PRIORITY: dict[str, int] = {
+        "Human":         1,
+        "Food":          2,
+        "Environmental": 3,
+        "Plant":         4,
+        "Animal":        5,
+        "Unclassified":  6,
+    }
 
     def _tier1_vote(self, working: str):
         """
@@ -712,8 +735,13 @@ class OneHealthClassifier:
         plurality-vote (category, best_term, best_specificity) tuple, or
         (None, None, 0.0) if no match.
 
-        Votes are weighted by per-term specificity.  Ties are broken by
-        choosing the longer matched term (more specific string).
+        Votes are weighted by per-term specificity.  In mixed-signal fields
+        (multiple categories matched), _CATEGORY_YIELD_PRIORITY determines
+        the winner: the category with the lowest priority number wins,
+        provided it has at least 0.50 aggregate specificity votes.
+        This prevents animal ingredient names in food dishes or environmental
+        sample descriptions from overriding the contextually dominant category
+        (Improvements #3 + #9).
         """
         votes: dict[str, float] = {}
         best_per_cat: dict[str, tuple[str, float]] = {}
@@ -730,7 +758,34 @@ class OneHealthClassifier:
         if not votes:
             return None, None, 0.0
 
-        winner = max(votes, key=lambda c: (votes[c], len(best_per_cat[c][0])))
+        if len(votes) == 1:
+            winner = next(iter(votes))
+        else:
+            # Mixed-signal field: apply yield priority.
+            # The category with the lowest priority number (most specific context)
+            # wins over Animal (priority 5) when it has >=0.50 aggregate votes.
+            # This avoids degenerate single-char / very short matches with 0.50
+            # specificity overriding a clearly dominant high-vote-weight category.
+            priority_winner = min(
+                votes,
+                key=lambda c: (
+                    self._CATEGORY_YIELD_PRIORITY.get(c, 99),
+                    -votes[c],
+                    -len(best_per_cat[c][0]),
+                ),
+            )
+            vote_winner = max(
+                votes,
+                key=lambda c: (votes[c], len(best_per_cat[c][0])),
+            )
+            if (
+                priority_winner != vote_winner
+                and votes[priority_winner] >= 0.50
+            ):
+                winner = priority_winner
+            else:
+                winner = vote_winner
+
         best_term, best_spec = best_per_cat[winner]
         return winner, best_term, best_spec
 
@@ -1228,7 +1283,7 @@ class OneHealthClassifier:
         working_clean = self._suppress_negated_spans(working)
 
         if working_clean:
-            # Improvement #3: collect all tier-1 matches and vote
+            # Improvements #3 + #9: collect all tier-1 matches and vote with yield priority
             winner_cat, winner_term, winner_spec = self._tier1_vote(working_clean)
             if winner_cat is not None:
                 return {
