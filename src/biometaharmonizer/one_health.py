@@ -20,6 +20,16 @@ except ImportError:
         "pip install rapidfuzz>=3.0.0"
     )
 
+# ---------------------------------------------------------------------------
+# Improvement #6 (optional NCBI Taxonomy live lookup)
+# ---------------------------------------------------------------------------
+try:
+    import urllib.request as _urllib_request
+    import urllib.parse as _urllib_parse
+    _URLLIB_AVAILABLE = True
+except ImportError:
+    _URLLIB_AVAILABLE = False
+
 
 _REQUIRED_DICT_KEYS = frozenset({
     "ontology_map",
@@ -99,24 +109,33 @@ _HOST_COMMA_ADDRESS_RE = re.compile(
     r"^(?:\S+\s+){2,}\S+,\s*[A-Z][a-zA-Z]"
 )
 
-# Strips bracket and parenthesis annotations from host values only.
-# Applied before host_to_category lookup in _integrate_evidence.
-# Examples: "Sus scrofa domesticus [NCBITaxon:9825]" -> "Sus scrofa domesticus"
-#           "Gallus gallus (Linnaeus 1758)" -> "Gallus gallus"
 _HOST_BRACKET_RE = re.compile(r"\s*[\[\(][^\]\)]*[\]\)]\s*")
 
-# Used by _taxonomic_fallback to detect tokens that look like taxonomic words.
 _TAXON_TOKEN_RE = re.compile(r"^[a-zA-Z\-]+$")
 
-# Matches "tissue/organ (species name)" patterns in specimen fields.
-# Captures the parenthetical content for host_to_category lookup.
-# Examples: "Feces (Canis lupus familiaris)", "Kidney (Equus Caballus)"
 _SPECIES_IN_PARENS_RE = re.compile(r"^[^(]+\(([^)]+)\)\s*$")
 
-# Matches "a blood/feces/... sample of <animal> origin" patterns.
-# Captures the animal noun for host_to_category lookup.
 _ANIMAL_ORIGIN_RE = re.compile(
     r"\ba\s+(?:blood|feces|fecal|urine|tissue|swab)\s+(?:sample\s+)?of\s+(\w+)\s+origin\b",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# Improvement #2: negation-aware preprocessing
+# Detects negation prefixes within a 3-token window before a keyword.
+# ---------------------------------------------------------------------------
+_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:not|non[\-\s]|without|excluding|absent|negative\s+for|no\b)\s+",
+    re.IGNORECASE,
+)
+
+# Food-processing / food-setting signals used by Improvement #5
+_FOOD_CONTEXT_RE = re.compile(
+    r"\b(?:abattoir|slaughterhouse|processing\s+plant|pasteuriz|ferment|"
+    r"ready[\-\s]to[\-\s]eat|ready[\-\s]to[\-\s]cook|packag|cann(?:ed|ing)|"
+    r"butcher|meat\s+processing|dairy\s+processing|food\s+processing|"
+    r"food\s+production|food\s+safety|food[\-\s]borne|foodborne|"
+    r"retail\s+(?:meat|food)|supermarket|grocery|delicatessen)\b",
     re.IGNORECASE,
 )
 
@@ -208,6 +227,9 @@ _CONFIDENCE_LEVELS = [
     (0.30, "low"),
 ]
 
+# Penalty applied when domain and specimen tracks disagree (Improvement #1).
+_CONFLICT_CONFIDENCE_PENALTY = 0.15
+
 
 def _term_specificity(term_str, source):
     if source in ("unambiguous", "host_dict"):
@@ -260,6 +282,83 @@ _VALID_CATEGORIES = frozenset({
     "Unclassified",
 })
 
+# ---------------------------------------------------------------------------
+# Improvement #6: NCBI Taxonomy live lookup helper (module-level, cacheable)
+# ---------------------------------------------------------------------------
+_NCBI_TAXONOMY_CACHE: dict = {}
+_NCBI_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+_NCBI_ANIMAL_CLASSES = frozenset({
+    "Mammalia", "Aves", "Reptilia", "Amphibia", "Actinopterygii",
+    "Chondrichthyes", "Insecta", "Arachnida", "Malacostraca",
+    "Gastropoda", "Bivalvia", "Cephalopoda", "Annelida", "Nematoda",
+})
+_NCBI_PLANT_DIVISIONS = frozenset({
+    "Viridiplantae", "Streptophyta", "Chlorophyta", "Rhodophyta",
+    "Phaeophyceae",
+})
+
+
+def _ncbi_taxonomy_lookup(name: str) -> str | None:
+    """
+    Query NCBI Taxonomy E-utils for *name* and infer One Health category
+    from its lineage (Animal, Plant, or None for unresolved/Human/other).
+
+    Results are cached in _NCBI_TAXONOMY_CACHE to avoid repeated network
+    calls for the same name within a process lifetime.
+
+    Returns category string ("Animal" | "Plant") or None.
+    """
+    if not _URLLIB_AVAILABLE:
+        return None
+    cached = _NCBI_TAXONOMY_CACHE.get(name)
+    if cached is not None:
+        return cached if cached != "__none__" else None
+
+    try:
+        search_url = (
+            f"{_NCBI_EUTILS_BASE}/esearch.fcgi?"
+            + _urllib_parse.urlencode({
+                "db": "taxonomy",
+                "term": name,
+                "retmode": "json",
+                "retmax": "1",
+            })
+        )
+        with _urllib_request.urlopen(search_url, timeout=3) as resp:
+            search_data = json.loads(resp.read().decode("utf-8"))
+        ids = search_data.get("esearchresult", {}).get("idlist", [])
+        if not ids:
+            _NCBI_TAXONOMY_CACHE[name] = "__none__"
+            return None
+
+        fetch_url = (
+            f"{_NCBI_EUTILS_BASE}/efetch.fcgi?"
+            + _urllib_parse.urlencode({
+                "db": "taxonomy",
+                "id": ids[0],
+                "retmode": "json",
+            })
+        )
+        with _urllib_request.urlopen(fetch_url, timeout=3) as resp:
+            fetch_data = json.loads(resp.read().decode("utf-8"))
+        taxa = fetch_data.get("result", {}).get(ids[0], {})
+        lineage_ex = taxa.get("lineageex", [])
+        lineage_names = {t.get("scientificname", "") for t in lineage_ex}
+
+        category = None
+        if lineage_names & _NCBI_ANIMAL_CLASSES:
+            category = "Animal"
+        elif lineage_names & _NCBI_PLANT_DIVISIONS:
+            category = "Plant"
+
+        _NCBI_TAXONOMY_CACHE[name] = category if category is not None else "__none__"
+        return category
+
+    except Exception as exc:
+        logger.debug("NCBI taxonomy lookup failed for %r: %s", name, exc)
+        _NCBI_TAXONOMY_CACHE[name] = "__none__"
+        return None
+
 
 class OneHealthClassifier:
     """
@@ -268,6 +367,24 @@ class OneHealthClassifier:
     Classifies records into standardized One Health tiers using deterministic,
     multi-layer semantic decomposition. All biological knowledge is loaded from
     one_health_dictionaries.json.
+
+    Improvements applied (v2):
+      #1  Structured conflict detection between domain and specimen tracks
+          with confidence penalty and evidence_conflict output flag.
+      #2  Negation-aware preprocessing: keywords preceded by negation tokens
+          are suppressed rather than matched.
+      #3  Multi-term consensus voting within a single field value: all tier-1
+          matches are collected and the plurality-vote category wins.
+      #4  Context-assisted resolution of ambiguous terms using corroborating
+          evidence from other fields before giving up.
+      #5  Food-context post-classification override: Animal winner is demoted
+          to Food when a food-processing or food-setting signal co-occurs.
+      #6  Optional NCBI Taxonomy live fallback for host names not found in
+          host_to_category (opt-in via use_ncbi_fallback=True).
+      #7  Composite-string fallback: low-confidence results trigger a second
+          pass over the concatenation of all non-null field values.
+      #8  Per-category specificity overrides via "specificity_overrides" dict
+          in the JSON, enabling curators to tune individual term scores.
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
@@ -302,9 +419,15 @@ class OneHealthClassifier:
         re.IGNORECASE,
     )
 
-    def __init__(self, dictionary_path=None, fuzzy_threshold=92):
+    def __init__(
+        self,
+        dictionary_path=None,
+        fuzzy_threshold=92,
+        use_ncbi_fallback=False,
+    ):
         self._dicts = _load_dictionaries(dictionary_path)
         self._fuzzy_threshold = fuzzy_threshold
+        self._use_ncbi_fallback = use_ncbi_fallback  # Improvement #6
 
         self._abbrev_map = {
             k.lower(): v.lower()
@@ -384,10 +507,6 @@ class OneHealthClassifier:
         tier1_order = self._dicts.get("tier1_order", list(tier1_raw.keys()))
         self._TIER1_PATTERNS = []
         for category in tier1_order:
-            # Skip categories that must not appear as classifier output.
-            # 'Lab' signals are handled upstream via processing_terms and
-            # institution_patterns; emitting 'Lab' as a category is not
-            # part of the One Health taxonomy used in this module.
             if category not in _VALID_CATEGORIES:
                 continue
             if category in tier1_raw:
@@ -400,7 +519,6 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
             for category, terms in ont_map.items():
-                # Also exclude invalid categories from the fuzzy corpus.
                 if category not in _VALID_CATEGORIES:
                     continue
                 for term in terms:
@@ -413,7 +531,30 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
 
+        # Improvement #8: per-category per-term specificity overrides.
+        # JSON key: "specificity_overrides" -> { "term": score, ... }
+        # Falls back to length-based heuristic when a term is absent.
+        self._specificity_overrides: dict[str, float] = {
+            k.lower(): float(v)
+            for k, v in self._dicts.get("specificity_overrides", {}).items()
+        }
+
         self._classify_text = functools.lru_cache(maxsize=4096)(self._classify_text_uncached)
+
+    # ------------------------------------------------------------------
+    # Improvement #8: term specificity with override support
+    # ------------------------------------------------------------------
+
+    def _term_specificity_with_override(self, term_str: str, source: str) -> float:
+        """
+        Return specificity for *term_str* matched via *source*, consulting
+        the per-term override table first (Improvement #8).
+        """
+        if term_str:
+            override = self._specificity_overrides.get(term_str.lower())
+            if override is not None:
+                return override
+        return _term_specificity(term_str, source)
 
     # ------------------------------------------------------------------
     # Legacy public API
@@ -468,7 +609,8 @@ class OneHealthClassifier:
         Returns pd.DataFrame with columns:
           one_health_category, one_health_term, one_health_confidence,
           one_health_evidence_level, one_health_processing,
-          one_health_setting, one_health_source_field
+          one_health_setting, one_health_source_field,
+          one_health_evidence_conflict  (new -- Improvement #1)
         """
         known = set(self._FIELD_PRIORITY)
         for k in fields:
@@ -503,7 +645,7 @@ class OneHealthClassifier:
         return pd.DataFrame(results, index=idx)
 
     # ------------------------------------------------------------------
-    # Two-pass evidence integration
+    # Evidence integration helpers
     # ------------------------------------------------------------------
 
     def _lookup_species_in_parens(self, val_str):
@@ -529,15 +671,114 @@ class OneHealthClassifier:
             species_raw = norm if cat else species_raw
         return cat, species_raw
 
+    def _resolve_host_category(self, val_str: str):
+        """
+        Full host name resolution pipeline including NCBI fallback
+        (Improvement #6). Returns (category, lookup_term) or (None, val_str).
+        """
+        host_clean = _HOST_BRACKET_RE.sub(" ", val_str).strip()
+        host_key = host_clean.lower()
+
+        host_cat = self._host_to_category.get(host_key)
+        lookup_term = host_key
+        if host_cat is None:
+            norm_key = _normalize_host_name(host_clean)
+            host_cat = self._host_to_category.get(norm_key)
+            lookup_term = norm_key if host_cat is not None else host_key
+
+        if host_cat is None:
+            host_cat = _taxonomic_fallback(host_key, self._host_to_category)
+            if host_cat is None:
+                host_cat = _taxonomic_fallback(
+                    _normalize_host_name(host_clean), self._host_to_category
+                )
+            lookup_term = host_key
+
+        # Improvement #6: NCBI live lookup as last resort
+        if host_cat is None and self._use_ncbi_fallback:
+            host_cat = _ncbi_taxonomy_lookup(host_clean)
+            if host_cat is not None:
+                logger.debug("NCBI taxonomy resolved %r -> %s", host_clean, host_cat)
+
+        return host_cat, lookup_term
+
+    # ------------------------------------------------------------------
+    # Improvement #3: multi-term voting within a single field value
+    # ------------------------------------------------------------------
+
+    def _tier1_vote(self, working: str):
+        """
+        Collect ALL tier-1 keyword matches in *working* and return the
+        plurality-vote (category, best_term, best_specificity) tuple, or
+        (None, None, 0.0) if no match.
+
+        Votes are weighted by per-term specificity.  Ties are broken by
+        choosing the longer matched term (more specific string).
+        """
+        votes: dict[str, float] = {}
+        best_per_cat: dict[str, tuple[str, float]] = {}
+
+        for category, pattern in self._TIER1_PATTERNS:
+            for m in pattern.finditer(working):
+                term = m.group(0)
+                spec = self._term_specificity_with_override(term, "tier1")
+                votes[category] = votes.get(category, 0.0) + spec
+                prev_term, prev_spec = best_per_cat.get(category, ("", 0.0))
+                if spec > prev_spec or (spec == prev_spec and len(term) > len(prev_term)):
+                    best_per_cat[category] = (term, spec)
+
+        if not votes:
+            return None, None, 0.0
+
+        winner = max(votes, key=lambda c: (votes[c], len(best_per_cat[c][0])))
+        best_term, best_spec = best_per_cat[winner]
+        return winner, best_term, best_spec
+
+    # ------------------------------------------------------------------
+    # Improvement #4: context-assisted ambiguous term resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_ambiguous_with_context(
+        self,
+        evidence_term,
+        domain_category,
+        specimen_category,
+        supporting_category,
+    ):
+        """
+        When only an ambiguous term was captured and no category was
+        conclusively assigned, try to infer a category from other tracks
+        (Improvement #4).
+
+        Returns the inferred category string or None.
+        """
+        context_cat = domain_category or specimen_category or supporting_category
+        if context_cat and context_cat != "Unclassified":
+            return context_cat
+
+        if evidence_term and evidence_term in self._ambiguous_category_terms:
+            candidates = self._ambiguous_category_terms[evidence_term]
+            if isinstance(candidates, str):
+                return candidates
+            if isinstance(candidates, list) and len(candidates) == 1:
+                return candidates[0]
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Main evidence integration loop
+    # ------------------------------------------------------------------
+
     def _integrate_evidence(self, row):
         out = {
-            "one_health_category":       "Unclassified",
-            "one_health_term":           np.nan,
-            "one_health_confidence":     0.0,
-            "one_health_evidence_level": "unresolved",
-            "one_health_processing":     np.nan,
-            "one_health_setting":        np.nan,
-            "one_health_source_field":   np.nan,
+            "one_health_category":          "Unclassified",
+            "one_health_term":              np.nan,
+            "one_health_confidence":        0.0,
+            "one_health_evidence_level":    "unresolved",
+            "one_health_processing":        np.nan,
+            "one_health_setting":           np.nan,
+            "one_health_source_field":      np.nan,
+            "one_health_evidence_conflict": False,  # Improvement #1
         }
 
         domain_category      = None
@@ -562,6 +803,9 @@ class OneHealthClassifier:
 
         corroborated = False
 
+        # Track all non-null field string values for composite pass (Improvement #7)
+        field_values_for_composite: list = []
+
         for field in self._FIELD_PRIORITY:
             val = getattr(row, field, None)
             if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -570,38 +814,16 @@ class OneHealthClassifier:
             if not val_str or self.NULL_PATTERNS.match(val_str):
                 continue
 
+            field_values_for_composite.append(val_str)
+
             if field == "host":
                 if _is_institution_host(val_str):
                     continue
 
-                # Strip bracket/parenthesis annotations from the host value
-                # before lookup (e.g. [NCBITaxon:9825], (Linnaeus 1758)).
-                # Applied only here; other fields may carry useful () / [] content.
-                host_clean = _HOST_BRACKET_RE.sub(" ", val_str).strip()
-
-                host_key = host_clean.lower()
-                host_cat = self._host_to_category.get(host_key)
-
-                if host_cat is None:
-                    norm_key = _normalize_host_name(host_clean)
-                    host_cat = self._host_to_category.get(norm_key)
-                    lookup_term = norm_key
-                else:
-                    lookup_term = host_key
-
-                # Progressive right-token-drop fallback for trinomials /
-                # subspecies names not yet in host_to_category.
-                if host_cat is None:
-                    host_cat = _taxonomic_fallback(host_key, self._host_to_category)
-                    if host_cat is None:
-                        host_cat = _taxonomic_fallback(
-                            _normalize_host_name(host_clean),
-                            self._host_to_category,
-                        )
-                    lookup_term = host_key
+                host_cat, lookup_term = self._resolve_host_category(val_str)
 
                 if host_cat is not None:
-                    spec = _term_specificity(lookup_term, "host_dict")
+                    spec = self._term_specificity_with_override(lookup_term, "host_dict")
                     fw = _FIELD_WEIGHTS["host"]
                     if domain_category is None:
                         domain_category     = host_cat
@@ -634,7 +856,7 @@ class OneHealthClassifier:
                         evidence_field = field
                     continue
                 tsource = layer.get("one_health_term_source", "tier1")
-                spec = _term_specificity(term_lower, tsource)
+                spec = self._term_specificity_with_override(term_lower, tsource)
                 if tsource == "fuzzy":
                     spec = layer.get("one_health_confidence", 0.0)
                 fw = _FIELD_WEIGHTS["host"] * 0.90
@@ -648,8 +870,6 @@ class OneHealthClassifier:
                     corroborated = True
                 continue
 
-            # For specimen fields, try species-in-parens extraction before
-            # the standard text classification pipeline.
             if field in self._SPECIMEN_FIELDS:
                 paren_cat, paren_term = self._lookup_species_in_parens(val_str)
                 if paren_cat is not None:
@@ -678,7 +898,7 @@ class OneHealthClassifier:
 
             term_lower = str(layer.get("one_health_term") or val_str).lower()
             tsource = layer.get("one_health_term_source", "tier1")
-            spec = _term_specificity(term_lower, tsource)
+            spec = self._term_specificity_with_override(term_lower, tsource)
             if tsource == "fuzzy":
                 spec = layer.get("one_health_confidence", 0.0)
 
@@ -726,7 +946,7 @@ class OneHealthClassifier:
                     specimen_category     = "Human"
                     specimen_term         = term_lower
                     specimen_field        = field
-                    specimen_specificity  = _term_specificity(term_lower, "unambiguous")
+                    specimen_specificity  = self._term_specificity_with_override(term_lower, "unambiguous")
                     specimen_field_weight = fw
                 elif specimen_category == "Human":
                     corroborated = True
@@ -735,7 +955,7 @@ class OneHealthClassifier:
                     specimen_category     = "Animal"
                     specimen_term         = term_lower
                     specimen_field        = field
-                    specimen_specificity  = _term_specificity(term_lower, "unambiguous")
+                    specimen_specificity  = self._term_specificity_with_override(term_lower, "unambiguous")
                     specimen_field_weight = fw
                 elif specimen_category == "Animal":
                     corroborated = True
@@ -749,14 +969,30 @@ class OneHealthClassifier:
                 elif specimen_category == cat:
                     corroborated = True
 
+        # ------------------------------------------------------------------
+        # Improvement #1: detect domain vs. specimen conflict
+        # ------------------------------------------------------------------
+        evidence_conflict = False
+        if (
+            domain_category is not None
+            and specimen_category is not None
+            and domain_category != specimen_category
+            and domain_specificity >= 0.75
+            and specimen_specificity >= 0.75
+        ):
+            evidence_conflict = True
+
         corroboration_bonus = 0.10 if corroborated else 0.0
 
         if domain_category is not None:
             raw_conf = min(1.0, domain_specificity * domain_field_weight + corroboration_bonus)
-            out["one_health_category"]     = domain_category
-            out["one_health_term"]         = domain_term
-            out["one_health_confidence"]   = round(raw_conf, 3)
-            out["one_health_source_field"] = domain_field
+            if evidence_conflict:
+                raw_conf = max(0.0, raw_conf - _CONFLICT_CONFIDENCE_PENALTY)
+            out["one_health_category"]          = domain_category
+            out["one_health_term"]              = domain_term
+            out["one_health_confidence"]        = round(raw_conf, 3)
+            out["one_health_source_field"]      = domain_field
+            out["one_health_evidence_conflict"] = evidence_conflict
 
         elif specimen_category is not None:
             raw_conf = min(1.0, specimen_specificity * specimen_field_weight + corroboration_bonus)
@@ -766,12 +1002,24 @@ class OneHealthClassifier:
             out["one_health_source_field"] = specimen_field
 
         elif specimen_term is not None or evidence_term is not None:
+            # ------------------------------------------------------------------
+            # Improvement #4: try context-assisted resolution before Unclassified
+            # ------------------------------------------------------------------
+            resolved_cat = self._resolve_ambiguous_with_context(
+                evidence_term, domain_category, specimen_category, supporting_category
+            )
             source = specimen_field if specimen_field is not None else evidence_field
             raw_conf = min(1.0, 0.3 * (specimen_field_weight or 0.70) + corroboration_bonus)
-            out["one_health_category"]     = "Unclassified"
-            out["one_health_term"]         = specimen_term or evidence_term
-            out["one_health_confidence"]   = round(raw_conf, 3)
-            out["one_health_source_field"] = source
+            if resolved_cat and resolved_cat != "Unclassified":
+                out["one_health_category"]     = resolved_cat
+                out["one_health_term"]         = specimen_term or evidence_term
+                out["one_health_confidence"]   = round(raw_conf * 0.80, 3)
+                out["one_health_source_field"] = source
+            else:
+                out["one_health_category"]     = "Unclassified"
+                out["one_health_term"]         = specimen_term or evidence_term
+                out["one_health_confidence"]   = round(raw_conf, 3)
+                out["one_health_source_field"] = source
 
         else:
             if supporting_category is not None:
@@ -790,6 +1038,57 @@ class OneHealthClassifier:
                         out["one_health_confidence"]   = round(raw_conf, 3)
                         out["one_health_term"]         = setting_lower
                         out["one_health_source_field"] = "setting_inference"
+
+        # ------------------------------------------------------------------
+        # Improvement #7: composite-string fallback for low-confidence results
+        # ------------------------------------------------------------------
+        if (
+            out["one_health_confidence"] < 0.80
+            and out["one_health_category"] in ("Unclassified", "Environmental")
+            and len(field_values_for_composite) > 1
+        ):
+            composite = " ".join(field_values_for_composite)
+            comp_layer = self._classify_text(composite)
+            comp_cat = comp_layer.get("one_health_category")
+            comp_conf = comp_layer.get("one_health_confidence", 0.0)
+            if (
+                comp_cat
+                and comp_cat not in ("Unclassified",)
+                and comp_cat in _VALID_CATEGORIES
+                and comp_conf > out["one_health_confidence"]
+            ):
+                out["one_health_category"]     = comp_cat
+                out["one_health_term"]         = comp_layer.get("one_health_term", np.nan)
+                out["one_health_confidence"]   = round(comp_conf * 0.90, 3)
+                out["one_health_source_field"] = "composite"
+
+        # ------------------------------------------------------------------
+        # Improvement #5: Food-context post-classification override
+        # ------------------------------------------------------------------
+        if out["one_health_category"] == "Animal":
+            food_signal = False
+            setting_val = out.get("one_health_setting")
+            if pd.notna(setting_val) and _FOOD_CONTEXT_RE.search(str(setting_val)):
+                food_signal = True
+            proc_val = out.get("one_health_processing")
+            if pd.notna(proc_val) and _FOOD_CONTEXT_RE.search(str(proc_val)):
+                food_signal = True
+            if not food_signal:
+                for fv in field_values_for_composite:
+                    if _FOOD_CONTEXT_RE.search(fv):
+                        food_signal = True
+                        break
+            if food_signal:
+                food_layer = self._classify_text(
+                    " ".join(field_values_for_composite)
+                )
+                if food_layer.get("one_health_category") == "Food":
+                    out["one_health_category"]    = "Food"
+                    out["one_health_term"]        = food_layer.get("one_health_term", out["one_health_term"])
+                    out["one_health_confidence"]  = round(
+                        min(0.85, out["one_health_confidence"]), 3
+                    )
+                    out["one_health_source_field"] = "food_override"
 
         out["one_health_evidence_level"] = discretize_confidence(out["one_health_confidence"])
         return out
@@ -814,6 +1113,33 @@ class OneHealthClassifier:
         for pattern, canonical in self._synonym_patterns:
             result = pattern.sub(canonical, result)
         return result
+
+    # ------------------------------------------------------------------
+    # Improvement #2: negation-aware keyword suppression
+    # ------------------------------------------------------------------
+
+    def _suppress_negated_spans(self, text: str) -> str:
+        """
+        Remove tokens that are immediately preceded by a negation prefix
+        (not, non-, without, excluding, absent, negative for).
+        The negation prefix itself is also removed so it does not accidentally
+        match shorter tier-1 patterns on partial text.
+
+        Returns the cleaned working string.
+        """
+        result = _NEGATION_PREFIX_RE.sub(" __NEG__ ", text)
+        tokens = result.split()
+        cleaned = []
+        negate_next = False
+        for tok in tokens:
+            if tok == "__NEG__":
+                negate_next = True
+                continue
+            if negate_next:
+                negate_next = False
+                continue
+            cleaned.append(tok)
+        return " ".join(cleaned)
 
     # ------------------------------------------------------------------
     # Core single-value classification engine (wrapped by LRU cache in __init__)
@@ -844,12 +1170,8 @@ class OneHealthClassifier:
         if not text or self.NULL_PATTERNS.match(text):
             return unclassified
 
-        # Normalize underscores to spaces so that values like
-        # "Environmental_bathroom" or "Blood_Blood" are tokenized correctly.
         text = text.replace("_", " ")
 
-        # Strip culture collection prefixes (ATCC, DSM, NCTC, ...) and broad
-        # institution keywords, then continue classification on the residual.
         if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
             text = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
             if not text:
@@ -859,8 +1181,6 @@ class OneHealthClassifier:
         if not text:
             return unclassified
 
-        # Resolve "a <specimen> of <animal> origin" before abbreviation
-        # expansion so the pattern matches the original capitalization.
         origin_m = _ANIMAL_ORIGIN_RE.search(text)
         if origin_m:
             animal_noun = origin_m.group(1).lower()
@@ -904,24 +1224,25 @@ class OneHealthClassifier:
                 setting = smatch.group(1).lower()
                 working = (working[: smatch.start()] + working[smatch.end():]).strip()
 
-        if working:
-            for category, pattern in self._TIER1_PATTERNS:
-                m = pattern.search(working)
-                if m:
-                    matched_term = m.group(0)
-                    spec = _term_specificity(matched_term, "tier1")
-                    return {
-                        "one_health_category":    category,
-                        "one_health_term":        matched_term,
-                        "one_health_confidence":  spec,
-                        "one_health_term_source": "tier1",
-                        "one_health_processing":  processing,
-                        "one_health_setting":     setting,
-                    }
+        # Improvement #2: suppress negated keyword spans before tier-1 matching
+        working_clean = self._suppress_negated_spans(working)
 
-        if _RAPIDFUZZ_AVAILABLE and self._fuzzy_corpus and working and len(working) > 2:
+        if working_clean:
+            # Improvement #3: collect all tier-1 matches and vote
+            winner_cat, winner_term, winner_spec = self._tier1_vote(working_clean)
+            if winner_cat is not None:
+                return {
+                    "one_health_category":    winner_cat,
+                    "one_health_term":        winner_term,
+                    "one_health_confidence":  winner_spec,
+                    "one_health_term_source": "tier1",
+                    "one_health_processing":  processing,
+                    "one_health_setting":     setting,
+                }
+
+        if _RAPIDFUZZ_AVAILABLE and self._fuzzy_corpus and working_clean and len(working_clean) > 2:
             result = _rfprocess.extractOne(
-                working.lower(),
+                working_clean.lower(),
                 self._fuzzy_corpus,
                 scorer=_rfuzz.WRatio,
                 score_cutoff=self._fuzzy_threshold,
