@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import math
 import re
 import warnings
 from pathlib import Path
@@ -140,11 +141,6 @@ _FOOD_CONTEXT_RE = re.compile(
 
 # ---------------------------------------------------------------------------
 # Fix 1: Oil-environmental modifier suppression
-# When working_clean contains an oil/petroleum/hydrocarbon modifier,
-# any Animal tier-1 keyword that happens to co-occur is incidental
-# (e.g. "bovine" in a petroleum-contaminated soil study). Strip Animal
-# tier-1 matches from working_clean before voting so the Environmental
-# keyword wins uncontested.
 # ---------------------------------------------------------------------------
 _OIL_ENV_MODIFIER_RE = re.compile(
     r"\b(?:oil|petroleum|crude|diesel|gasoline|kerosene|hydrocarbon|"
@@ -158,11 +154,6 @@ _OIL_ENV_MODIFIER_RE = re.compile(
 
 # ---------------------------------------------------------------------------
 # Fix 2: Healthcare surface reclassification
-# Surface/object keywords that indicate the sample is from a hard surface
-# or inanimate object in a clinical/healthcare environment, not from a
-# human body. When the winning category is Human with confidence < 0.90
-# and one of these keywords appears in any source field, demote to
-# Environmental (the swab is of a surface, not a person).
 # ---------------------------------------------------------------------------
 _HEALTHCARE_SURFACE_RE = re.compile(
     r"\b(?:door\s*handle|door\s*knob|countertop|counter\s+top|"
@@ -179,11 +170,7 @@ _HEALTHCARE_SURFACE_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
-# Failure Mode C fix: lab/vaccine processing terms that suppress Animal
-# when confidence is below the certainty threshold.
-# Applied in _integrate_evidence after the evidence loop, before writing out.
-# Threshold 0.85 ensures a rock-solid Animal signal (e.g. rumen + cell culture)
-# is not wrongly suppressed.
+# Failure Mode C fix: lab/vaccine processing terms
 # ---------------------------------------------------------------------------
 _LAB_PROCESSING_OVERRIDE = frozenset({
     "cell culture",
@@ -301,6 +288,25 @@ _CONFIDENCE_LEVELS = [
 
 # Penalty applied when domain and specimen tracks disagree (Improvement #1).
 _CONFLICT_CONFIDENCE_PENALTY = 0.15
+
+# ---------------------------------------------------------------------------
+# Improvement #10: Bayesian fusion constants
+# ---------------------------------------------------------------------------
+# Minimum posterior probability for the Bayesian winner to override the
+# deterministic result. Below this threshold the deterministic path wins.
+_BAYES_MIN_POSTERIOR = 0.55
+
+# Minimum field weight for a hard-evidence source (host_dict or unambiguous
+# term with spec=1.0) to be treated as deterministic and bypass Bayesian
+# fusion entirely for that record.
+_BAYES_HARD_EVIDENCE_FW_THRESHOLD = 0.80
+
+# Epsilon to prevent division by zero in LR calculation.
+_BAYES_EPS = 1e-9
+
+# Ordered list of the five classifiable categories (Unclassified excluded
+# from the posterior because it is a default, not a positive signal).
+_CLASSIFIABLE_CATS = ["Human", "Animal", "Plant", "Food", "Environmental"]
 
 
 def _term_specificity(term_str, source):
@@ -459,28 +465,34 @@ class OneHealthClassifier:
           in the JSON, enabling curators to tune individual term scores.
       #9  Category yield priority: in mixed-signal fields Animal yields to
           Food, Environmental, Plant, and Human when any of those categories
-          also match (prevents animal ingredient names in food dishes or
-          environmental sample descriptions from overriding context).
-      #C  Lab/vaccine processing override (Failure Mode C fix): when
-          one_health_processing is a known lab or vaccine term and the
-          winning Animal confidence is below 0.85, the category is demoted
-          to Unclassified. This fixes cell-culture environments, vaccine
-          strains, and laboratory media records misclassified as Animal.
-          Exemption: direct host_dict organism-name hits are not demoted
-          (tracked via _domain_from_host_dict flag).
-      #F1 Oil-environmental modifier suppression: when working_clean contains
-          an oil/petroleum/hydrocarbon modifier, Animal tier-1 matches are
-          stripped before voting so the Environmental keyword wins.
-      #F2 Healthcare surface reclassification: Human (confidence < 0.90)
-          is demoted to Environmental when a hard-surface/object keyword
-          appears in any source field value.
-      #F3 Lab override exemption for explicit organism names: _domain_from_host_dict
-          flag prevents #C from demoting records whose Animal category came
-          from a direct host_to_category dict lookup (known organism name).
+          also match.
+      #10 Bayesian multi-field evidence fusion: each BioSample field is
+          treated as an independent noisy sensor. Evidence tuples
+          (category, specificity, field_weight) collected across all fields
+          are converted to per-category log-odds updates using the likelihood
+          ratio LR = (spec * fw) / (1 - spec * fw + eps). Softmax over
+          accumulated log-odds yields a posterior distribution; argmax is
+          the Bayesian winner. The Bayesian result overrides the
+          deterministic result only when:
+            (a) no hard evidence exists (no host_dict hit and no
+                unambiguous-term match with spec=1.0 from a field with
+                weight >= 0.80), AND
+            (b) the Bayesian winner posterior >= _BAYES_MIN_POSTERIOR
+                (default 0.55), AND
+            (c) the Bayesian winner is not 'Unclassified'.
+          When hard evidence is present, the deterministic path wins and
+          the Bayesian posterior is computed but used only for confidence
+          score refinement.
+          New output column: one_health_evidence_sources (int) -- count
+          of fields that contributed non-ambiguous evidence.
+      #C  Lab/vaccine processing override (Failure Mode C fix).
+      #F1 Oil-environmental modifier suppression.
+      #F2 Healthcare surface reclassification.
+      #F3 Lab override exemption for explicit organism names.
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
-    appears in many records (e.g. "blood", "human", "clinical").
+    appears in many records.
     """
 
     _FIELD_PRIORITY = [
@@ -519,7 +531,7 @@ class OneHealthClassifier:
     ):
         self._dicts = _load_dictionaries(dictionary_path)
         self._fuzzy_threshold = fuzzy_threshold
-        self._use_ncbi_fallback = use_ncbi_fallback  # Improvement #6
+        self._use_ncbi_fallback = use_ncbi_fallback
 
         self._abbrev_map = {
             k.lower(): v.lower()
@@ -623,7 +635,6 @@ class OneHealthClassifier:
             self._fuzzy_corpus = []
             self._fuzzy_labels = []
 
-        # Improvement #8: per-category per-term specificity overrides.
         self._specificity_overrides: dict[str, float] = {
             k.lower(): float(v)
             for k, v in self._dicts.get("specificity_overrides", {}).items()
@@ -686,7 +697,7 @@ class OneHealthClassifier:
 
     def classify_multi_field(self, **fields):
         """
-        Two-pass multi-field classification.
+        Multi-field classification with Bayesian evidence fusion (#10).
 
         Accepts named pd.Series for any of:
           isolation_source, host, env_medium,
@@ -696,7 +707,8 @@ class OneHealthClassifier:
           one_health_category, one_health_term, one_health_confidence,
           one_health_evidence_level, one_health_processing,
           one_health_setting, one_health_source_field,
-          one_health_evidence_conflict  (Improvement #1)
+          one_health_evidence_conflict,
+          one_health_evidence_sources
         """
         known = set(self._FIELD_PRIORITY)
         for k in fields:
@@ -736,10 +748,8 @@ class OneHealthClassifier:
 
     def _lookup_species_in_parens(self, val_str):
         """
-        For specimen fields (isolation_source, env_medium, env_local_scale),
-        detect the pattern '<tissue> (<species name>)' and resolve the
-        parenthetical content via host_to_category + _taxonomic_fallback.
-
+        Detect '<tissue> (<species name>)' and resolve the parenthetical
+        content via host_to_category + _taxonomic_fallback.
         Returns (category, species_key) or (None, None).
         """
         m = _SPECIES_IN_PARENS_RE.match(val_str.strip())
@@ -759,8 +769,8 @@ class OneHealthClassifier:
 
     def _resolve_host_category(self, val_str: str):
         """
-        Full host name resolution pipeline including NCBI fallback
-        (Improvement #6). Returns (category, lookup_term) or (None, val_str).
+        Full host name resolution pipeline including NCBI fallback (#6).
+        Returns (category, lookup_term) or (None, val_str).
         """
         host_clean = _HOST_BRACKET_RE.sub(" ", val_str).strip()
         host_key = host_clean.lower()
@@ -780,7 +790,6 @@ class OneHealthClassifier:
                 )
             lookup_term = host_key
 
-        # Improvement #6: NCBI live lookup as last resort
         if host_cat is None and self._use_ncbi_fallback:
             host_cat = _ncbi_taxonomy_lookup(host_clean)
             if host_cat is not None:
@@ -806,11 +815,6 @@ class OneHealthClassifier:
         Collect ALL tier-1 keyword matches in *working* and return the
         plurality-vote (category, best_term, best_specificity) tuple, or
         (None, None, 0.0) if no match.
-
-        Votes are weighted by per-term specificity. In mixed-signal fields
-        (multiple categories matched), _CATEGORY_YIELD_PRIORITY determines
-        the winner: the category with the lowest priority number wins,
-        provided it has at least 0.50 aggregate specificity votes.
         """
         votes: dict[str, float] = {}
         best_per_cat: dict[str, tuple[str, float]] = {}
@@ -865,9 +869,8 @@ class OneHealthClassifier:
         supporting_category,
     ):
         """
-        When only an ambiguous term was captured and no category was
-        conclusively assigned, try to infer a category from other tracks
-        (Improvement #4).
+        When only an ambiguous term was captured, try to infer a category
+        from corroborating tracks before giving up (#4).
         """
         context_cat = domain_category or specimen_category or supporting_category
         if context_cat and context_cat != "Unclassified":
@@ -883,49 +886,103 @@ class OneHealthClassifier:
         return None
 
     # ------------------------------------------------------------------
-    # Main evidence integration loop
+    # Improvement #10: Bayesian evidence combination
     # ------------------------------------------------------------------
 
-    def _integrate_evidence(self, row):
-        out = {
-            "one_health_category":          "Unclassified",
-            "one_health_term":              np.nan,
-            "one_health_confidence":        0.0,
-            "one_health_evidence_level":    "unresolved",
-            "one_health_processing":        np.nan,
-            "one_health_setting":           np.nan,
-            "one_health_source_field":      np.nan,
-            "one_health_evidence_conflict": False,  # Improvement #1
+    @staticmethod
+    def _bayesian_combine(
+        evidence_tuples: list,
+    ) -> dict[str, float]:
+        """
+        Convert a list of (category, specificity, field_weight) evidence
+        tuples into a posterior probability distribution over the five
+        classifiable categories using naive-Bayes log-odds accumulation.
+
+        Model:
+          - Uniform prior over the five categories.
+          - For each evidence tuple the likelihood ratio is:
+              LR(cat) = p / (1 - p + eps)
+            where p = specificity * field_weight, clamped to (0, 1).
+          - The log-LR is added to log_odds[cat] for the matching
+            category. All other categories receive a small symmetric
+            penalty (-log_lr * 0.25) to express that evidence for one
+            category is mild counter-evidence against the others.
+          - Softmax over log_odds yields the posterior.
+
+        Returns dict {category: posterior_probability} for the five
+        classifiable categories. Sum of values is 1.0.
+        Returns empty dict when evidence_tuples is empty.
+        """
+        if not evidence_tuples:
+            return {}
+
+        log_odds = {c: 0.0 for c in _CLASSIFIABLE_CATS}
+
+        for cat, spec, fw in evidence_tuples:
+            if cat not in log_odds:
+                continue
+            p = min(0.9999, max(_BAYES_EPS, spec * fw))
+            log_lr = math.log(p / (1.0 - p + _BAYES_EPS))
+            log_odds[cat] += log_lr
+            penalty = abs(log_lr) * 0.25
+            for other in _CLASSIFIABLE_CATS:
+                if other != cat:
+                    log_odds[other] -= penalty
+
+        max_lo = max(log_odds.values())
+        exp_vals = {c: math.exp(v - max_lo) for c, v in log_odds.items()}
+        total = sum(exp_vals.values())
+        return {c: round(v / total, 4) for c, v in exp_vals.items()}
+
+    # ------------------------------------------------------------------
+    # Main evidence collection loop (feeds both deterministic and Bayes)
+    # ------------------------------------------------------------------
+
+    def _collect_field_evidence(self, row, out):
+        """
+        Iterate over all BioSample fields for *row*, run the per-field
+        classification logic, and return:
+
+          deterministic_state  -- dict with the same keys as _integrate_evidence
+                                  uses internally (domain_*, specimen_*,
+                                  supporting_*, corroborated, evidence_*,
+                                  _domain_from_host_dict).
+          evidence_tuples      -- list of (category, specificity, field_weight)
+                                  for non-ambiguous field hits; used by
+                                  _bayesian_combine.
+          field_values         -- list of raw non-null field value strings;
+                                  used by composite fallback (#7) and food
+                                  override (#5).
+
+        Side effects: populates out["one_health_processing"] and
+        out["one_health_setting"] from the first field that provides them.
+        """
+        state = {
+            "domain_category":      None,
+            "domain_term":          None,
+            "domain_field":         None,
+            "domain_specificity":   0.0,
+            "domain_field_weight":  0.0,
+            "specimen_category":    None,
+            "specimen_term":        None,
+            "specimen_field":       None,
+            "specimen_specificity": 0.0,
+            "specimen_field_weight": 0.0,
+            "evidence_term":        None,
+            "evidence_field":       None,
+            "supporting_category":  None,
+            "supporting_term":      None,
+            "supporting_field":     None,
+            "supporting_conf":      0.0,
+            "corroborated":         False,
+            "_domain_from_host_dict": False,
+            # hard-evidence flag for Bayesian gating: True when a
+            # host_dict or unambiguous-spec=1.0 hit from a high-weight
+            # field has been seen.
+            "_hard_evidence": False,
         }
-
-        domain_category      = None
-        domain_term          = None
-        domain_field         = None
-        domain_specificity   = 0.0
-        domain_field_weight  = 0.0
-
-        specimen_category     = None
-        specimen_term         = None
-        specimen_field        = None
-        specimen_specificity  = 0.0
-        specimen_field_weight = 0.0
-
-        evidence_term   = None
-        evidence_field  = None
-
-        supporting_category = None
-        supporting_term     = None
-        supporting_field    = None
-        supporting_conf     = 0.0
-
-        corroborated = False
-
-        # Fix 3: track whether domain_category came from a direct host_dict
-        # lookup (explicit organism name). Used to exempt the #C lab override.
-        _domain_from_host_dict = False
-
-        # Track all non-null field string values for composite pass (Improvement #7)
-        field_values_for_composite: list = []
+        evidence_tuples = []
+        field_values = []
 
         for field in self._FIELD_PRIORITY:
             val = getattr(row, field, None)
@@ -935,7 +992,8 @@ class OneHealthClassifier:
             if not val_str or self.NULL_PATTERNS.match(val_str):
                 continue
 
-            field_values_for_composite.append(val_str)
+            field_values.append(val_str)
+            fw = _FIELD_WEIGHTS.get(field, 0.70)
 
             if field == "host":
                 if _is_institution_host(val_str):
@@ -945,21 +1003,23 @@ class OneHealthClassifier:
 
                 if host_cat is not None:
                     spec = self._term_specificity_with_override(lookup_term, "host_dict")
-                    fw = _FIELD_WEIGHTS["host"]
-                    if domain_category is None:
-                        domain_category     = host_cat
-                        domain_term         = lookup_term
-                        domain_field        = field
-                        domain_specificity  = spec
-                        domain_field_weight = fw
-                        _domain_from_host_dict = True  # Fix 3: explicit organism name
-                    elif domain_category == host_cat:
-                        corroborated = True
                     layer = self._classify_text(val_str)
                     if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
                         out["one_health_processing"] = layer["one_health_processing"]
                     if pd.notna(layer.get("one_health_setting")) and pd.isna(out["one_health_setting"]):
                         out["one_health_setting"] = layer["one_health_setting"]
+                    if state["domain_category"] is None:
+                        state["domain_category"]     = host_cat
+                        state["domain_term"]         = lookup_term
+                        state["domain_field"]        = field
+                        state["domain_specificity"]  = spec
+                        state["domain_field_weight"] = fw
+                        state["_domain_from_host_dict"] = True
+                        if fw >= _BAYES_HARD_EVIDENCE_FW_THRESHOLD:
+                            state["_hard_evidence"] = True
+                    elif state["domain_category"] == host_cat:
+                        state["corroborated"] = True
+                    evidence_tuples.append((host_cat, spec, fw))
                     continue
 
                 layer = self._classify_text(val_str)
@@ -973,37 +1033,38 @@ class OneHealthClassifier:
                     continue
                 term_lower = str(layer.get("one_health_term") or val_str).lower()
                 if term_lower in self._ambiguous_category_set:
-                    if evidence_term is None:
-                        evidence_term = term_lower
-                        evidence_field = field
+                    if state["evidence_term"] is None:
+                        state["evidence_term"] = term_lower
+                        state["evidence_field"] = field
                     continue
                 tsource = layer.get("one_health_term_source", "tier1")
                 spec = self._term_specificity_with_override(term_lower, tsource)
                 if tsource == "fuzzy":
                     spec = layer.get("one_health_confidence", 0.0)
-                fw = _FIELD_WEIGHTS["host"] * 0.90
-                if domain_category is None:
-                    domain_category     = cat
-                    domain_term         = layer.get("one_health_term") or val_str
-                    domain_field        = field
-                    domain_specificity  = spec
-                    domain_field_weight = fw
-                elif domain_category == cat:
-                    corroborated = True
+                fw_host_text = fw * 0.90
+                if state["domain_category"] is None:
+                    state["domain_category"]     = cat
+                    state["domain_term"]         = layer.get("one_health_term") or val_str
+                    state["domain_field"]        = field
+                    state["domain_specificity"]  = spec
+                    state["domain_field_weight"] = fw_host_text
+                elif state["domain_category"] == cat:
+                    state["corroborated"] = True
+                evidence_tuples.append((cat, spec, fw_host_text))
                 continue
 
             if field in self._SPECIMEN_FIELDS:
                 paren_cat, paren_term = self._lookup_species_in_parens(val_str)
                 if paren_cat is not None:
-                    fw = _FIELD_WEIGHTS.get(field, 1.00)
-                    if specimen_category is None:
-                        specimen_category     = paren_cat
-                        specimen_term         = paren_term
-                        specimen_field        = field
-                        specimen_specificity  = 0.90
-                        specimen_field_weight = fw
-                    elif specimen_category == paren_cat:
-                        corroborated = True
+                    if state["specimen_category"] is None:
+                        state["specimen_category"]     = paren_cat
+                        state["specimen_term"]         = paren_term
+                        state["specimen_field"]        = field
+                        state["specimen_specificity"]  = 0.90
+                        state["specimen_field_weight"] = fw
+                    elif state["specimen_category"] == paren_cat:
+                        state["corroborated"] = True
+                    evidence_tuples.append((paren_cat, 0.90, fw))
                     continue
 
             layer = self._classify_text(val_str)
@@ -1014,7 +1075,6 @@ class OneHealthClassifier:
                 out["one_health_setting"] = layer["one_health_setting"]
 
             cat = layer.get("one_health_category")
-
             if cat is None or cat not in _VALID_CATEGORIES or cat == "Unclassified":
                 continue
 
@@ -1024,72 +1084,124 @@ class OneHealthClassifier:
             if tsource == "fuzzy":
                 spec = layer.get("one_health_confidence", 0.0)
 
-            fw = _FIELD_WEIGHTS.get(field, 0.70)
-
             if field in self._SUPPORTING_FIELDS:
                 if term_lower not in self._ambiguous_category_set:
-                    if supporting_category is None:
-                        supporting_category = cat
-                        supporting_term     = layer["one_health_term"]
-                        supporting_field    = field
-                        supporting_conf     = spec * fw
-                    elif supporting_category == (domain_category or specimen_category):
-                        corroborated = True
+                    if state["supporting_category"] is None:
+                        state["supporting_category"] = cat
+                        state["supporting_term"]     = layer["one_health_term"]
+                        state["supporting_field"]    = field
+                        state["supporting_conf"]     = spec * fw
+                    elif state["supporting_category"] == (state["domain_category"] or state["specimen_category"]):
+                        state["corroborated"] = True
+                    evidence_tuples.append((cat, spec, fw))
                 continue
 
             if field in self._DOMAIN_FIELDS:
                 if term_lower in self._ambiguous_category_set:
-                    if evidence_term is None:
-                        evidence_term = term_lower
-                        evidence_field = field
+                    if state["evidence_term"] is None:
+                        state["evidence_term"] = term_lower
+                        state["evidence_field"] = field
                     continue
-                if domain_category is None:
-                    domain_category     = cat
-                    domain_term         = layer["one_health_term"]
-                    domain_field        = field
-                    domain_specificity  = spec
-                    domain_field_weight = fw
-                elif domain_category == cat:
-                    corroborated = True
+                if state["domain_category"] is None:
+                    state["domain_category"]     = cat
+                    state["domain_term"]         = layer["one_health_term"]
+                    state["domain_field"]        = field
+                    state["domain_specificity"]  = spec
+                    state["domain_field_weight"] = fw
+                elif state["domain_category"] == cat:
+                    state["corroborated"] = True
+                evidence_tuples.append((cat, spec, fw))
                 continue
 
             if term_lower in self._ambiguous_category_set:
-                if evidence_term is None:
-                    evidence_term = term_lower
-                    evidence_field = field
+                if state["evidence_term"] is None:
+                    state["evidence_term"] = term_lower
+                    state["evidence_field"] = field
             elif term_lower in self._ambiguous_terms:
-                if specimen_term is None:
-                    specimen_term         = term_lower
-                    specimen_field        = field
-                    specimen_specificity  = 0.3
-                    specimen_field_weight = fw
+                if state["specimen_term"] is None:
+                    state["specimen_term"]         = term_lower
+                    state["specimen_field"]        = field
+                    state["specimen_specificity"]  = 0.3
+                    state["specimen_field_weight"] = fw
             elif term_lower in self._unambiguous_human:
-                if specimen_category is None:
-                    specimen_category     = "Human"
-                    specimen_term         = term_lower
-                    specimen_field        = field
-                    specimen_specificity  = self._term_specificity_with_override(term_lower, "unambiguous")
-                    specimen_field_weight = fw
-                elif specimen_category == "Human":
-                    corroborated = True
+                _spec_u = self._term_specificity_with_override(term_lower, "unambiguous")
+                if state["specimen_category"] is None:
+                    state["specimen_category"]     = "Human"
+                    state["specimen_term"]         = term_lower
+                    state["specimen_field"]        = field
+                    state["specimen_specificity"]  = _spec_u
+                    state["specimen_field_weight"] = fw
+                    if fw >= _BAYES_HARD_EVIDENCE_FW_THRESHOLD:
+                        state["_hard_evidence"] = True
+                elif state["specimen_category"] == "Human":
+                    state["corroborated"] = True
+                evidence_tuples.append(("Human", _spec_u, fw))
             elif term_lower in self._unambiguous_animal:
-                if specimen_category is None:
-                    specimen_category     = "Animal"
-                    specimen_term         = term_lower
-                    specimen_field        = field
-                    specimen_specificity  = self._term_specificity_with_override(term_lower, "unambiguous")
-                    specimen_field_weight = fw
-                elif specimen_category == "Animal":
-                    corroborated = True
+                _spec_u = self._term_specificity_with_override(term_lower, "unambiguous")
+                if state["specimen_category"] is None:
+                    state["specimen_category"]     = "Animal"
+                    state["specimen_term"]         = term_lower
+                    state["specimen_field"]        = field
+                    state["specimen_specificity"]  = _spec_u
+                    state["specimen_field_weight"] = fw
+                    if fw >= _BAYES_HARD_EVIDENCE_FW_THRESHOLD:
+                        state["_hard_evidence"] = True
+                elif state["specimen_category"] == "Animal":
+                    state["corroborated"] = True
+                evidence_tuples.append(("Animal", _spec_u, fw))
             else:
-                if specimen_category is None:
-                    specimen_category     = cat
-                    specimen_term         = term_lower
-                    specimen_field        = field
-                    specimen_specificity  = spec
-                    specimen_field_weight = fw
-                elif specimen_category == cat:
-                    corroborated = True
+                if state["specimen_category"] is None:
+                    state["specimen_category"]     = cat
+                    state["specimen_term"]         = term_lower
+                    state["specimen_field"]        = field
+                    state["specimen_specificity"]  = spec
+                    state["specimen_field_weight"] = fw
+                elif state["specimen_category"] == cat:
+                    state["corroborated"] = True
+                evidence_tuples.append((cat, spec, fw))
+
+        return state, evidence_tuples, field_values
+
+    # ------------------------------------------------------------------
+    # Main evidence integration (orchestrates deterministic + Bayesian)
+    # ------------------------------------------------------------------
+
+    def _integrate_evidence(self, row):
+        out = {
+            "one_health_category":          "Unclassified",
+            "one_health_term":              np.nan,
+            "one_health_confidence":        0.0,
+            "one_health_evidence_level":    "unresolved",
+            "one_health_processing":        np.nan,
+            "one_health_setting":           np.nan,
+            "one_health_source_field":      np.nan,
+            "one_health_evidence_conflict": False,
+            "one_health_evidence_sources":  0,
+        }
+
+        state, evidence_tuples, field_values_for_composite = self._collect_field_evidence(row, out)
+
+        domain_category      = state["domain_category"]
+        domain_term          = state["domain_term"]
+        domain_field         = state["domain_field"]
+        domain_specificity   = state["domain_specificity"]
+        domain_field_weight  = state["domain_field_weight"]
+        specimen_category    = state["specimen_category"]
+        specimen_term        = state["specimen_term"]
+        specimen_field       = state["specimen_field"]
+        specimen_specificity = state["specimen_specificity"]
+        specimen_field_weight = state["specimen_field_weight"]
+        evidence_term        = state["evidence_term"]
+        evidence_field       = state["evidence_field"]
+        supporting_category  = state["supporting_category"]
+        supporting_term      = state["supporting_term"]
+        supporting_field     = state["supporting_field"]
+        supporting_conf      = state["supporting_conf"]
+        corroborated         = state["corroborated"]
+        _domain_from_host_dict = state["_domain_from_host_dict"]
+        _hard_evidence         = state["_hard_evidence"]
+
+        out["one_health_evidence_sources"] = len(evidence_tuples)
 
         # ------------------------------------------------------------------
         # Improvement #1: detect domain vs. specimen conflict
@@ -1106,58 +1218,138 @@ class OneHealthClassifier:
 
         corroboration_bonus = 0.10 if corroborated else 0.0
 
+        # ------------------------------------------------------------------
+        # Improvement #10: Bayesian posterior
+        # ------------------------------------------------------------------
+        posteriors = self._bayesian_combine(evidence_tuples)
+        bayes_winner = None
+        bayes_posterior = 0.0
+        if posteriors:
+            bayes_winner = max(posteriors, key=lambda c: posteriors[c])
+            bayes_posterior = posteriors[bayes_winner]
+
+        # ------------------------------------------------------------------
+        # Deterministic path (always computed; used when hard evidence exists
+        # or when Bayesian signal is too weak)
+        # ------------------------------------------------------------------
+        determ_category  = None
+        determ_term      = None
+        determ_conf      = 0.0
+        determ_field     = None
+
         if domain_category is not None:
             raw_conf = min(1.0, domain_specificity * domain_field_weight + corroboration_bonus)
             if evidence_conflict:
                 raw_conf = max(0.0, raw_conf - _CONFLICT_CONFIDENCE_PENALTY)
-            out["one_health_category"]          = domain_category
-            out["one_health_term"]              = domain_term
-            out["one_health_confidence"]        = round(raw_conf, 3)
-            out["one_health_source_field"]      = domain_field
+            determ_category = domain_category
+            determ_term     = domain_term
+            determ_conf     = round(raw_conf, 3)
+            determ_field    = domain_field
             out["one_health_evidence_conflict"] = evidence_conflict
 
         elif specimen_category is not None:
             raw_conf = min(1.0, specimen_specificity * specimen_field_weight + corroboration_bonus)
-            out["one_health_category"]     = specimen_category
-            out["one_health_term"]         = specimen_term
-            out["one_health_confidence"]   = round(raw_conf, 3)
-            out["one_health_source_field"] = specimen_field
+            determ_category = specimen_category
+            determ_term     = specimen_term
+            determ_conf     = round(raw_conf, 3)
+            determ_field    = specimen_field
 
         elif specimen_term is not None or evidence_term is not None:
-            # Improvement #4: try context-assisted resolution before Unclassified
             resolved_cat = self._resolve_ambiguous_with_context(
                 evidence_term, domain_category, specimen_category, supporting_category
             )
             source = specimen_field if specimen_field is not None else evidence_field
             raw_conf = min(1.0, 0.3 * (specimen_field_weight or 0.70) + corroboration_bonus)
             if resolved_cat and resolved_cat != "Unclassified":
-                out["one_health_category"]     = resolved_cat
-                out["one_health_term"]         = specimen_term or evidence_term
-                out["one_health_confidence"]   = round(raw_conf * 0.80, 3)
-                out["one_health_source_field"] = source
+                determ_category = resolved_cat
+                determ_term     = specimen_term or evidence_term
+                determ_conf     = round(raw_conf * 0.80, 3)
+                determ_field    = source
             else:
-                out["one_health_category"]     = "Unclassified"
-                out["one_health_term"]         = specimen_term or evidence_term
-                out["one_health_confidence"]   = round(raw_conf, 3)
-                out["one_health_source_field"] = source
+                determ_category = "Unclassified"
+                determ_term     = specimen_term or evidence_term
+                determ_conf     = round(raw_conf, 3)
+                determ_field    = source
+
+        elif supporting_category is not None:
+            determ_category = supporting_category
+            determ_term     = supporting_term
+            determ_conf     = round(supporting_conf, 3)
+            determ_field    = supporting_field
 
         else:
-            if supporting_category is not None:
-                out["one_health_category"]     = supporting_category
-                out["one_health_term"]         = supporting_term
-                out["one_health_confidence"]   = round(supporting_conf, 3)
-                out["one_health_source_field"] = supporting_field
-            else:
-                setting_val = out.get("one_health_setting")
-                if pd.notna(setting_val):
-                    setting_lower = str(setting_val).lower()
-                    inferred = self._setting_to_category.get(setting_lower)
-                    if inferred:
-                        raw_conf = self._setting_confidence.get(setting_lower, 0.40)
-                        out["one_health_category"]     = inferred
-                        out["one_health_confidence"]   = round(raw_conf, 3)
-                        out["one_health_term"]         = setting_lower
-                        out["one_health_source_field"] = "setting_inference"
+            setting_val = out.get("one_health_setting")
+            if pd.notna(setting_val):
+                setting_lower = str(setting_val).lower()
+                inferred = self._setting_to_category.get(setting_lower)
+                if inferred:
+                    raw_conf = self._setting_confidence.get(setting_lower, 0.40)
+                    determ_category = inferred
+                    determ_conf     = round(raw_conf, 3)
+                    determ_term     = setting_lower
+                    determ_field    = "setting_inference"
+
+        # ------------------------------------------------------------------
+        # Decision: Bayesian override vs deterministic
+        #
+        # Use Bayesian result when ALL of:
+        #   1. No hard evidence (host_dict or unambiguous from high-weight field)
+        #   2. Bayesian winner exists and is not Unclassified
+        #   3. Bayesian posterior >= _BAYES_MIN_POSTERIOR
+        #   4. Either deterministic result is absent / Unclassified, OR
+        #      Bayesian winner differs from deterministic AND
+        #      determ_conf < 0.75 (Bayesian only overrides weak determ results)
+        # ------------------------------------------------------------------
+        use_bayes = (
+            not _hard_evidence
+            and bayes_winner is not None
+            and bayes_winner != "Unclassified"
+            and bayes_posterior >= _BAYES_MIN_POSTERIOR
+            and (
+                determ_category is None
+                or determ_category == "Unclassified"
+                or (bayes_winner != determ_category and determ_conf < 0.75)
+            )
+        )
+
+        if use_bayes:
+            out["one_health_category"]     = bayes_winner
+            out["one_health_confidence"]   = round(bayes_posterior, 3)
+            out["one_health_source_field"] = "bayesian_fusion"
+            # Use the best-specificity term from evidence_tuples for this category
+            best_ev = max(
+                (ev for ev in evidence_tuples if ev[0] == bayes_winner),
+                key=lambda ev: ev[1],
+                default=None,
+            )
+            if best_ev is not None:
+                # Find the term from the deterministic state that matches
+                if determ_category == bayes_winner and determ_term is not None:
+                    out["one_health_term"] = determ_term
+                elif specimen_category == bayes_winner and specimen_term is not None:
+                    out["one_health_term"] = specimen_term
+                elif domain_category == bayes_winner and domain_term is not None:
+                    out["one_health_term"] = domain_term
+                else:
+                    out["one_health_term"] = np.nan
+            logger.debug(
+                "Bayesian fusion overrode deterministic %r (conf=%.3f) -> %r (posterior=%.3f)",
+                determ_category, determ_conf, bayes_winner, bayes_posterior,
+            )
+        else:
+            if determ_category is not None:
+                out["one_health_category"]     = determ_category
+                out["one_health_term"]         = determ_term
+                out["one_health_confidence"]   = determ_conf
+                out["one_health_source_field"] = determ_field
+            # When hard evidence AND Bayesian agree, use Bayesian posterior
+            # as confidence if it is higher (benefits from multi-field corroboration)
+            if (
+                _hard_evidence
+                and bayes_winner == out["one_health_category"]
+                and bayes_posterior > out["one_health_confidence"]
+            ):
+                out["one_health_confidence"] = round(bayes_posterior, 3)
 
         # ------------------------------------------------------------------
         # Improvement #7: composite-string fallback for low-confidence results
@@ -1203,24 +1395,13 @@ class OneHealthClassifier:
                     " ".join(field_values_for_composite)
                 )
                 if food_layer.get("one_health_category") == "Food":
-                    out["one_health_category"]    = "Food"
-                    out["one_health_term"]        = food_layer.get("one_health_term", out["one_health_term"])
-                    out["one_health_confidence"]  = round(
-                        min(0.85, out["one_health_confidence"]), 3
-                    )
+                    out["one_health_category"]     = "Food"
+                    out["one_health_term"]         = food_layer.get("one_health_term", out["one_health_term"])
+                    out["one_health_confidence"]   = round(min(0.85, out["one_health_confidence"]), 3)
                     out["one_health_source_field"] = "food_override"
 
         # ------------------------------------------------------------------
         # Failure Mode C fix (#C): lab/vaccine processing override
-        # When a lab or vaccine processing term was detected and the current
-        # Animal winner has confidence < 0.85, demote to Unclassified.
-        # The 0.85 threshold protects rock-solid Animal signals (e.g. rumen
-        # content classified from isolation_source with a host dict hit).
-        # Fix 3 exemption: when _domain_from_host_dict is True (the Animal
-        # category was assigned from a direct host_to_category dict lookup
-        # for an explicit organism name), the lab/vaccine term describes the
-        # experimental context, not the sample origin, so the Animal category
-        # is correct and should not be demoted.
         # ------------------------------------------------------------------
         if out["one_health_category"] == "Animal":
             proc_val = out.get("one_health_processing")
@@ -1228,7 +1409,7 @@ class OneHealthClassifier:
                 pd.notna(proc_val)
                 and str(proc_val).lower() in _LAB_PROCESSING_OVERRIDE
                 and out["one_health_confidence"] < 0.85
-                and not _domain_from_host_dict  # Fix 3: exempt explicit organism names
+                and not _domain_from_host_dict
             ):
                 out["one_health_category"]       = "Unclassified"
                 out["one_health_confidence"]     = round(out["one_health_confidence"] * 0.5, 4)
@@ -1236,11 +1417,6 @@ class OneHealthClassifier:
 
         # ------------------------------------------------------------------
         # Fix 2: Healthcare surface reclassification
-        # A record classified as Human whose source text contains a surface or
-        # inanimate-object keyword is more accurately Environmental: the Human
-        # signal came from the clinical setting, not from the sample matrix.
-        # Only fires when confidence < 0.90 to protect strong direct human
-        # specimen signals (blood, CSF, biopsy, etc.).
         # ------------------------------------------------------------------
         if out["one_health_category"] == "Human" and out["one_health_confidence"] < 0.90:
             for _fv in field_values_for_composite:
@@ -1281,8 +1457,6 @@ class OneHealthClassifier:
         """
         Remove tokens that are immediately preceded by a negation prefix
         (not, non-, without, excluding, absent, negative for).
-        The negation prefix itself is also removed so it does not accidentally
-        match shorter tier-1 patterns on partial text.
         """
         result = _NEGATION_PREFIX_RE.sub(" __NEG__ ", text)
         tokens = result.split()
@@ -1299,7 +1473,7 @@ class OneHealthClassifier:
         return " ".join(cleaned)
 
     # ------------------------------------------------------------------
-    # Core single-value classification engine (wrapped by LRU cache in __init__)
+    # Core single-value classification engine (LRU-cached via __init__)
     # ------------------------------------------------------------------
 
     def _classify_text_uncached(self, value):
@@ -1381,14 +1555,8 @@ class OneHealthClassifier:
                 setting = smatch.group(1).lower()
                 working = (working[: smatch.start()] + working[smatch.end():]).strip()
 
-        # Improvement #2: suppress negated keyword spans before tier-1 matching
         working_clean = self._suppress_negated_spans(working)
 
-        # Fix 1: oil-environmental modifier suppression
-        # When the working string contains an oil/petroleum/hydrocarbon modifier,
-        # strip all Animal tier-1 matches so that the Environmental keyword
-        # wins uncontested. Animal-looking tokens in such strings are incidental
-        # (e.g. an animal common name embedded in a petroleum-environment study).
         if _OIL_ENV_MODIFIER_RE.search(working_clean):
             for _animal_cat, _animal_pat in self._TIER1_PATTERNS:
                 if _animal_cat == "Animal":
@@ -1396,7 +1564,6 @@ class OneHealthClassifier:
                     break
 
         if working_clean:
-            # Improvements #3 + #9: collect all tier-1 matches and vote with yield priority
             winner_cat, winner_term, winner_spec = self._tier1_vote(working_clean)
             if winner_cat is not None:
                 return {
