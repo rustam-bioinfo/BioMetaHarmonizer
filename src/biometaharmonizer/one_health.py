@@ -122,7 +122,6 @@ _ANIMAL_ORIGIN_RE = re.compile(
 
 # ---------------------------------------------------------------------------
 # Improvement #2: negation-aware preprocessing
-# Detects negation prefixes within a 3-token window before a keyword.
 # ---------------------------------------------------------------------------
 _NEGATION_PREFIX_RE = re.compile(
     r"\b(?:not|non[\-\s]|without|excluding|absent|negative\s+for|no\b)\s+",
@@ -138,6 +137,39 @@ _FOOD_CONTEXT_RE = re.compile(
     r"retail\s+(?:meat|food)|supermarket|grocery|delicatessen)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Failure Mode C fix: lab/vaccine processing terms that suppress Animal
+# when confidence is below the certainty threshold.
+# Applied in _integrate_evidence after the evidence loop, before writing out.
+# Threshold 0.85 ensures a rock-solid Animal signal (e.g. rumen + cell culture)
+# is not wrongly suppressed.
+# ---------------------------------------------------------------------------
+_LAB_PROCESSING_OVERRIDE = frozenset({
+    "cell culture",
+    "cell line",
+    "in vitro",
+    "tissue culture",
+    "organ culture",
+    "primary culture",
+    "axenic culture",
+    "axenic",
+    "gnotobiotic",
+    "germ-free",
+    "liquid culture",
+    "broth culture",
+    "vaccine",
+    "live attenuated",
+    "attenuated",
+    "attenuated strain",
+    "inactivated vaccine",
+    "killed vaccine",
+    "toxigenic strain",
+    "capsulated strain",
+    "laboratory medium",
+    "luria bertani",
+    "lb medium",
+})
 
 
 def _taxonomic_fallback(name_lower, host_to_category):
@@ -389,6 +421,11 @@ class OneHealthClassifier:
           Food, Environmental, Plant, and Human when any of those categories
           also match (prevents animal ingredient names in food dishes or
           environmental sample descriptions from overriding context).
+      #C  Lab/vaccine processing override (Failure Mode C fix): when
+          one_health_processing is a known lab or vaccine term and the
+          winning Animal confidence is below 0.85, the category is demoted
+          to Unclassified. This fixes cell-culture environments, vaccine
+          strains, and laboratory media records misclassified as Animal.
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
@@ -536,8 +573,6 @@ class OneHealthClassifier:
             self._fuzzy_labels = []
 
         # Improvement #8: per-category per-term specificity overrides.
-        # JSON key: "specificity_overrides" -> { "term": score, ... }
-        # Falls back to length-based heuristic when a term is absent.
         self._specificity_overrides: dict[str, float] = {
             k.lower(): float(v)
             for k, v in self._dicts.get("specificity_overrides", {}).items()
@@ -550,10 +585,6 @@ class OneHealthClassifier:
     # ------------------------------------------------------------------
 
     def _term_specificity_with_override(self, term_str: str, source: str) -> float:
-        """
-        Return specificity for *term_str* matched via *source*, consulting
-        the per-term override table first (Improvement #8).
-        """
         if term_str:
             override = self._specificity_overrides.get(term_str.lower())
             if override is not None:
@@ -614,7 +645,7 @@ class OneHealthClassifier:
           one_health_category, one_health_term, one_health_confidence,
           one_health_evidence_level, one_health_processing,
           one_health_setting, one_health_source_field,
-          one_health_evidence_conflict  (new -- Improvement #1)
+          one_health_evidence_conflict  (Improvement #1)
         """
         known = set(self._FIELD_PRIORITY)
         for k in fields:
@@ -710,16 +741,6 @@ class OneHealthClassifier:
     # Improvement #3 + #9: multi-term voting with category yield priority
     # ------------------------------------------------------------------
 
-    # Priority for mixed-signal fields: lower number wins over higher.
-    # Animal yields to every other category when both have tier-1 matches
-    # in the same field value. This prevents animal ingredient/species names
-    # in food dish descriptions or environmental phrases from overriding the
-    # contextually dominant category.
-    # Examples fixed:
-    #   "barbecued chicken"        -> Food (Food beats Animal)
-    #   "shrimp farming water"     -> Environmental (Environmental beats Animal)
-    #   "cat grass plant"          -> Plant (Plant beats Animal)
-    #   "soil of feather dumping"  -> Environmental (Environmental beats Animal)
     _CATEGORY_YIELD_PRIORITY: dict[str, int] = {
         "Human":         1,
         "Food":          2,
@@ -735,13 +756,10 @@ class OneHealthClassifier:
         plurality-vote (category, best_term, best_specificity) tuple, or
         (None, None, 0.0) if no match.
 
-        Votes are weighted by per-term specificity.  In mixed-signal fields
+        Votes are weighted by per-term specificity. In mixed-signal fields
         (multiple categories matched), _CATEGORY_YIELD_PRIORITY determines
         the winner: the category with the lowest priority number wins,
         provided it has at least 0.50 aggregate specificity votes.
-        This prevents animal ingredient names in food dishes or environmental
-        sample descriptions from overriding the contextually dominant category
-        (Improvements #3 + #9).
         """
         votes: dict[str, float] = {}
         best_per_cat: dict[str, tuple[str, float]] = {}
@@ -761,11 +779,6 @@ class OneHealthClassifier:
         if len(votes) == 1:
             winner = next(iter(votes))
         else:
-            # Mixed-signal field: apply yield priority.
-            # The category with the lowest priority number (most specific context)
-            # wins over Animal (priority 5) when it has >=0.50 aggregate votes.
-            # This avoids degenerate single-char / very short matches with 0.50
-            # specificity overriding a clearly dominant high-vote-weight category.
             priority_winner = min(
                 votes,
                 key=lambda c: (
@@ -804,8 +817,6 @@ class OneHealthClassifier:
         When only an ambiguous term was captured and no category was
         conclusively assigned, try to infer a category from other tracks
         (Improvement #4).
-
-        Returns the inferred category string or None.
         """
         context_cat = domain_category or specimen_category or supporting_category
         if context_cat and context_cat != "Unclassified":
@@ -1057,9 +1068,7 @@ class OneHealthClassifier:
             out["one_health_source_field"] = specimen_field
 
         elif specimen_term is not None or evidence_term is not None:
-            # ------------------------------------------------------------------
             # Improvement #4: try context-assisted resolution before Unclassified
-            # ------------------------------------------------------------------
             resolved_cat = self._resolve_ambiguous_with_context(
                 evidence_term, domain_category, specimen_category, supporting_category
             )
@@ -1145,6 +1154,24 @@ class OneHealthClassifier:
                     )
                     out["one_health_source_field"] = "food_override"
 
+        # ------------------------------------------------------------------
+        # Failure Mode C fix (#C): lab/vaccine processing override
+        # When a lab or vaccine processing term was detected and the current
+        # Animal winner has confidence < 0.85, demote to Unclassified.
+        # The 0.85 threshold protects rock-solid Animal signals (e.g. rumen
+        # content classified from isolation_source with a host dict hit).
+        # ------------------------------------------------------------------
+        if out["one_health_category"] == "Animal":
+            proc_val = out.get("one_health_processing")
+            if (
+                pd.notna(proc_val)
+                and str(proc_val).lower() in _LAB_PROCESSING_OVERRIDE
+                and out["one_health_confidence"] < 0.85
+            ):
+                out["one_health_category"]     = "Unclassified"
+                out["one_health_confidence"]   = round(out["one_health_confidence"] * 0.5, 4)
+                out["one_health_evidence_level"] = "unresolved"
+
         out["one_health_evidence_level"] = discretize_confidence(out["one_health_confidence"])
         return out
 
@@ -1179,8 +1206,6 @@ class OneHealthClassifier:
         (not, non-, without, excluding, absent, negative for).
         The negation prefix itself is also removed so it does not accidentally
         match shorter tier-1 patterns on partial text.
-
-        Returns the cleaned working string.
         """
         result = _NEGATION_PREFIX_RE.sub(" __NEG__ ", text)
         tokens = result.split()
