@@ -139,6 +139,46 @@ _FOOD_CONTEXT_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
+# Fix 1: Oil-environmental modifier suppression
+# When working_clean contains an oil/petroleum/hydrocarbon modifier,
+# any Animal tier-1 keyword that happens to co-occur is incidental
+# (e.g. "bovine" in a petroleum-contaminated soil study). Strip Animal
+# tier-1 matches from working_clean before voting so the Environmental
+# keyword wins uncontested.
+# ---------------------------------------------------------------------------
+_OIL_ENV_MODIFIER_RE = re.compile(
+    r"\b(?:oil|petroleum|crude|diesel|gasoline|kerosene|hydrocarbon|"
+    r"tar|bitumen|asphalt|naphtha|refinery|petrochemical|"
+    r"polycyclic\s+aromatic|pah|btex|benzene|toluene|xylene)"
+    r"[\s\-]*(?:contaminated|impacted|polluted|spill|affected|"
+    r"derived|based|degrading|degraded|weathered|amended|"
+    r"rich|laden)?\b",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# Fix 2: Healthcare surface reclassification
+# Surface/object keywords that indicate the sample is from a hard surface
+# or inanimate object in a clinical/healthcare environment, not from a
+# human body. When the winning category is Human with confidence < 0.90
+# and one of these keywords appears in any source field, demote to
+# Environmental (the swab is of a surface, not a person).
+# ---------------------------------------------------------------------------
+_HEALTHCARE_SURFACE_RE = re.compile(
+    r"\b(?:door\s*handle|door\s*knob|countertop|counter\s+top|"
+    r"floor|ceiling|wall\s+surface|bench\s+top|benchtop|"
+    r"sink|drain|faucet|tap|tap\s+water\s+outlet|"
+    r"keyboard|computer\s+keyboard|mouse\s+device|touchscreen|"
+    r"bedrail|bed\s+rail|handrail|grab\s+bar|"
+    r"stethoscope|thermometer\s+surface|"
+    r"swab\s+of\s+(?:a\s+)?surface|surface\s+swab|"
+    r"environmental\s+swab|hospital\s+surface|"
+    r"inanimate\s+surface|hard\s+surface|"
+    r"medical\s+device\s+surface|equipment\s+surface)\b",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
 # Failure Mode C fix: lab/vaccine processing terms that suppress Animal
 # when confidence is below the certainty threshold.
 # Applied in _integrate_evidence after the evidence loop, before writing out.
@@ -426,6 +466,17 @@ class OneHealthClassifier:
           winning Animal confidence is below 0.85, the category is demoted
           to Unclassified. This fixes cell-culture environments, vaccine
           strains, and laboratory media records misclassified as Animal.
+          Exemption: direct host_dict organism-name hits are not demoted
+          (tracked via _domain_from_host_dict flag).
+      #F1 Oil-environmental modifier suppression: when working_clean contains
+          an oil/petroleum/hydrocarbon modifier, Animal tier-1 matches are
+          stripped before voting so the Environmental keyword wins.
+      #F2 Healthcare surface reclassification: Human (confidence < 0.90)
+          is demoted to Environmental when a hard-surface/object keyword
+          appears in any source field value.
+      #F3 Lab override exemption for explicit organism names: _domain_from_host_dict
+          flag prevents #C from demoting records whose Animal category came
+          from a direct host_to_category dict lookup (known organism name).
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
@@ -869,6 +920,10 @@ class OneHealthClassifier:
 
         corroborated = False
 
+        # Fix 3: track whether domain_category came from a direct host_dict
+        # lookup (explicit organism name). Used to exempt the #C lab override.
+        _domain_from_host_dict = False
+
         # Track all non-null field string values for composite pass (Improvement #7)
         field_values_for_composite: list = []
 
@@ -897,6 +952,7 @@ class OneHealthClassifier:
                         domain_field        = field
                         domain_specificity  = spec
                         domain_field_weight = fw
+                        _domain_from_host_dict = True  # Fix 3: explicit organism name
                     elif domain_category == host_cat:
                         corroborated = True
                     layer = self._classify_text(val_str)
@@ -1160,6 +1216,11 @@ class OneHealthClassifier:
         # Animal winner has confidence < 0.85, demote to Unclassified.
         # The 0.85 threshold protects rock-solid Animal signals (e.g. rumen
         # content classified from isolation_source with a host dict hit).
+        # Fix 3 exemption: when _domain_from_host_dict is True (the Animal
+        # category was assigned from a direct host_to_category dict lookup
+        # for an explicit organism name), the lab/vaccine term describes the
+        # experimental context, not the sample origin, so the Animal category
+        # is correct and should not be demoted.
         # ------------------------------------------------------------------
         if out["one_health_category"] == "Animal":
             proc_val = out.get("one_health_processing")
@@ -1167,10 +1228,26 @@ class OneHealthClassifier:
                 pd.notna(proc_val)
                 and str(proc_val).lower() in _LAB_PROCESSING_OVERRIDE
                 and out["one_health_confidence"] < 0.85
+                and not _domain_from_host_dict  # Fix 3: exempt explicit organism names
             ):
-                out["one_health_category"]     = "Unclassified"
-                out["one_health_confidence"]   = round(out["one_health_confidence"] * 0.5, 4)
+                out["one_health_category"]       = "Unclassified"
+                out["one_health_confidence"]     = round(out["one_health_confidence"] * 0.5, 4)
                 out["one_health_evidence_level"] = "unresolved"
+
+        # ------------------------------------------------------------------
+        # Fix 2: Healthcare surface reclassification
+        # A record classified as Human whose source text contains a surface or
+        # inanimate-object keyword is more accurately Environmental: the Human
+        # signal came from the clinical setting, not from the sample matrix.
+        # Only fires when confidence < 0.90 to protect strong direct human
+        # specimen signals (blood, CSF, biopsy, etc.).
+        # ------------------------------------------------------------------
+        if out["one_health_category"] == "Human" and out["one_health_confidence"] < 0.90:
+            for _fv in field_values_for_composite:
+                if _HEALTHCARE_SURFACE_RE.search(_fv):
+                    out["one_health_category"]   = "Environmental"
+                    out["one_health_confidence"] = round(out["one_health_confidence"] * 0.85, 3)
+                    break
 
         out["one_health_evidence_level"] = discretize_confidence(out["one_health_confidence"])
         return out
@@ -1306,6 +1383,17 @@ class OneHealthClassifier:
 
         # Improvement #2: suppress negated keyword spans before tier-1 matching
         working_clean = self._suppress_negated_spans(working)
+
+        # Fix 1: oil-environmental modifier suppression
+        # When the working string contains an oil/petroleum/hydrocarbon modifier,
+        # strip all Animal tier-1 matches so that the Environmental keyword
+        # wins uncontested. Animal-looking tokens in such strings are incidental
+        # (e.g. an animal common name embedded in a petroleum-environment study).
+        if _OIL_ENV_MODIFIER_RE.search(working_clean):
+            for _animal_cat, _animal_pat in self._TIER1_PATTERNS:
+                if _animal_cat == "Animal":
+                    working_clean = _animal_pat.sub("", working_clean).strip()
+                    break
 
         if working_clean:
             # Improvements #3 + #9: collect all tier-1 matches and vote with yield priority
