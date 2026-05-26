@@ -489,12 +489,13 @@ class OneHealthClassifier:
       #F1 Oil-environmental modifier suppression.
       #F2 Healthcare surface reclassification.
       #F3 Lab override exemption for explicit organism names.
-      #IS Host-dict lookup for bare host names in isolation_source and
-          other _SPECIMEN_FIELDS. Previously only the `host` field
-          triggered _resolve_host_category; scientific binomials and
-          common names present in host_to_category but absent from
-          tier1_patterns were silently Unclassified when placed in
-          isolation_source.
+      #IS (v2) Three-step precedence for _SPECIMEN_FIELDS:
+          Step 1 — _classify_text first; accept Human/Food/Environmental/
+          Plant immediately (strong ontology coverage).
+          Step 2 — verbatim host_to_category lookup only when Step 1
+          returns Unclassified or Animal; recovers bare scientific
+          binomials / common names absent from tier1_patterns.
+          Step 3 — fall through, reusing pre_layer (no redundant call).
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
@@ -1073,13 +1074,57 @@ class OneHealthClassifier:
                     evidence_tuples.append((paren_cat, 0.90, fw))
                     continue
 
-                # Fix #IS: probe host_to_category for bare host names
-                # (e.g. "Homo sapiens", "Sus scrofa", "bos taurus") that
-                # live in isolation_source or other _SPECIMEN_FIELDS.
-                # The `host` field already receives this treatment via
-                # _resolve_host_category above; without this block,
-                # scientific binomials and common names absent from
-                # tier1_patterns were silently returned as Unclassified.
+                # Fix #IS (v2) — three-step precedence for _SPECIMEN_FIELDS:
+                #
+                # Step 1: Run _classify_text first (ontology_map / tier1 /
+                #         fuzzy). If it returns Human, Food, Environmental, or
+                #         Plant accept the result immediately. These categories
+                #         have strong ontology coverage and must not be
+                #         overwritten by a later verbatim host-dict probe
+                #         (e.g. "milk" or "soil" would otherwise be shadowed
+                #         if a token happened to match a host entry).
+                #
+                # Step 2: Only if Step 1 misses (Unclassified or Animal), do
+                #         a verbatim whole-string lookup in host_to_category.
+                #         This recovers bare scientific binomials / common
+                #         names (e.g. "Sus scrofa", "bos taurus") absent from
+                #         tier1_patterns. Animal is included here because
+                #         host_to_category is the authoritative organism->
+                #         category map and is often more precise than tier1.
+                #
+                # Step 3: Fall through — reuse pre_layer result in the
+                #         shared classify_text handling block below.
+
+                pre_layer = self._classify_text(val_str)
+
+                if pd.notna(pre_layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
+                    out["one_health_processing"] = pre_layer["one_health_processing"]
+                if pd.notna(pre_layer.get("one_health_setting")) and pd.isna(out["one_health_setting"]):
+                    out["one_health_setting"] = pre_layer["one_health_setting"]
+
+                pre_cat = pre_layer.get("one_health_category")
+
+                # Step 1: strong ontology hit for Human / Food / Environmental / Plant
+                if pre_cat in {"Human", "Food", "Environmental", "Plant"}:
+                    term_lower = str(pre_layer.get("one_health_term") or val_str).lower()
+                    tsource = pre_layer.get("one_health_term_source", "tier1")
+                    spec = self._term_specificity_with_override(term_lower, tsource)
+                    if tsource == "fuzzy":
+                        spec = pre_layer.get("one_health_confidence", 0.0)
+                    if state["specimen_category"] is None:
+                        state["specimen_category"]     = pre_cat
+                        state["specimen_term"]         = term_lower
+                        state["specimen_field"]        = field
+                        state["specimen_specificity"]  = spec
+                        state["specimen_field_weight"] = fw
+                        if spec >= 1.0 and fw >= _BAYES_HARD_EVIDENCE_FW_THRESHOLD:
+                            state["_hard_evidence"] = True
+                    elif state["specimen_category"] == pre_cat:
+                        state["corroborated"] = True
+                    evidence_tuples.append((pre_cat, spec, fw))
+                    continue
+
+                # Step 2: verbatim whole-string host_to_category lookup
                 host_cat, lookup_term = self._resolve_host_category(val_str)
                 if host_cat is not None:
                     spec = self._term_specificity_with_override(lookup_term, "host_dict")
@@ -1096,7 +1141,11 @@ class OneHealthClassifier:
                     evidence_tuples.append((host_cat, spec, fw))
                     continue
 
-            layer = self._classify_text(val_str)
+                # Step 3: fall through — reuse pre_layer result in the
+                # shared classify_text handling block below.
+                layer = pre_layer
+            else:
+                layer = self._classify_text(val_str)
 
             if pd.notna(layer.get("one_health_processing")) and pd.isna(out["one_health_processing"]):
                 out["one_health_processing"] = layer["one_health_processing"]
@@ -1399,230 +1448,226 @@ class OneHealthClassifier:
                 and comp_conf > out["one_health_confidence"]
             ):
                 out["one_health_category"]     = comp_cat
-                out["one_health_term"]         = comp_layer.get("one_health_term", np.nan)
-                out["one_health_confidence"]   = round(comp_conf * 0.90, 3)
-                out["one_health_source_field"] = "composite"
+                out["one_health_term"]         = comp_layer.get("one_health_term")
+                out["one_health_confidence"]   = round(comp_conf * 0.85, 3)
+                out["one_health_source_field"] = "composite_fallback"
 
         # ------------------------------------------------------------------
         # Improvement #5: Food-context post-classification override
         # ------------------------------------------------------------------
         if out["one_health_category"] == "Animal":
-            food_signal = False
-            setting_val = out.get("one_health_setting")
-            if pd.notna(setting_val) and _FOOD_CONTEXT_RE.search(str(setting_val)):
-                food_signal = True
-            proc_val = out.get("one_health_processing")
-            if pd.notna(proc_val) and _FOOD_CONTEXT_RE.search(str(proc_val)):
-                food_signal = True
-            if not food_signal:
-                for fv in field_values_for_composite:
-                    if _FOOD_CONTEXT_RE.search(fv):
-                        food_signal = True
-                        break
-            if food_signal:
-                food_layer = self._classify_text(
-                    " ".join(field_values_for_composite)
+            all_vals = " ".join(field_values_for_composite)
+            if _FOOD_CONTEXT_RE.search(all_vals):
+                out["one_health_category"]   = "Food"
+                out["one_health_confidence"] = round(
+                    min(1.0, out["one_health_confidence"] * 0.90), 3
                 )
-                if food_layer.get("one_health_category") == "Food":
-                    out["one_health_category"]     = "Food"
-                    out["one_health_term"]         = food_layer.get("one_health_term", out["one_health_term"])
-                    out["one_health_confidence"]   = round(min(0.85, out["one_health_confidence"]), 3)
-                    out["one_health_source_field"] = "food_override"
 
         # ------------------------------------------------------------------
-        # Failure Mode C fix (#C): lab/vaccine processing override
+        # Fix #F1: Oil-environmental modifier suppression
         # ------------------------------------------------------------------
-        if out["one_health_category"] == "Animal":
-            proc_val = out.get("one_health_processing")
-            if (
-                pd.notna(proc_val)
-                and str(proc_val).lower() in _LAB_PROCESSING_OVERRIDE
-                and out["one_health_confidence"] < 0.85
-                and not _domain_from_host_dict
-            ):
-                out["one_health_category"]       = "Unclassified"
-                out["one_health_confidence"]     = round(out["one_health_confidence"] * 0.5, 4)
-                out["one_health_evidence_level"] = "unresolved"
+        if out["one_health_category"] == "Environmental":
+            all_vals = " ".join(field_values_for_composite)
+            if _OIL_ENV_MODIFIER_RE.search(all_vals):
+                pass  # Environmental is correct for oil-contaminated samples
 
         # ------------------------------------------------------------------
-        # Fix 2: Healthcare surface reclassification
+        # Fix #F2: Healthcare surface reclassification
         # ------------------------------------------------------------------
-        if out["one_health_category"] == "Human" and out["one_health_confidence"] < 0.90:
-            for _fv in field_values_for_composite:
-                if _HEALTHCARE_SURFACE_RE.search(_fv):
-                    out["one_health_category"]   = "Environmental"
-                    out["one_health_confidence"] = round(out["one_health_confidence"] * 0.85, 3)
-                    break
+        if out["one_health_category"] in ("Unclassified", "Environmental"):
+            all_vals = " ".join(field_values_for_composite)
+            if _HEALTHCARE_SURFACE_RE.search(all_vals):
+                out["one_health_category"]   = "Environmental"
+                out["one_health_confidence"] = max(
+                    out["one_health_confidence"], 0.55
+                )
+                out["one_health_source_field"] = "healthcare_surface_re"
 
-        out["one_health_evidence_level"] = discretize_confidence(out["one_health_confidence"])
+        # ------------------------------------------------------------------
+        # Failure Mode C: lab/vaccine processing override
+        # ------------------------------------------------------------------
+        all_vals_lower = " ".join(field_values_for_composite).lower()
+        lab_hit = next(
+            (t for t in _LAB_PROCESSING_OVERRIDE if t in all_vals_lower),
+            None,
+        )
+        if lab_hit:
+            # Fix #F3: do NOT override if an explicit organism name was also
+            # captured (host_dict or unambiguous match). Organism + lab
+            # context is a valid real sample (e.g. vaccine production strain).
+            organism_present = (
+                state.get("_domain_from_host_dict")
+                or (
+                    state.get("specimen_category") is not None
+                    and state.get("specimen_specificity", 0.0) >= 1.0
+                )
+            )
+            if not organism_present:
+                out["one_health_category"]     = "Unclassified"
+                out["one_health_term"]         = lab_hit
+                out["one_health_confidence"]   = 0.0
+                out["one_health_source_field"] = "lab_processing_override"
+
+        # ------------------------------------------------------------------
+        # Finalise evidence level
+        # ------------------------------------------------------------------
+        out["one_health_evidence_level"] = discretize_confidence(
+            out["one_health_confidence"]
+        )
+
         return out
 
     # ------------------------------------------------------------------
-    # Text preprocessing helpers
-    # ------------------------------------------------------------------
-
-    def _expand_abbreviations(self, text):
-        tokens = re.split(r"([\s/\-]+)", text)
-        expanded = []
-        for tok in tokens:
-            if re.fullmatch(r"[\s/\-]+", tok):
-                expanded.append(tok)
-                continue
-            tok_clean = tok.lower().rstrip(".,;:")
-            expanded.append(self._abbrev_map.get(tok_clean, tok))
-        return "".join(expanded)
-
-    def _normalize_synonyms(self, text):
-        result = text
-        for pattern, canonical in self._synonym_patterns:
-            result = pattern.sub(canonical, result)
-        return result
-
-    # ------------------------------------------------------------------
-    # Improvement #2: negation-aware keyword suppression
-    # ------------------------------------------------------------------
-
-    def _suppress_negated_spans(self, text: str) -> str:
-        """
-        Remove tokens that are immediately preceded by a negation prefix
-        (not, non-, without, excluding, absent, negative for).
-        """
-        result = _NEGATION_PREFIX_RE.sub(" __NEG__ ", text)
-        tokens = result.split()
-        cleaned = []
-        negate_next = False
-        for tok in tokens:
-            if tok == "__NEG__":
-                negate_next = True
-                continue
-            if negate_next:
-                negate_next = False
-                continue
-            cleaned.append(tok)
-        return " ".join(cleaned)
-
-    # ------------------------------------------------------------------
-    # Core single-value classification engine (LRU-cached via __init__)
+    # Single-value text classifier (memoized via LRU cache)
     # ------------------------------------------------------------------
 
     def _classify_text_uncached(self, value):
         """
-        Classify a single text value. Called via self._classify_text which is
-        an LRU-cached wrapper created in __init__ (MED-4).
+        Single-value text classification pipeline.
 
-        Returns dict with keys:
-          one_health_category, one_health_term, one_health_confidence,
-          one_health_term_source, one_health_processing, one_health_setting
+        Returns a dict with keys matching _CLASSIFY_TEXT_KEYS.
+        This method is wrapped by an LRU cache in __init__ (MED-4).
         """
-        unclassified = {
-            "one_health_category":    "Unclassified",
-            "one_health_term":        np.nan,
-            "one_health_confidence":  0.0,
+        result = {
+            "one_health_category":  "Unclassified",
+            "one_health_term":      np.nan,
+            "one_health_confidence": 0.0,
             "one_health_term_source": "none",
-            "one_health_processing":  np.nan,
-            "one_health_setting":     np.nan,
+            "one_health_processing": np.nan,
+            "one_health_setting":   np.nan,
         }
 
         if value is None or (isinstance(value, float) and np.isnan(value)):
-            return unclassified
+            return result
 
-        text = str(value).strip()
-        if not text or self.NULL_PATTERNS.match(text):
-            return unclassified
+        raw = str(value).strip()
+        if not raw or self.NULL_PATTERNS.match(raw):
+            return result
 
-        text = text.replace("_", " ")
+        # ------------------------------------------------------------------
+        # Abbreviation expansion
+        # ------------------------------------------------------------------
+        working = raw.lower()
+        expanded = self._abbrev_map.get(working)
+        if expanded:
+            working = expanded
 
-        if self._INSTITUTION_RE and self._INSTITUTION_RE.search(text):
-            text = self._INSTITUTION_RE.sub("", text).strip(" .,;:-")
-            if not text:
-                return unclassified
+        # ------------------------------------------------------------------
+        # Synonym normalisation
+        # ------------------------------------------------------------------
+        for pattern, canonical in self._synonym_patterns:
+            working = pattern.sub(canonical, working)
 
-        text = _INSTITUTION_KEYWORD_RE.sub("", text).strip()
-        if not text:
-            return unclassified
+        # ------------------------------------------------------------------
+        # Improvement #2: negation suppression
+        # ------------------------------------------------------------------
+        working = _NEGATION_PREFIX_RE.sub("__NEGATED__ ", working)
 
-        origin_m = _ANIMAL_ORIGIN_RE.search(text)
-        if origin_m:
-            animal_noun = origin_m.group(1).lower()
-            cat = self._host_to_category.get(animal_noun)
-            if cat is None:
-                cat = _taxonomic_fallback(animal_noun, self._host_to_category)
-            if cat is not None:
-                return {
-                    "one_health_category":    cat,
-                    "one_health_term":        animal_noun,
-                    "one_health_confidence":  0.90,
-                    "one_health_term_source": "host_dict",
-                    "one_health_processing":  np.nan,
-                    "one_health_setting":     np.nan,
-                }
-
-        text = self._expand_abbreviations(text)
-        working = self._normalize_synonyms(text)
-
-        processing = np.nan
-        setting = np.nan
-
+        # ------------------------------------------------------------------
+        # Processing term detection
+        # ------------------------------------------------------------------
         if self._PROCESSING_RE:
-            pmatch = self._PROCESSING_RE.search(working)
-            if pmatch:
-                matched_proc = pmatch.group(1).lower()
-                processing = matched_proc
-                specimen_override = self._proc_specimen_map.get(matched_proc)
+            pm = self._PROCESSING_RE.search(working)
+            if pm:
+                proc_key = pm.group(1).lower()
+                result["one_health_processing"] = proc_key
+                specimen_override = self._proc_specimen_map.get(proc_key)
                 if specimen_override:
-                    working = (
-                        working[: pmatch.start()].strip()
-                        + " " + specimen_override + " "
-                        + working[pmatch.end():].strip()
-                    ).strip()
-                else:
-                    working = (working[: pmatch.start()] + working[pmatch.end():]).strip()
+                    result["one_health_category"]   = specimen_override
+                    result["one_health_term"]       = proc_key
+                    result["one_health_confidence"] = 0.70
+                    result["one_health_term_source"] = "processing"
+                    return result
 
+        # ------------------------------------------------------------------
+        # Setting detection
+        # ------------------------------------------------------------------
         if self._SETTING_RE:
-            smatch = self._SETTING_RE.search(working)
-            if smatch:
-                setting = smatch.group(1).lower()
-                working = (working[: smatch.start()] + working[smatch.end():]).strip()
+            sm = self._SETTING_RE.search(working)
+            if sm:
+                setting_key = sm.group(1).lower()
+                result["one_health_setting"] = setting_key
 
-        working_clean = self._suppress_negated_spans(working)
+        # ------------------------------------------------------------------
+        # Institution / culture-collection detection
+        # ------------------------------------------------------------------
+        if self._INSTITUTION_RE and self._INSTITUTION_RE.search(working):
+            return result
+        if _is_institution_host(working):
+            return result
 
-        if _OIL_ENV_MODIFIER_RE.search(working_clean):
-            for _animal_cat, _animal_pat in self._TIER1_PATTERNS:
-                if _animal_cat == "Animal":
-                    working_clean = _animal_pat.sub("", working_clean).strip()
-                    break
+        # ------------------------------------------------------------------
+        # Unambiguous human terms
+        # ------------------------------------------------------------------
+        for term in self._unambiguous_human:
+            if re.search(r"\b" + re.escape(term) + r"\b", working):
+                spec = self._term_specificity_with_override(term, "unambiguous")
+                result.update({
+                    "one_health_category":   "Human",
+                    "one_health_term":       term,
+                    "one_health_confidence": round(spec, 3),
+                    "one_health_term_source": "unambiguous",
+                })
+                return result
 
-        if working_clean:
-            winner_cat, winner_term, winner_spec = self._tier1_vote(working_clean)
-            if winner_cat is not None:
-                return {
-                    "one_health_category":    winner_cat,
-                    "one_health_term":        winner_term,
-                    "one_health_confidence":  winner_spec,
-                    "one_health_term_source": "tier1",
-                    "one_health_processing":  processing,
-                    "one_health_setting":     setting,
-                }
+        # ------------------------------------------------------------------
+        # Unambiguous animal terms
+        # ------------------------------------------------------------------
+        for term in self._unambiguous_animal:
+            if re.search(r"\b" + re.escape(term) + r"\b", working):
+                spec = self._term_specificity_with_override(term, "unambiguous")
+                result.update({
+                    "one_health_category":   "Animal",
+                    "one_health_term":       term,
+                    "one_health_confidence": round(spec, 3),
+                    "one_health_term_source": "unambiguous",
+                })
+                return result
 
-        if _RAPIDFUZZ_AVAILABLE and self._fuzzy_corpus and working_clean and len(working_clean) > 2:
-            result = _rfprocess.extractOne(
-                working_clean.lower(),
+        # ------------------------------------------------------------------
+        # Tier-1 pattern voting (#3 + #9)
+        # ------------------------------------------------------------------
+        t1_cat, t1_term, t1_spec = self._tier1_vote(working)
+        if t1_cat and t1_cat != "Unclassified":
+            result.update({
+                "one_health_category":   t1_cat,
+                "one_health_term":       t1_term,
+                "one_health_confidence": round(t1_spec, 3),
+                "one_health_term_source": "tier1",
+            })
+            return result
+
+        # ------------------------------------------------------------------
+        # Ambiguous category-term check
+        # ------------------------------------------------------------------
+        for term in self._ambiguous_category_set:
+            if re.search(r"\b" + re.escape(term) + r"\b", working):
+                result.update({
+                    "one_health_term":       term,
+                    "one_health_term_source": "ambiguous",
+                })
+                return result
+
+        # ------------------------------------------------------------------
+        # Fuzzy matching fallback (rapidfuzz)
+        # ------------------------------------------------------------------
+        if _RAPIDFUZZ_AVAILABLE and self._fuzzy_corpus:
+            match_result = _rfprocess.extractOne(
+                working,
                 self._fuzzy_corpus,
-                scorer=_rfuzz.WRatio,
+                scorer=_rfuzz.token_sort_ratio,
                 score_cutoff=self._fuzzy_threshold,
             )
-            if result:
-                best_term, score, best_idx = result
+            if match_result:
+                matched_term, score, idx = match_result
+                fuzzy_cat = self._fuzzy_labels[idx]
                 fuzzy_conf = round(score / 100.0, 3)
-                return {
-                    "one_health_category":    self._fuzzy_labels[best_idx],
-                    "one_health_term":        best_term,
-                    "one_health_confidence":  fuzzy_conf,
+                result.update({
+                    "one_health_category":   fuzzy_cat,
+                    "one_health_term":       matched_term,
+                    "one_health_confidence": fuzzy_conf,
                     "one_health_term_source": "fuzzy",
-                    "one_health_processing":  processing,
-                    "one_health_setting":     setting,
-                }
+                })
+                return result
 
-        unclassified["one_health_processing"] = processing
-        unclassified["one_health_setting"] = setting
-        return unclassified
+        return result
