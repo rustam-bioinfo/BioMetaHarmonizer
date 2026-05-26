@@ -489,6 +489,12 @@ class OneHealthClassifier:
       #F1 Oil-environmental modifier suppression.
       #F2 Healthcare surface reclassification.
       #F3 Lab override exemption for explicit organism names.
+      #IS Host-dict lookup for bare host names in isolation_source and
+          other _SPECIMEN_FIELDS. Previously only the `host` field
+          triggered _resolve_host_category; scientific binomials and
+          common names present in host_to_category but absent from
+          tier1_patterns were silently Unclassified when placed in
+          isolation_source.
 
     MED-4: _classify_text results are memoized per instance via an LRU cache
     (maxsize=4096) to avoid redundant pattern matching when the same text value
@@ -1065,6 +1071,29 @@ class OneHealthClassifier:
                     elif state["specimen_category"] == paren_cat:
                         state["corroborated"] = True
                     evidence_tuples.append((paren_cat, 0.90, fw))
+                    continue
+
+                # Fix #IS: probe host_to_category for bare host names
+                # (e.g. "Homo sapiens", "Sus scrofa", "bos taurus") that
+                # live in isolation_source or other _SPECIMEN_FIELDS.
+                # The `host` field already receives this treatment via
+                # _resolve_host_category above; without this block,
+                # scientific binomials and common names absent from
+                # tier1_patterns were silently returned as Unclassified.
+                host_cat, lookup_term = self._resolve_host_category(val_str)
+                if host_cat is not None:
+                    spec = self._term_specificity_with_override(lookup_term, "host_dict")
+                    if state["specimen_category"] is None:
+                        state["specimen_category"]     = host_cat
+                        state["specimen_term"]         = lookup_term
+                        state["specimen_field"]        = field
+                        state["specimen_specificity"]  = spec
+                        state["specimen_field_weight"] = fw
+                        if fw >= _BAYES_HARD_EVIDENCE_FW_THRESHOLD:
+                            state["_hard_evidence"] = True
+                    elif state["specimen_category"] == host_cat:
+                        state["corroborated"] = True
+                    evidence_tuples.append((host_cat, spec, fw))
                     continue
 
             layer = self._classify_text(val_str)
