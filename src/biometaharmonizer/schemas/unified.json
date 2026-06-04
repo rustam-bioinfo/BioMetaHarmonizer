@@ -33,7 +33,7 @@
       "parser": "one_health_engine",
       "synonyms": ["host_species", "host animal", "isolated from", "source_host",
                    "patient", "host_organism", "specific host", "specific_host",
-                   "host organism"]
+                   "host organism", "host_common_name", "host common name"]
     },
     {
       "standard_key": "isolation_source",
