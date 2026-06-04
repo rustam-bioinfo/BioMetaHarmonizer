@@ -8,16 +8,23 @@ This module is the single source of truth: both modules import
 build_synonym_lookup() from here.
 
 Resolution layers (applied in order):
-  1. unified.json synonym lists  -- project-defined synonyms.
+  1. unified.json synonym lists  -- project-defined synonyms.  The position
+     of each synonym in the list determines its collision priority: index 0
+     wins over index 1, which wins over index 2, etc.  The standard_key
+     itself is always rank 0 (highest priority).
   2. NCBI BioSample attribute XML (schemas/ncbi_attributes.xml) -- official
      NCBI HarmonizedName synonyms.  Present only after the optional
      build_ncbi_attribute_cache.py pre-build step; gracefully absent otherwise.
+     NCBI XML entries only fill keys not already claimed by unified.json and
+     receive no priority rank (defaulting to 999 at collision time).
   3. unified.json overrides re-applied -- project-defined mappings always
      win over NCBI XML entries for the same synonym key.
 
-The returned dict maps every lowercased synonym to its canonical standard key.
-The result is cached for the lifetime of the process via lru_cache so that
-unified.json and ncbi_attributes.xml are read from disk only once.
+build_synonym_lookup() returns a tuple:
+  synonym_map   -- {lowercased_synonym: standard_key}
+  priority_map  -- {(standard_key, lowercased_synonym): int rank}
+
+Both are cached for the lifetime of the process via lru_cache.
 """
 
 import functools
@@ -41,57 +48,61 @@ def _schemas_dir() -> Path:
 
 
 @functools.lru_cache(maxsize=1)
-def build_synonym_lookup() -> dict:
+def build_synonym_lookup() -> tuple[dict[str, str], dict[tuple, int]]:
     """
-    Build and return a {lowercased_synonym: standard_key} dict.
-
-    Layer 1 (unified.json) entries are loaded first into both the main
-    lookup and a separate unified_overrides dict.  Layer 2 (ncbi_attributes.xml)
-    is applied next, potentially overwriting Layer 1 entries for synonyms that
-    NCBI also knows about.  Layer 3 re-applies unified_overrides so that every
-    project-defined mapping wins unconditionally over the NCBI XML.
-
-    This ensures that explicit project synonyms such as
-    'host_common_name' -> 'host' are never silently overwritten by NCBI's
-    self-referential HarmonizedName entries.
-
-    The result is cached after the first call; subsequent calls return the
-    same dict without re-reading disk.
+    Build and return synonym and priority lookup tables.
 
     Returns
     -------
-    dict
-        Keys are lowercased synonym strings; values are canonical standard
-        keys as defined in unified.json or NCBI HarmonizedName strings.
-        Empty dict if neither schema file is present.
+    synonym_map : dict[str, str]
+        Maps every lowercased synonym to its canonical standard key.
+    priority_map : dict[tuple[str, str], int]
+        Maps (standard_key, lowercased_synonym) to an integer rank.
+        Lower rank = higher priority when two attributes collide on the
+        same output column.  The standard_key itself is rank 0.  Synonyms
+        are ranked 1..N in the order they appear in unified.json.  Any key
+        not listed in unified.json (e.g. NCBI-only synonyms) is absent from
+        this dict; callers should default to 999 on a missing key.
+
+    Both dicts are computed once and cached; subsequent calls return the
+    same objects without re-reading disk.
     """
     schemas = _schemas_dir()
     schema_path = schemas / "unified.json"
     xml_path = schemas / "ncbi_attributes.xml"
 
-    lookup: dict[str, str] = {}
-    unified_overrides: dict[str, str] = {}
+    synonym_map:      dict[str, str]   = {}
+    priority_map:     dict[tuple, int] = {}
+    unified_overrides: dict[str, str]  = {}
 
-    # --- Layer 1: unified.json synonyms ---
+    # --- Layer 1: unified.json ---
     if schema_path.exists():
         try:
             with open(schema_path, "r", encoding="utf-8") as fh:
                 schema = json.load(fh)
             for field in schema.get("fields", []):
                 sk = field["standard_key"]
-                lookup[sk.lower()] = sk
-                unified_overrides[sk.lower()] = sk
-                for syn in field.get("synonyms", []):
-                    syn_lower = syn.lower().strip()
-                    if syn_lower:
-                        lookup[syn_lower] = sk
-                        unified_overrides[syn_lower] = sk
+                # The standard key itself is rank 0 — highest priority.
+                sk_lower = sk.lower()
+                synonym_map[sk_lower] = sk
+                unified_overrides[sk_lower] = sk
+                priority_map[(sk, sk_lower)] = 0
+
+                for rank, syn in enumerate(field.get("synonyms", []), start=1):
+                    key = syn.strip().lower()
+                    if key:
+                        synonym_map[key] = sk
+                        unified_overrides[key] = sk
+                        priority_map[(sk, key)] = rank
+
         except Exception as exc:
             logger.warning("Could not load unified.json synonym layer: %s", exc)
     else:
         logger.debug("unified.json not found at %s; skipping layer 1.", schema_path)
 
     # --- Layer 2: NCBI BioSample attribute XML (optional) ---
+    # Only fills keys not already claimed by unified.json.
+    # NCBI entries receive no priority rank (callers default missing keys to 999).
     if xml_path.exists():
         try:
             tree = ET.parse(str(xml_path))
@@ -101,10 +112,13 @@ def build_synonym_lookup() -> dict:
                 if hn_el is None or not hn_el.text:
                     continue
                 hn = hn_el.text.strip()
-                lookup[hn.lower()] = hn
+                if hn.lower() not in synonym_map:
+                    synonym_map[hn.lower()] = hn
                 for syn_el in attr.findall("Synonym"):
                     if syn_el.text and syn_el.text.strip():
-                        lookup[syn_el.text.strip().lower()] = hn
+                        k = syn_el.text.strip().lower()
+                        if k not in synonym_map:
+                            synonym_map[k] = hn
         except ET.ParseError as exc:
             logger.warning(
                 "Could not parse NCBI attribute XML at %s; using unified.json only. "
@@ -116,7 +130,10 @@ def build_synonym_lookup() -> dict:
         )
 
     # --- Layer 3: re-apply unified.json overrides so project mappings always win ---
-    lookup.update(unified_overrides)
+    synonym_map.update(unified_overrides)
 
-    logger.debug("Synonym lookup built: %d entries.", len(lookup))
-    return lookup
+    logger.debug(
+        "Synonym lookup built: %d synonym entries, %d priority rules.",
+        len(synonym_map), len(priority_map),
+    )
+    return synonym_map, priority_map

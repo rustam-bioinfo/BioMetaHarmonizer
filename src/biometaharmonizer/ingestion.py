@@ -449,11 +449,12 @@ def ingest(
             )
         raise ValueError("No valid BioSample IDs could be resolved. Reasons: " + "; ".join(reasons))
 
-    synonym_lookup = build_synonym_lookup()
+    synonym_lookup, priority_map = build_synonym_lookup()
     logger.info("Fetching metadata for %d BioSample accessions...", len(samn))
     df = _fetch_biosample_metadata(
         samn,
         synonym_lookup=synonym_lookup,
+        priority_map=priority_map,
         batch_size=eff_batch_size,
         esearch_batch=eff_esearch_batch,
     )
@@ -835,6 +836,7 @@ def _parse_antibiogram(sample_elem) -> list | None:
 def _fetch_biosample_metadata(
     samn_ids: list,
     synonym_lookup: dict = None,
+    priority_map: dict = None,
     batch_size: int = None,
     esearch_batch: int = None,
 ) -> pd.DataFrame:
@@ -901,6 +903,7 @@ def _fetch_biosample_metadata(
         batch_records = _fetch_batch_via_history(
             web_env, query_key, retstart=0, retmax=found,
             synonym_lookup=synonym_lookup,
+            priority_map=priority_map,
         )
 
         if batch_records is None:
@@ -947,7 +950,11 @@ def _fetch_biosample_metadata(
             logger.info("Fetching metadata for %d resolved UIDs (legacy path)...", leg_total)
             for batch_i, start in enumerate(range(0, leg_total, eff_batch)):
                 uid_batch = uid_list[start:start + eff_batch]
-                batch_records = _fetch_batch_with_retry(uid_batch, synonym_lookup=synonym_lookup)
+                batch_records = _fetch_batch_with_retry(
+                    uid_batch,
+                    synonym_lookup=synonym_lookup,
+                    priority_map=priority_map,
+                )
                 if batch_records is None:
                     logger.error(
                         "Legacy batch %d/%d failed after %d retries.",
@@ -1037,6 +1044,7 @@ def _fetch_batch_via_history(
     retstart: int,
     retmax: int,
     synonym_lookup: dict = None,
+    priority_map: dict = None,
 ):
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -1051,7 +1059,11 @@ def _fetch_batch_via_history(
             )
             raw = handle.read()
             handle.close()
-            return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
+            return _parse_biosample_xml(
+                raw,
+                synonym_lookup=synonym_lookup,
+                priority_map=priority_map,
+            )
         except _TRANSIENT_EXCEPTIONS as exc:
             logger.warning(
                 "efetch attempt %d/%d failed (retstart=%d): %s.",
@@ -1065,7 +1077,11 @@ def _fetch_batch_via_history(
     return None
 
 
-def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
+def _fetch_batch_with_retry(
+    uid_batch: list,
+    synonym_lookup: dict = None,
+    priority_map: dict = None,
+):
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             handle = Entrez.efetch(
@@ -1076,7 +1092,11 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
             )
             raw = handle.read()
             handle.close()
-            return _parse_biosample_xml(raw, synonym_lookup=synonym_lookup)
+            return _parse_biosample_xml(
+                raw,
+                synonym_lookup=synonym_lookup,
+                priority_map=priority_map,
+            )
         except _TRANSIENT_EXCEPTIONS as exc:
             logger.warning(
                 "Batch fetch attempt %d/%d failed (transient): %s.",
@@ -1089,7 +1109,11 @@ def _fetch_batch_with_retry(uid_batch: list, synonym_lookup: dict = None):
     return None
 
 
-def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
+def _parse_biosample_xml(
+    xml_bytes: bytes,
+    synonym_lookup: dict = None,
+    priority_map: dict = None,
+) -> list:
     if not xml_bytes or not xml_bytes.strip():
         logger.warning("Received empty XML response from NCBI efetch -- skipping batch.")
         return []
@@ -1153,7 +1177,10 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
             record["status"] = _normalize_null(status_el.get("status"))
             record["status_date"] = _normalize_null(status_el.get("when"))
 
-        extras = {}
+        extras: dict = {}
+        # Tracks which raw_key last wrote to each resolved column, for priority comparison.
+        record_source_keys: dict[str, str] = {}
+
         for attr in sample.findall(".//Attribute"):
             hn = (attr.get("harmonized_name") or "").strip()
             an = (attr.get("attribute_name") or "").strip()
@@ -1177,19 +1204,48 @@ def _parse_biosample_xml(xml_bytes: bytes, synonym_lookup: dict = None) -> list:
                     raw_key = candidate
 
             if resolved is not None:
-                if record.get(resolved) is None:
+                current_val = record.get(resolved)
+                if current_val is None:
+                    # First writer — always accept.
                     record[resolved] = val
+                    record_source_keys[resolved] = raw_key.lower()
                 elif val is not None:
-                    # LOW-3: store duplicates under predictable _dup_<standard_key> prefix
-                    # so downstream code can reliably find all duplicates for a given field.
-                    dup_key = f"_dup_{resolved}"
-                    existing = extras.get(dup_key)
-                    extras[dup_key] = f"{existing}|{val}" if existing else val
-                    logger.debug(
-                        "Attribute collision on '%s' (biosample=%s): primary value kept, "
-                        "duplicate stored in _extra_attributes as '%s'.",
-                        resolved, record.get("biosample_accession"), dup_key,
-                    )
+                    # Collision: use unified.json synonym list position as priority.
+                    # Lower rank = earlier in the list = higher priority.
+                    # Keys absent from priority_map default to rank 999.
+                    pm = priority_map or {}
+                    current_rank  = pm.get((resolved, record_source_keys.get(resolved, "")), 999)
+                    incoming_rank = pm.get((resolved, raw_key.lower()), 999)
+
+                    if incoming_rank < current_rank:
+                        # Incoming wins — demote current value to _dup_.
+                        dup_key = f"_dup_{resolved}"
+                        existing = extras.get(dup_key)
+                        extras[dup_key] = (
+                            f"{existing}|{current_val}" if existing else current_val
+                        )
+                        record[resolved] = val
+                        record_source_keys[resolved] = raw_key.lower()
+                        logger.debug(
+                            "Priority override on '%s' (biosample=%s): "
+                            "'%s' (rank %d) displaced '%s' (rank %d).",
+                            resolved, record.get("biosample_accession"),
+                            raw_key, incoming_rank,
+                            record_source_keys.get(resolved, "?"), current_rank,
+                        )
+                    else:
+                        # Current wins — store incoming as _dup_.
+                        dup_key = f"_dup_{resolved}"
+                        existing = extras.get(dup_key)
+                        extras[dup_key] = f"{existing}|{val}" if existing else val
+                        logger.debug(
+                            "Attribute collision on '%s' (biosample=%s): "
+                            "primary value kept (source '%s', rank %d), "
+                            "incoming '%s' (rank %d) stored in '%s'.",
+                            resolved, record.get("biosample_accession"),
+                            record_source_keys.get(resolved, "?"), current_rank,
+                            raw_key, incoming_rank, dup_key,
+                        )
             elif val is not None:
                 existing = extras.get(raw_key)
                 extras[raw_key] = f"{existing}|{val}" if existing else val
