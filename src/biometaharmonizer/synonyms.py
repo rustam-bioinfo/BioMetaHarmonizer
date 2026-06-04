@@ -7,11 +7,13 @@ built its own lookup independently, with slightly different completeness.
 This module is the single source of truth: both modules import
 build_synonym_lookup() from here.
 
-Resolution layers (applied in order, later layers win):
+Resolution layers (applied in order):
   1. unified.json synonym lists  -- project-defined synonyms.
   2. NCBI BioSample attribute XML (schemas/ncbi_attributes.xml) -- official
      NCBI HarmonizedName synonyms.  Present only after the optional
      build_ncbi_attribute_cache.py pre-build step; gracefully absent otherwise.
+  3. unified.json overrides re-applied -- project-defined mappings always
+     win over NCBI XML entries for the same synonym key.
 
 The returned dict maps every lowercased synonym to its canonical standard key.
 The result is cached for the lifetime of the process via lru_cache so that
@@ -43,8 +45,15 @@ def build_synonym_lookup() -> dict:
     """
     Build and return a {lowercased_synonym: standard_key} dict.
 
-    Layer 1 (unified.json) is loaded first so that NCBI XML layer 2 can
-    overwrite any conflicts with the authoritative NCBI mapping.
+    Layer 1 (unified.json) entries are loaded first into both the main
+    lookup and a separate unified_overrides dict.  Layer 2 (ncbi_attributes.xml)
+    is applied next, potentially overwriting Layer 1 entries for synonyms that
+    NCBI also knows about.  Layer 3 re-applies unified_overrides so that every
+    project-defined mapping wins unconditionally over the NCBI XML.
+
+    This ensures that explicit project synonyms such as
+    'host_common_name' -> 'host' are never silently overwritten by NCBI's
+    self-referential HarmonizedName entries.
 
     The result is cached after the first call; subsequent calls return the
     same dict without re-reading disk.
@@ -61,6 +70,7 @@ def build_synonym_lookup() -> dict:
     xml_path = schemas / "ncbi_attributes.xml"
 
     lookup: dict[str, str] = {}
+    unified_overrides: dict[str, str] = {}
 
     # --- Layer 1: unified.json synonyms ---
     if schema_path.exists():
@@ -70,10 +80,12 @@ def build_synonym_lookup() -> dict:
             for field in schema.get("fields", []):
                 sk = field["standard_key"]
                 lookup[sk.lower()] = sk
+                unified_overrides[sk.lower()] = sk
                 for syn in field.get("synonyms", []):
                     syn_lower = syn.lower().strip()
                     if syn_lower:
                         lookup[syn_lower] = sk
+                        unified_overrides[syn_lower] = sk
         except Exception as exc:
             logger.warning("Could not load unified.json synonym layer: %s", exc)
     else:
@@ -102,6 +114,9 @@ def build_synonym_lookup() -> dict:
         logger.debug(
             "ncbi_attributes.xml not found at %s; layer 2 skipped.", xml_path
         )
+
+    # --- Layer 3: re-apply unified.json overrides so project mappings always win ---
+    lookup.update(unified_overrides)
 
     logger.debug("Synonym lookup built: %d entries.", len(lookup))
     return lookup
