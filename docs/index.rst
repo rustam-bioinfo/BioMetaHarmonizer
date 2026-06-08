@@ -7,7 +7,7 @@ BioMetaHarmonizer Documentation
 BioMetaHarmonizer is a universal Python library and command-line tool for fetching,
 harmonizing, and standardizing NCBI BioSample metadata at scale. It resolves both
 BioSample accessions (SAMN/SAME/SAMD) and assembly accessions (GCF\_/GCA\_) to
-a fixed 57-column output schema, parses collection dates to ISO 8601 format,
+a fixed 53-column output schema, parses collection dates to ISO 8601 format,
 resolves geographic locations to ISO 3166-1 country codes, classifies isolation
 sources into One Health categories (Human, Animal, Food, Environmental, etc.),
 and extracts antibiogram drug-susceptibility tables from NCBI Pathogen records.
