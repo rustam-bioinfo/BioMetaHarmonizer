@@ -205,11 +205,6 @@ Output Columns
      - OneHealthClassifier
      - One Health tier. Always a string; never NaN. Possible values: ``Human``, ``Animal``, ``Plant``, ``Food``, ``Environmental``, ``Unclassified``.
      - ``Human``
-   * - ``one_health_term``
-     - str/NaN
-     - OneHealthClassifier
-     - The matched term that drove the classification.
-     - ``blood``
    * - ``one_health_confidence``
      - float
      - OneHealthClassifier
@@ -220,23 +215,6 @@ Output Columns
      - OneHealthClassifier
      - Discretized confidence: ``high``, ``medium``, ``low``, or ``unresolved``.
      - ``high``
-   * - ``one_health_processing``
-     - str/NaN
-     - OneHealthClassifier
-     - Detected processing/preservation term (e.g. ``frozen``).
-     - ``frozen``
-   * - ``one_health_setting``
-     - str/NaN
-     - OneHealthClassifier
-     - Detected setting term (e.g. ``hospital``).
-     - ``hospital``
-   * - ``one_health_source_field``
-     - str/NaN
-     - OneHealthClassifier
-     - Name of the input field that provided the winning evidence, or
-       ``"setting_inference"`` when the category was derived from a setting
-       term with no direct biological evidence.
-     - ``isolation_source``
    * - ``outbreak``
      - str/NaN
      - Attribute
