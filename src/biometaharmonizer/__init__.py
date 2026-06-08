@@ -1,5 +1,5 @@
 __version__ = "1.0.0"
-__author__ = "Rustam"
+__author__ = "Rustam Heydarov"
 __email__ = "rustam.bioinfo@gmail.com"
 
 from .ingestion import ingest
