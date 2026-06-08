@@ -95,54 +95,49 @@ The output DataFrame contains **57 columns**. Columns with no data for a given d
 | 8 | `taxonomy_id` | BioSample XML | NCBI Taxonomy numeric ID |
 | 9 | `taxonomy_name` | BioSample XML | Taxon name for the assigned taxonomy_id |
 | 10 | `organism_name` | BioSample XML | Organism name from `<OrganismName>`; falls back to taxonomy_name |
-| 11 | `collection_date` | BioSample attribute → DateEngine | Collection date normalized to ISO 8601 |
-| 12 | `collection_date_range` | DateEngine | Verbatim original string for range/approximate date inputs; NaN for point dates |
-| 13 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
-| 14 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
-| 15 | `geo_country` | GeoEngine | Country resolved from `geo_loc_name` |
-| 16 | `geo_region` | GeoEngine | Sub-national region; populated only from colon-format inputs (`"Country: Region, Locality"`); `NaN` for comma-only inputs |
-| 17 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
-| 18 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
-| 19 | `geo_sea_ocean` | GeoEngine | Named aquatic feature from `geo_loc_name` — covers oceans, seas, gulfs, bays, straits, fjords, lakes, reservoirs, and other water bodies |
-| 20 | `host` | BioSample attribute | Host organism name |
-| 21 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
-| 22 | `host_age` | BioSample attribute | Age of host |
-| 23 | `host_sex` | BioSample attribute | Biological sex of host |
-| 24 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
-| 25 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
-| 26 | `sample_type` | BioSample attribute | Sample type or specimen classification |
-| 27 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
-| 28 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
-| 29 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
-| 30 | `one_health_category` | OneHealthClassifier | One of: `Human`, `Animal`, `Plant`, `Food`, `Environmental`, `Unclassified` |
-| 31 | `one_health_term` | OneHealthClassifier | The specific term or phrase that triggered the classification |
-| 32 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
-| 33 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
-| 34 | `one_health_processing` | OneHealthClassifier | Processing/handling term detected in the field text (e.g. `pasteurized`, `frozen`), if any |
-| 35 | `one_health_setting` | OneHealthClassifier | Setting term detected in the field text (e.g. `clinical`, `farm`, `retail`) |
-| 36 | `one_health_source_field` | OneHealthClassifier | Which input field produced the winning classification |
-| 37 | `isolate` | BioSample attribute | Isolate identifier |
-| 38 | `strain` | BioSample attribute | Strain designation |
-| 39 | `sub_strain` | BioSample attribute | Sub-strain designation |
-| 40 | `serotype` | BioSample attribute | Serotype |
-| 41 | `serovar` | BioSample attribute | Serovar |
-| 42 | `genotype` | BioSample attribute | Genotype or sequence type |
-| 43 | `culture_collection` | BioSample attribute | Culture collection identifier |
-| 44 | `outbreak` | BioSample attribute | Outbreak identifier |
-| 45 | `sequencing_method` | BioSample attribute | Sequencing platform |
-| 46 | `assembly_method` | BioSample attribute | Genome assembly software |
-| 47 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
-| 48 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
-| 49 | `submission_date` | BioSample XML | Date first submitted |
-| 50 | `last_update` | BioSample XML | Date last modified |
-| 51 | `publication_date` | BioSample XML | Date made publicly available |
-| 52 | `access` | BioSample XML | `public` or `controlled-access` |
-| 53 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
-| 54 | `status_date` | BioSample XML | Date current status was assigned |
-| 55 | `title` | BioSample XML | Free-text title of the BioSample record |
-| 56 | `description_comment` | BioSample XML | Free-text description or comment block |
-| 57 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
-
+| 11 | `isolate` | BioSample attribute | Isolate identifier |
+| 12 | `strain` | BioSample attribute | Strain designation |
+| 13 | `sub_strain` | BioSample attribute | Sub-strain designation |
+| 14 | `serotype` | BioSample attribute | Serotype |
+| 15 | `serovar` | BioSample attribute | Serovar |
+| 16 | `genotype` | BioSample attribute | Genotype or sequence type |
+| 17 | `culture_collection` | BioSample attribute | Culture collection identifier |
+| 18 | `host` | BioSample attribute | Host organism name |
+| 19 | `host_disease` | BioSample attribute | Disease associated with host at sampling |
+| 20 | `host_age` | BioSample attribute | Age of host |
+| 21 | `host_sex` | BioSample attribute | Biological sex of host |
+| 22 | `host_tissue_sampled` | BioSample attribute | Tissue or body site sampled |
+| 23 | `isolation_source` | BioSample attribute | Material or environment from which the isolate was obtained |
+| 24 | `sample_type` | BioSample attribute | Sample type or specimen classification |
+| 25 | `env_broad_scale` | BioSample attribute | Broad environmental context (ENVO) |
+| 26 | `env_local_scale` | BioSample attribute | Local environmental feature (ENVO) |
+| 27 | `env_medium` | BioSample attribute | Environmental medium (ENVO) |
+| 28 | `geo_loc_name` | BioSample attribute | Raw geographic location string as submitted |
+| 29 | `lat_lon` | BioSample attribute | Decimal lat/lon as submitted |
+| 30 | `geo_country` | GeoEngine | Country resolved from `geo_loc_name` |
+| 31 | `geo_region` | GeoEngine | Sub-national region; populated only from colon-format inputs (`"Country: Region, Locality"`); `NaN` for comma-only inputs |
+| 32 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
+| 33 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
+| 34 | `geo_sea_ocean` | GeoEngine | Named aquatic feature from `geo_loc_name` — covers oceans, seas, gulfs, bays, straits, fjords, lakes, reservoirs, and other water bodies |
+| 35 | `collection_date` | BioSample attribute → DateEngine | Collection date normalized to ISO 8601 |
+| 36 | `collection_date_range` | DateEngine | Verbatim original string for range/approximate date inputs; NaN for point dates |
+| 37 | `one_health_category` | OneHealthClassifier | One of: `Human`, `Animal`, `Plant`, `Food`, `Environmental`, `Unclassified` |
+| 38 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
+| 39 | `one_health_evidence_level` | OneHealthClassifier | Discretized confidence: `high` (≥0.85), `medium` (≥0.60), `low` (≥0.30), `unresolved` |
+| 40 | `outbreak` | BioSample attribute | Outbreak identifier |
+| 41 | `sequencing_method` | BioSample attribute | Sequencing platform |
+| 42 | `assembly_method` | BioSample attribute | Genome assembly software |
+| 43 | `collected_by` | BioSample attribute; `<Owner/Name>` fallback | Collector name or institution |
+| 44 | `ncbi_package` | BioSample XML | NCBI BioSample package (e.g. `Microbe.1.0`) |
+| 45 | `submission_date` | BioSample XML | Date first submitted |
+| 46 | `last_update` | BioSample XML | Date last modified |
+| 47 | `publication_date` | BioSample XML | Date made publicly available |
+| 48 | `access` | BioSample XML | `public` or `controlled-access` |
+| 49 | `status` | BioSample XML | Record status (e.g. `live`, `suppressed`) |
+| 50 | `status_date` | BioSample XML | Date current status was assigned |
+| 51 | `title` | BioSample XML | Free-text title of the BioSample record |
+| 52 | `description_comment` | BioSample XML | Free-text description or comment block |
+| 53 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
 ---
 
 ## Antibiogram data
