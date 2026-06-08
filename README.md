@@ -17,8 +17,6 @@ NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across sub
 
 Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
 
-Records submitted under NCBI pathogen packages (e.g. `Pathogen.cl.1.0`, `Pathogen.env.1.0`) often carry a structured `<Antibiogram>` section alongside standard attributes. BioMetaHarmonizer parses the antibiogram and serializes it as a compact JSON list in `_extra_attributes["antibiogram"]` so that MIC and phenotype data are never silently discarded.
-
 ---
 
 ## Installation
@@ -54,6 +52,15 @@ biometaharmonizer run \
     --email  your@email.com \
     --output harmonized.csv
 
+# Process large datasets using the maximum allowed batch sizes and an NCBI API key
+biometaharmonizer run \
+    --input  accessions.txt  \
+    --email  your@email.com \
+    --output harmonized.csv \
+    --fetch-batch-size 500 \
+    --esearch-batch-size 500
+    ----api-key KEY
+
 # Save to multiple formats in one run
 biometaharmonizer run \
     --input  accessions.txt \
@@ -61,6 +68,8 @@ biometaharmonizer run \
     --output harmonized.csv \
     --format csv tsv excel
 # Produces: harmonized.csv, harmonized.tsv, harmonized.xlsx
+
+# 
 ```
 
 | Flag | Default | Description |
@@ -80,7 +89,7 @@ biometaharmonizer run \
 ---
 ## Output columns
 
-The output DataFrame contains **57 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
+The output DataFrame contains **53 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
 
 | # | Column | Source | Description |
@@ -142,7 +151,7 @@ The output DataFrame contains **57 columns**. Columns with no data for a given d
 
 ## Antibiogram data
 
-BioSample records submitted under NCBI pathogen packages (`Pathogen.cl.1.0`, `Pathogen.env.1.0`, etc.) may include a structured `<Antibiogram>` section that is a sibling of `<Attributes>` in the XML — not a child. Standard attribute parsers that only iterate `<Attributes>` silently drop this section. BioMetaHarmonizer parses it explicitly.
+BioSample records submitted under NCBI pathogen packages (`Pathogen.cl.1.0`, `Pathogen.env.1.0`, etc.) may include a structured `<Antibiogram>` section that is a sibling of `<Attributes>` in the XML. BioMetaHarmonizer parses it explicitly.
 
 When an antibiogram is present, `_extra_attributes["antibiogram"]` contains a compact JSON-encoded list of dicts, one per antibiotic row. Each dict includes whichever of the following fields NCBI populated for that row:
 
@@ -213,7 +222,7 @@ Both `ingestion.py` and `key_mapper.py` use the same `build_synonym_lookup()` fu
 
 During XML parsing, placeholder values are converted to `None` before any downstream processing. The full pattern list covers:
 
-- `missing`, `missing: lab stock`, `missing: data agreement established pre-2023`
+- `missing`, `missing: lab stock`, `missing: data agreement established ...`
 - `N/A`, `na`, `null`, `none`, `nil`, `-`, `.`
 - `unknown`, `not provided`, `not collected`, `not applicable`, `not available`, `not determined`, `not recorded`, `not reported`
 - `unavailable`, `unspecified`, `undetermined`, `unidentified`
@@ -228,8 +237,8 @@ Common misspellings (`misssing`, `unkown`, `unknwon`) are also matched. Matching
 
 On the first run, `ingest()` downloads two NCBI flat files to resolve assembly accessions and BioProject links:
 
-- `assembly_summary_refseq.txt` (~100–300 MB)
-- `assembly_summary_genbank.txt` (~100–300 MB)
+- `assembly_summary_refseq.txt` (~200 MB)
+- `assembly_summary_genbank.txt` (~1.5 GB)
 
 These are cached in `~/.biometaharmonizer/cache/` (overridable with `--cache-dir` or `set_cache_dir()`). Files older than 7 days are automatically deleted and re-downloaded on the next run.
 
