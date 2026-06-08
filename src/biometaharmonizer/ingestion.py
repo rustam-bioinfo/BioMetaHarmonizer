@@ -227,12 +227,12 @@ def _load_final_schema() -> list:
         "collection_date_range",
         # BLOCK 8 — One Health (derived from blocks 4-7)
         "one_health_category",
-        "one_health_term",
+        # "one_health_term",
         "one_health_confidence",
         "one_health_evidence_level",
-        "one_health_processing",
-        "one_health_setting",
-        "one_health_source_field",
+        # "one_health_processing",
+        # "one_health_setting",
+        # "one_health_source_field",
         # BLOCK 9 — Epidemiology
         "outbreak",
         # BLOCK 10 — Sequencing / assembly
