@@ -123,9 +123,8 @@ exactly **57 columns** in the following order (matching ``_load_final_schema()``
        # Block 7 — Temporal
        "collection_date", "collection_date_range",
        # Block 8 — One Health (derived)
-       "one_health_category", "one_health_term", "one_health_confidence",
-       "one_health_evidence_level", "one_health_processing",
-       "one_health_setting", "one_health_source_field",
+       "one_health_category", "one_health_confidence",
+       "one_health_evidence_level", 
        # Block 9 — Epidemiology
        "outbreak",
        # Block 10 — Sequencing / assembly
