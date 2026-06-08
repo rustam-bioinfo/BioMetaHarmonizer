@@ -198,6 +198,19 @@ _LAB_PROCESSING_OVERRIDE = frozenset({
     "lb medium",
 })
 
+# ---------------------------------------------------------------------------
+# Columns produced internally by _integrate_evidence that are not
+# part of the public output schema.
+# ---------------------------------------------------------------------------
+_INTERNAL_COLUMNS = frozenset({
+    "one_health_evidence_conflict",
+    "one_health_evidence_sources",
+    "one_health_term",
+    "one_health_processing",
+    "one_health_setting",
+    "one_health_source_field",
+})
+
 
 def _taxonomic_fallback(name_lower, host_to_category):
     """
@@ -711,11 +724,8 @@ class OneHealthClassifier:
           env_local_scale, env_broad_scale, sample_type
 
         Returns pd.DataFrame with columns:
-          one_health_category, one_health_term, one_health_confidence,
-          one_health_evidence_level, one_health_processing,
-          one_health_setting, one_health_source_field,
-          one_health_evidence_conflict,
-          one_health_evidence_sources
+          one_health_category, one_health_confidence,
+          one_health_evidence_level
         """
         known = set(self._FIELD_PRIORITY)
         for k in fields:
@@ -747,7 +757,8 @@ class OneHealthClassifier:
             self._integrate_evidence(row)
             for row in records.itertuples(index=False, name="Record")
         ]
-        return pd.DataFrame(results, index=idx)
+        out_df = pd.DataFrame(results, index=idx)
+        return out_df.drop(columns=[c for c in _INTERNAL_COLUMNS if c in out_df.columns])
 
     # ------------------------------------------------------------------
     # Evidence integration helpers
