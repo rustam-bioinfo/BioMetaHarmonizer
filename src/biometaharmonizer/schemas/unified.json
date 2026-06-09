@@ -7,7 +7,9 @@
       "standard_key": "collection_date",
       "parser": "date_engine",
       "synonyms": ["colection date", "collection date", "collection year",
+                   "colection_date", "collection_date", "collection-date", "collection_year",
                    "collectiondate", "date of collection", "date sample collected",
+                   "isolation_year", "sample_collection date", "sample_date",
                    "isolation year", "sample collection date", "sample date",
                    "sampling_date", "sampling date", "time of sample collection",
                    "year isolated", "date", "year", "collected_on",
@@ -17,10 +19,11 @@
     {
       "standard_key": "geo_loc_name",
       "parser": "geo_engine",
-      "synonyms": ["geographic location", "country", "location", "geo_loc",
-                   "region", "origin", "place_of_isolation", "sampling_location",
-                   "geographic location (country and/or sea,region)",
-                   "geographic location (country and/or sea)"]
+      "synonyms": ["geographic location", "geographic_location", "country", "location", "geo_loc",
+                   "region", "origin", "place_of_isolation", "place of isolation", "sampling_location",
+                   "sampling location", "geographic location region and locality",
+                   "geographic location (country and/or sea,region)", "geographic_location_region_and_locality",
+                   "geographic location (country and/or sea)", "*geo_loc_name", "geo_loc name", "geo-loc-name"]
     },
     {
       "standard_key": "lat_lon",
