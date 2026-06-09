@@ -137,8 +137,6 @@
         "specific host",
         "specific_host",
         "host organism",
-        "host_common_name",
-        "host common name",
         "host species",
         "host-species",
         "hostspecies",
@@ -156,7 +154,12 @@
         "specific-host",
         "specifichost",
         "host-common-name",
-        "hostcommonname"
+        "hostcommonname",
+        "host_scientific_name",
+        "host scientific name",
+        "host-scientific-name",
+        "host_common_name",
+        "host common name"
       ]
     },
     {
@@ -164,6 +167,13 @@
       "parser": "one_health_engine",
       "synonyms": [
         "source",
+        "isolation-source",
+        "isolation source",
+        "isolation-source",
+        "isolation_source_host_associated",
+        "isolation source host associated",
+        "isolation-source-host-associated",
+        "source_of_isolation", "source of isolation", "source-of-isolation",
         "source_material",
         "specimen_source",
         "tissue",
