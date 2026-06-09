@@ -1,0 +1,1027 @@
+{
+  "schema_name": "unified",
+  "description": "Fixed target schema for BioMetaHarmonizer. Every attribute extracted from BioSample XML is resolved against this schema. Attributes that match a standard_key or one of its synonyms are placed into the corresponding fixed column. Unmatched attributes are collected into _extra_attributes (JSON). Structural fields (biosample_accession, etc.) are extracted from the XML envelope and bypass this schema.",
+  "version": "2.0",
+  "fields": [
+    {
+      "standard_key": "collection_date",
+      "parser": "date_engine",
+      "synonyms": [
+        "colection date",
+        "collection date",
+        "collection year",
+        "colection_date",
+        "collection_date",
+        "collection-date",
+        "collection_year",
+        "collectiondate",
+        "date of collection",
+        "date sample collected",
+        "isolation_year",
+        "sample_collection date",
+        "sample_date",
+        "isolation year",
+        "sample collection date",
+        "sample date",
+        "sampling_date",
+        "sampling date",
+        "time of sample collection",
+        "year isolated",
+        "date",
+        "year",
+        "collected_on",
+        "sampling_time",
+        "time_of_collection",
+        "date collected",
+        "collection date (yyyymmdd)",
+        "colection-date",
+        "colectiondate",
+        "collection-year",
+        "collectionyear",
+        "date_of_collection",
+        "date-of-collection",
+        "dateofcollection",
+        "date_sample_collected",
+        "date-sample-collected",
+        "datesamplecollected",
+        "isolation-year",
+        "isolationyear",
+        "sample_collection_date",
+        "sample-collection-date",
+        "samplecollectiondate",
+        "sample-date",
+        "sampledate",
+        "sampling-date",
+        "samplingdate",
+        "time_of_sample_collection",
+        "time-of-sample-collection",
+        "year_isolated",
+        "year-isolated",
+        "yearisolated",
+        "collected on",
+        "collected-on",
+        "collectedon",
+        "sampling time",
+        "sampling-time",
+        "samplingtime",
+        "time of collection",
+        "time-of-collection",
+        "timeofcollection",
+        "date_collected",
+        "date-collected",
+        "datecollected"
+      ]
+    },
+    {
+      "standard_key": "geo_loc_name",
+      "parser": "geo_engine",
+      "synonyms": [
+        "geographic location",
+        "geographic_location",
+        "country",
+        "location",
+        "geo_loc",
+        "region",
+        "origin",
+        "place_of_isolation",
+        "place of isolation",
+        "sampling_location",
+        "sampling location",
+        "geographic location region and locality",
+        "geographic location (country and/or sea,region)",
+        "geographic_location_region_and_locality",
+        "geographic location (country and/or sea)",
+        "*geo_loc_name",
+        "geo_loc name",
+        "geo-loc-name",
+        "geographic-location",
+        "geographiclocation",
+        "geo loc",
+        "geo-loc",
+        "geoloc",
+        "place-of-isolation",
+        "placeofisolation",
+        "sampling-location",
+        "samplinglocation",
+        "geo loc name",
+        "geolocname"
+      ]
+    },
+    {
+      "standard_key": "lat_lon",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "latitude and longitude",
+        "latitude_longitude",
+        "coordinates",
+        "gps",
+        "geographic location (latitude and longitude)",
+        "latitude_and_longitude",
+        "latitude-and-longitude",
+        "latitudeandlongitude",
+        "latitude longitude",
+        "latitude-longitude",
+        "latitudelongitude"
+      ]
+    },
+    {
+      "standard_key": "host",
+      "parser": "one_health_engine",
+      "synonyms": [
+        "host_species",
+        "host animal",
+        "isolated from",
+        "source_host",
+        "patient",
+        "host_organism",
+        "specific host",
+        "specific_host",
+        "host organism",
+        "host_common_name",
+        "host common name",
+        "host species",
+        "host-species",
+        "hostspecies",
+        "host_animal",
+        "host-animal",
+        "hostanimal",
+        "isolated_from",
+        "isolated-from",
+        "isolatedfrom",
+        "source host",
+        "source-host",
+        "sourcehost",
+        "host-organism",
+        "hostorganism",
+        "specific-host",
+        "specifichost",
+        "host-common-name",
+        "hostcommonname"
+      ]
+    },
+    {
+      "standard_key": "isolation_source",
+      "parser": "one_health_engine",
+      "synonyms": [
+        "source",
+        "source_material",
+        "specimen_source",
+        "tissue",
+        "clinical_sample",
+        "source_name",
+        "analyte_type",
+        "body_site",
+        "environmental_source",
+        "substrate",
+        "matrix",
+        "environmental source",
+        "source material",
+        "source-material",
+        "sourcematerial",
+        "specimen source",
+        "specimen-source",
+        "specimensource",
+        "clinical sample",
+        "clinical-sample",
+        "clinicalsample",
+        "source name",
+        "source-name",
+        "sourcename",
+        "analyte type",
+        "analyte-type",
+        "analytetype",
+        "body site",
+        "body-site",
+        "bodysite",
+        "environmental-source",
+        "environmentalsource"
+      ]
+    },
+    {
+      "standard_key": "sample_type",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample type",
+        "sample_type",
+        "sampletype",
+        "specimen type",
+        "specimen_type",
+        "analyte type",
+        "material type",
+        "sample classification",
+        "sample-type",
+        "specimen-type",
+        "specimentype",
+        "analyte_type",
+        "analyte-type",
+        "analytetype",
+        "material_type",
+        "material-type",
+        "materialtype",
+        "sample_classification",
+        "sample-classification",
+        "sampleclassification"
+      ]
+    },
+    {
+      "standard_key": "isolate",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "isolate_name",
+        "sample_name",
+        "submitted_sample_id",
+        "isolate_id",
+        "identification or description of the specific individual",
+        "isolate name",
+        "isolate-name",
+        "isolatename",
+        "sample name",
+        "sample-name",
+        "samplename",
+        "submitted sample id",
+        "submitted-sample-id",
+        "submittedsampleid",
+        "isolate id",
+        "isolate-id",
+        "isolateid",
+        "identification_or_description_of_the_specific_individual"
+      ]
+    },
+    {
+      "standard_key": "strain",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "microbial strain",
+        "strain_name",
+        "microbial_strain",
+        "microbial-strain",
+        "microbialstrain",
+        "strain name",
+        "strain-name",
+        "strainname"
+      ]
+    },
+    {
+      "standard_key": "collected_by",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "collecting_institution",
+        "collector",
+        "collected by",
+        "specimen collector",
+        "owner",
+        "owner name",
+        "submitter",
+        "submitting institution",
+        "collecting institution",
+        "collecting-institution",
+        "collected-by",
+        "collectedby",
+        "specimen_collector",
+        "specimen-collector",
+        "specimencollector",
+        "owner_name",
+        "owner-name",
+        "ownername",
+        "submitting_institution",
+        "submitting-institution"
+      ]
+    },
+    {
+      "standard_key": "host_disease",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "disease",
+        "clinical_condition",
+        "diagnosis",
+        "illness",
+        "infection",
+        "disease_name",
+        "host disease",
+        "clinical condition",
+        "clinical-condition",
+        "clinicalcondition",
+        "disease name",
+        "disease-name",
+        "diseasename",
+        "host-disease",
+        "hostdisease"
+      ]
+    },
+    {
+      "standard_key": "host_age",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "age",
+        "patient_age",
+        "age_at_collection",
+        "host_age_bin",
+        "age_group",
+        "host age",
+        "patient age",
+        "patient-age",
+        "patientage",
+        "age at collection",
+        "age-at-collection",
+        "ageatcollection",
+        "host age bin",
+        "host-age-bin",
+        "hostagebin",
+        "age group",
+        "age-group",
+        "agegroup",
+        "host-age",
+        "hostage"
+      ]
+    },
+    {
+      "standard_key": "host_sex",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sex",
+        "gender",
+        "biological_sex",
+        "patient_sex",
+        "host sex",
+        "biological sex",
+        "biological-sex",
+        "biologicalsex",
+        "patient sex",
+        "patient-sex",
+        "patientsex",
+        "host-sex",
+        "hostsex"
+      ]
+    },
+    {
+      "standard_key": "host_tissue_sampled",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "tissue_sampled",
+        "organ",
+        "anatomical_site",
+        "body_part",
+        "specimen_site",
+        "sampling_site",
+        "host tissue sampled",
+        "tissue sampled",
+        "tissue-sampled",
+        "tissuesampled",
+        "anatomical site",
+        "anatomical-site",
+        "anatomicalsite",
+        "body part",
+        "body-part",
+        "bodypart",
+        "specimen site",
+        "specimen-site",
+        "specimensite",
+        "sampling site",
+        "sampling-site",
+        "samplingsite",
+        "host-tissue-sampled",
+        "hosttissuesampled"
+      ]
+    },
+    {
+      "standard_key": "host_health_state",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "health state",
+        "health_state",
+        "host health state",
+        "health status",
+        "health-state",
+        "healthstate",
+        "host-health-state",
+        "hosthealthstate",
+        "health_status",
+        "health-status",
+        "healthstatus"
+      ]
+    },
+    {
+      "standard_key": "host_subject_id",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "subject id",
+        "host subject id",
+        "patient_id",
+        "patient id",
+        "subject_id",
+        "subject-id",
+        "subjectid",
+        "host-subject-id",
+        "hostsubjectid",
+        "patient-id",
+        "patientid"
+      ]
+    },
+    {
+      "standard_key": "host_description",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "host description",
+        "host-description",
+        "hostdescription"
+      ]
+    },
+    {
+      "standard_key": "host_disease_outcome",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "disease outcome",
+        "host disease outcome",
+        "disease_outcome",
+        "disease-outcome",
+        "diseaseoutcome",
+        "host-disease-outcome",
+        "hostdiseaseoutcome"
+      ]
+    },
+    {
+      "standard_key": "host_disease_stage",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "disease stage",
+        "host disease stage",
+        "disease_stage",
+        "disease-stage",
+        "diseasestage",
+        "host-disease-stage",
+        "hostdiseasestage"
+      ]
+    },
+    {
+      "standard_key": "env_broad_scale",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "biome",
+        "environment_type",
+        "broad_environment",
+        "ecosystem",
+        "habitat",
+        "env_biome",
+        "broad-scale environmental context",
+        "env broad scale",
+        "environment type",
+        "environment-type",
+        "environmenttype",
+        "broad environment",
+        "broad-environment",
+        "broadenvironment",
+        "env biome",
+        "env-biome",
+        "envbiome",
+        "broad_scale_environmental_context",
+        "broad scale environmental context",
+        "broad-scale-environmental-context",
+        "env-broad-scale",
+        "envbroadscale"
+      ]
+    },
+    {
+      "standard_key": "env_local_scale",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "local_environment",
+        "microhabitat",
+        "env_feature",
+        "local_scale",
+        "environmental_feature",
+        "local-scale environmental context",
+        "env local scale",
+        "local environment",
+        "local-environment",
+        "localenvironment",
+        "env feature",
+        "env-feature",
+        "envfeature",
+        "local scale",
+        "local-scale",
+        "localscale",
+        "environmental feature",
+        "environmental-feature",
+        "environmentalfeature",
+        "local_scale_environmental_context",
+        "local scale environmental context",
+        "local-scale-environmental-context",
+        "env-local-scale",
+        "envlocalscale"
+      ]
+    },
+    {
+      "standard_key": "env_medium",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "medium",
+        "growth_medium",
+        "substrate_type",
+        "environmental_material",
+        "material",
+        "env_material",
+        "environmental medium",
+        "env medium",
+        "growth medium",
+        "growth-medium",
+        "growthmedium",
+        "substrate type",
+        "substrate-type",
+        "substratetype",
+        "environmental material",
+        "environmental-material",
+        "env material",
+        "env-material",
+        "envmaterial",
+        "environmental_medium",
+        "environmental-medium",
+        "environmentalmedium",
+        "env-medium",
+        "envmedium"
+      ]
+    },
+    {
+      "standard_key": "genotype",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "genotype_name",
+        "genetic_background",
+        "observed genotype",
+        "genotype name",
+        "genotype-name",
+        "genotypename",
+        "genetic background",
+        "genetic-background",
+        "geneticbackground",
+        "observed_genotype",
+        "observed-genotype",
+        "observedgenotype"
+      ]
+    },
+    {
+      "standard_key": "serotype",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "serotype_name",
+        "sero_type",
+        "antigenic_formula",
+        "serogroup",
+        "serotype name",
+        "serotype-name",
+        "serotypename",
+        "sero type",
+        "sero-type",
+        "antigenic formula",
+        "antigenic-formula",
+        "antigenicformula"
+      ]
+    },
+    {
+      "standard_key": "serovar",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "serovar_name",
+        "sero_var",
+        "serovar name",
+        "serovar-name",
+        "serovarname",
+        "sero var",
+        "sero-var"
+      ]
+    },
+    {
+      "standard_key": "sub_strain",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "substrain",
+        "sub-strain",
+        "sub strain"
+      ]
+    },
+    {
+      "standard_key": "subtype",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sub_type",
+        "sub type",
+        "sub-type"
+      ]
+    },
+    {
+      "standard_key": "subgroup",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sub_group",
+        "sub group",
+        "sub-group"
+      ]
+    },
+    {
+      "standard_key": "pathotype",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "patho_type",
+        "pathogenicity type",
+        "patho type",
+        "patho-type",
+        "pathogenicity_type",
+        "pathogenicity-type",
+        "pathogenicitytype"
+      ]
+    },
+    {
+      "standard_key": "passage_history",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "passage history",
+        "passage_number",
+        "passage number",
+        "passage-history",
+        "passagehistory",
+        "passage-number",
+        "passagenumber"
+      ]
+    },
+    {
+      "standard_key": "culture_collection",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "culture_id",
+        "collection_id",
+        "type_strain",
+        "reference_strain",
+        "atcc",
+        "dsmz",
+        "nctc",
+        "ccug",
+        "culture collection",
+        "culture id",
+        "culture-id",
+        "cultureid",
+        "collection id",
+        "collection-id",
+        "collectionid",
+        "type strain",
+        "type-strain",
+        "typestrain",
+        "reference strain",
+        "reference-strain",
+        "referencestrain",
+        "culture-collection",
+        "culturecollection"
+      ]
+    },
+    {
+      "standard_key": "specimen_voucher",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "specimen voucher",
+        "specimen-voucher",
+        "specimenvoucher"
+      ]
+    },
+    {
+      "standard_key": "biomaterial_provider",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "biomaterial provider",
+        "biomaterial-provider",
+        "biomaterialprovider"
+      ]
+    },
+    {
+      "standard_key": "antimicrobial_resistance",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "amr",
+        "antibiotic_resistance",
+        "resistance_phenotype",
+        "resistance",
+        "susceptibility",
+        "mic",
+        "minimum_inhibitory_concentration",
+        "drug_resistance",
+        "resistant_to",
+        "antimicrobial resistance",
+        "antibiotic resistance",
+        "antibiotic-resistance",
+        "antibioticresistance",
+        "resistance phenotype",
+        "resistance-phenotype",
+        "resistancephenotype",
+        "minimum inhibitory concentration",
+        "minimum-inhibitory-concentration",
+        "drug resistance",
+        "drug-resistance",
+        "drugresistance",
+        "resistant to",
+        "resistant-to",
+        "resistantto",
+        "antimicrobial-resistance"
+      ]
+    },
+    {
+      "standard_key": "antimicrobial_resistance_phenotype",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "amr_phenotype",
+        "antimicrobial resistance phenotype",
+        "amr phenotype",
+        "amr-phenotype",
+        "amrphenotype",
+        "antimicrobial-resistance-phenotype"
+      ]
+    },
+    {
+      "standard_key": "outbreak",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "outbreak_id",
+        "cluster",
+        "cluster_id",
+        "epidemic",
+        "transmission_cluster",
+        "outbreak id",
+        "outbreak-id",
+        "outbreakid",
+        "cluster id",
+        "cluster-id",
+        "clusterid",
+        "transmission cluster",
+        "transmission-cluster",
+        "transmissioncluster"
+      ]
+    },
+    {
+      "standard_key": "sequencing_method",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sequencing_technology",
+        "platform",
+        "seq_method",
+        "instrument",
+        "sequencer",
+        "sequencing method",
+        "platform_model",
+        "sequencing technology",
+        "sequencing-technology",
+        "sequencingtechnology",
+        "seq method",
+        "seq-method",
+        "seqmethod",
+        "sequencing-method",
+        "sequencingmethod",
+        "platform model",
+        "platform-model",
+        "platformmodel"
+      ]
+    },
+    {
+      "standard_key": "assembly_method",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "assembler",
+        "assembly_software",
+        "assembly_version",
+        "genome_assembly_method",
+        "assembly method",
+        "assembly software",
+        "assembly-software",
+        "assemblysoftware",
+        "assembly version",
+        "assembly-version",
+        "assemblyversion",
+        "genome assembly method",
+        "genome-assembly-method",
+        "genomeassemblymethod",
+        "assembly-method",
+        "assemblymethod"
+      ]
+    },
+    {
+      "standard_key": "samp_size",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample_size",
+        "sample_volume",
+        "sample_weight",
+        "amount_or_size_of_sample_collected",
+        "sample size",
+        "sample-size",
+        "samplesize",
+        "sample volume",
+        "sample-volume",
+        "samplevolume",
+        "sample weight",
+        "sample-weight",
+        "sampleweight",
+        "amount or size of sample collected"
+      ]
+    },
+    {
+      "standard_key": "samp_mat_process",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample_processing",
+        "processing_method",
+        "treatment",
+        "filtration",
+        "enrichment",
+        "pre_treatment",
+        "extraction_method",
+        "sample material processing",
+        "sample processing",
+        "sample-processing",
+        "sampleprocessing",
+        "processing method",
+        "processing-method",
+        "processingmethod",
+        "pre treatment",
+        "pre-treatment",
+        "pretreatment",
+        "extraction method",
+        "extraction-method",
+        "extractionmethod",
+        "sample_material_processing",
+        "sample-material-processing"
+      ]
+    },
+    {
+      "standard_key": "temp",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "temperature",
+        "incubation_temperature",
+        "growth_temperature",
+        "storage_temperature",
+        "collection_temperature",
+        "incubation temperature",
+        "incubation-temperature",
+        "growth temperature",
+        "growth-temperature",
+        "growthtemperature",
+        "storage temperature",
+        "storage-temperature",
+        "storagetemperature",
+        "collection temperature",
+        "collection-temperature"
+      ]
+    },
+    {
+      "standard_key": "ph",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "ph_value",
+        "acidity",
+        "soil_ph",
+        "water_ph",
+        "ph value",
+        "ph-value",
+        "phvalue",
+        "soil ph",
+        "soil-ph",
+        "soilph",
+        "water ph",
+        "water-ph",
+        "waterph"
+      ]
+    },
+    {
+      "standard_key": "depth",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sampling_depth",
+        "water_depth",
+        "soil_depth",
+        "depth_m",
+        "sampling depth",
+        "sampling-depth",
+        "samplingdepth",
+        "water depth",
+        "water-depth",
+        "waterdepth",
+        "soil depth",
+        "soil-depth",
+        "soildepth",
+        "depth m",
+        "depth-m",
+        "depthm"
+      ]
+    },
+    {
+      "standard_key": "elev",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "elevation",
+        "altitude",
+        "elevation_m",
+        "altitude_m",
+        "elevation m",
+        "elevation-m",
+        "elevationm",
+        "altitude m",
+        "altitude-m",
+        "altitudem"
+      ]
+    },
+    {
+      "standard_key": "num_replicons",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "number of replicons",
+        "number_of_replicons",
+        "number-of-replicons",
+        "numberofreplicons"
+      ]
+    },
+    {
+      "standard_key": "ref_biomaterial",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "reference for biomaterial",
+        "reference biomaterial",
+        "reference_for_biomaterial",
+        "reference-for-biomaterial",
+        "reference_biomaterial",
+        "reference-biomaterial",
+        "referencebiomaterial"
+      ]
+    },
+    {
+      "standard_key": "propagation",
+      "parser": "string_cleaner",
+      "synonyms": []
+    },
+    {
+      "standard_key": "samp_collect_device",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample collection device or method",
+        "sample collection device",
+        "collection device",
+        "sample_collection_device_or_method",
+        "sample_collection_device",
+        "sample-collection-device",
+        "collection_device",
+        "collection-device",
+        "collectiondevice"
+      ]
+    },
+    {
+      "standard_key": "samp_store_temp",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample storage temperature",
+        "storage temperature",
+        "sample_storage_temperature",
+        "sample-storage-temperature",
+        "storage_temperature",
+        "storage-temperature",
+        "storagetemperature"
+      ]
+    },
+    {
+      "standard_key": "source_material_id",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "source material identifiers",
+        "source material id",
+        "source_material_identifiers",
+        "source-material-identifiers",
+        "source-material-id",
+        "sourcematerialid"
+      ]
+    },
+    {
+      "standard_key": "description",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "sample description",
+        "sample_description",
+        "sample-description",
+        "sampledescription"
+      ]
+    },
+    {
+      "standard_key": "ifsac_category",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "interagency food safety analytics collaboration (ifsac) category",
+        "ifsac+ category"
+      ]
+    },
+    {
+      "standard_key": "food_origin",
+      "parser": "string_cleaner",
+      "synonyms": [
+        "food origin",
+        "food_product_origin",
+        "food-origin",
+        "foodorigin",
+        "food product origin",
+        "food-product-origin",
+        "foodproductorigin"
+      ]
+    }
+  ]
+}
