@@ -19,9 +19,7 @@ First stable release. All known bugs and robustness issues have been resolved be
 
 ### Fixed
 * Over 30 bug fixes across ingestion, date parsing, geo parsing, and One Health classification.
-
-
-
+##
 ## [1.0.1] - 2026-06-09
 
 ### Added
