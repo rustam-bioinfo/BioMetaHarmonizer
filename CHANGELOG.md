@@ -19,3 +19,15 @@ First stable release. All known bugs and robustness issues have been resolved be
 
 ### Fixed
 * Over 30 bug fixes across ingestion, date parsing, geo parsing, and One Health classification.
+
+## [1.0.1] - 2026-06-09
+
+### Added
+* Extended synonym coverage for `isolation_source`
+* Extended synonym coverage for `collection_date`
+* Extended synonym coverage for `geo_loc_name`
+* Extended synonym coverage for `host`
+
+### Fixed
+* Reduced volume of attributes incorrectly landing in `_extra_attributes` due to
+  missing synonym variants for core fields.
