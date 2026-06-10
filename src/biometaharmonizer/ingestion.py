@@ -8,8 +8,8 @@ Assembly accessions not present in the local index are resolved via a live
 Entrez elink call (assembly -> biosample) as a fallback.
 
 This module now defines the canonical fixed output schema for the entire tool.
-Every record is initialized with all predefined columns, so downstream steps only
-fill values in-place and never create new columns. Any attribute that does not
+Every record is initialized with all predefined columns, so downstream steps
+fill values in-place. Any attribute that does not
 resolve to a known final output column is preserved in `_extra_attributes` as JSON.
 
 Entrez rate limits:
@@ -17,11 +17,6 @@ Entrez rate limits:
   With API key:   10 requests/second
 Register a free API key at https://www.ncbi.nlm.nih.gov/account/ and pass it to
 set_api_key() or ingest(api_key=...).
-
-Working directory note (Colab):
-  Assembly summary flat files (~100 MB each) are cached in CACHE_DIR, which defaults
-  to ~/.biometaharmonizer/cache/. In Colab, override with set_cache_dir("/content")
-  if you want them in the working directory.
 
 Thread-safety note:
   ENTREZ_EMAIL, ENTREZ_API_KEY, and CACHE_DIR are module-level globals. Concurrent
