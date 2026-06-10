@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+# Absolute path to the bundled schemas directory — works regardless of cwd.
+_SCHEMAS_DIR = Path(__file__).resolve().parent / "schemas"
 
 _VALID_FORMATS = ["csv", "tsv", "excel", "parquet", "jsonl"]
 
@@ -122,6 +124,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # ── build-dicts ───────────────────────────────────────────────────────────
+    _default_dicts = str(_SCHEMAS_DIR / "one_health_dictionaries.json")
+
     bd_p = sub.add_parser(
         "build-dicts",
         help="Rebuild one_health_dictionaries.json from OLS4, NCBI Taxonomy, and UMLS.",
@@ -142,15 +146,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bd_p.add_argument(
         "--base",
-        default="src/biometaharmonizer/schemas/one_health_dictionaries.json",
+        default=_default_dicts,
         metavar="FILE",
-        help="Path to the hand-curated base JSON (default: schemas/one_health_dictionaries.json).",
+        help=(
+            "Path to the hand-curated base JSON "
+            f"(default: {_default_dicts})."
+        ),
     )
     bd_p.add_argument(
         "--output",
-        default="src/biometaharmonizer/schemas/one_health_dictionaries.json",
+        default=_default_dicts,
         metavar="FILE",
-        help="Destination path for the enriched JSON (default: same as --base).",
+        help=(
+            "Destination path for the enriched JSON "
+            "(default: same as --base)."
+        ),
     )
     bd_p.add_argument(
         "--taxdmp",
@@ -192,7 +202,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Fetches the NCBI BioSample attribute harmonization table and saves\n"
-            "ncbi_attributes.xml to src/biometaharmonizer/schemas/.\n\n"
+            "ncbi_attributes.xml to the bundled schemas/ directory.\n\n"
             "Run once after cloning, and re-run periodically to pick up new NCBI\n"
             "attribute definitions.\n\n"
             "Examples:\n"
@@ -204,9 +214,12 @@ def _build_parser() -> argparse.ArgumentParser:
     bn_p.add_argument(
         "--output-dir",
         dest="output_dir",
-        default=None,
+        default=str(_SCHEMAS_DIR),
         metavar="DIR",
-        help="Directory to write ncbi_attributes.xml into (default: schemas/).",
+        help=(
+            "Directory to write ncbi_attributes.xml into "
+            f"(default: {_SCHEMAS_DIR})."
+        ),
     )
     bn_p.add_argument(
         "--skip-fetch",
