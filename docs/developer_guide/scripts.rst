@@ -1,20 +1,21 @@
-.. _scripts:
+.. _maintenance_subcommands:
 
-======================
-Developer Scripts
-======================
+========================
+Maintenance Subcommands
+========================
 
-The ``scripts/`` directory contains three standalone maintenance scripts for
-contributors and power users who build or refresh the data assets consumed at
-runtime. None of these scripts import from the ``biometaharmonizer`` package
-itself; they are intentionally standalone.
+Three ``biometaharmonizer`` subcommands are provided for contributors and
+power users who need to build or refresh the bundled data assets. These
+subcommands query external databases (OLS4, NCBI, UMLS) and write their
+output into ``src/biometaharmonizer/schemas/``; they are not needed for
+normal harmonization runs.
 
-build_dictionaries.py
-----------------------
+build-dicts
+-----------
 
 **Purpose**
 
-``scripts/build_dictionaries.py`` builds the enriched
+``biometaharmonizer build-dicts`` builds the enriched
 ``one_health_dictionaries.json`` file that powers the
 :class:`~biometaharmonizer.one_health.OneHealthClassifier`. It queries three
 external sources:
@@ -38,7 +39,7 @@ OLS4 Integration
 
 The following ontologies are queried, mapped via ``OLS_ONTOLOGY_MAP``:
 
-.. list-table:: build_dictionaries.py CLI flags
+.. list-table:: OLS4 ontologies queried
    :header-rows: 1
 
    * - Ontology
@@ -101,7 +102,7 @@ NCBI Taxonomy Integration
 A BFS walk of the NCBI taxonomy tree is performed from the following root
 taxon IDs (``NCBI_TAXON_ROOTS``):
 
-.. list-table:: build_dictionaries.py CLI flags
+.. list-table:: NCBI taxonomy root taxa
    :header-rows: 1
 
    * - Taxon ID
@@ -221,7 +222,7 @@ flow:
 
 The 17 CUIs and their canonical names:
 
-.. list-table:: build_dictionaries.py CLI flags
+.. list-table:: UMLS specimen CUIs
    :header-rows: 1
 
    * - CUI
@@ -264,9 +265,7 @@ The 17 CUIs and their canonical names:
 CLI Flags
 ~~~~~~~~~~
 
-All flags are derived from ``parse_args()`` in the script:
-
-.. list-table:: ``build_dictionaries.py`` CLI flags
+.. list-table:: ``biometaharmonizer build-dicts`` flags
    :header-rows: 1
    :widths: 20 80
 
@@ -297,23 +296,23 @@ Usage Examples
 .. code-block:: bash
 
    # Full run — overwrites bundled dictionary in place:
-   python scripts/build_dictionaries.py \
+   biometaharmonizer build-dicts \
        --base    src/biometaharmonizer/schemas/one_health_dictionaries.json \
        --output  src/biometaharmonizer/schemas/one_health_dictionaries.json
 
    # Use a pre-downloaded taxdmp.zip to skip the ~65 MB download:
-   python scripts/build_dictionaries.py --taxdmp /path/to/taxdmp.zip
+   biometaharmonizer build-dicts --taxdmp /path/to/taxdmp.zip
 
    # Skip NCBI taxonomy entirely:
-   python scripts/build_dictionaries.py --skip-ncbi
+   biometaharmonizer build-dicts --skip-ncbi
 
    # Full run with UMLS synonym expansion:
-   python scripts/build_dictionaries.py --umls-key YOUR_UMLS_API_KEY
+   biometaharmonizer build-dicts --umls-key YOUR_UMLS_API_KEY
 
 When to Re-run
 ~~~~~~~~~~~~~~
 
-Re-run this script when:
+Re-run when:
 
 - NCBI taxonomy is updated and new host names need to be incorporated into
   ``host_to_category``.
@@ -323,12 +322,12 @@ Re-run this script when:
 - After adding new hand-curated entries to the base JSON to propagate
   collision resolution correctly.
 
-build_ncbi_attribute_cache.py
--------------------------------
+build-ncbi-cache
+----------------
 
 **Purpose**
 
-``scripts/build_ncbi_attribute_cache.py`` fetches the official NCBI BioSample
+``biometaharmonizer build-ncbi-cache`` fetches the official NCBI BioSample
 attribute harmonization XML from NCBI and saves it as
 ``src/biometaharmonizer/schemas/ncbi_attributes.xml``.
 
@@ -348,7 +347,7 @@ This is the raw XML response from:
 
 **CLI Flags:**
 
-.. list-table:: build_dictionaries.py CLI flags
+.. list-table:: ``biometaharmonizer build-ncbi-cache`` flags
    :header-rows: 1
 
    * - Flag
@@ -358,38 +357,37 @@ This is the raw XML response from:
    * - ``--skip-fetch``
      - Skip the network request. Validate and report an existing ``ncbi_attributes.xml`` only.
 
-The script retries up to 3 times with exponential backoff (2 s, 4 s) on
-network failures (``MAX_ATTEMPTS = 3``, ``TIMEOUT = 30`` seconds).
-
-After saving, ``parse_and_report()`` prints the count of ``HarmonizedName``
-entries and ``Synonym`` entries found in the XML.
+Retries up to 3 times with exponential backoff (2 s, 4 s) on network
+failures (``MAX_ATTEMPTS = 3``, ``TIMEOUT = 30`` seconds). After saving,
+``parse_and_report()`` prints the count of ``HarmonizedName`` and ``Synonym``
+entries found in the XML.
 
 **Usage examples:**
 
 .. code-block:: bash
 
    # Fetch and save to default location:
-   python scripts/build_ncbi_attribute_cache.py
+   biometaharmonizer build-ncbi-cache
 
    # Save to a custom directory:
-   python scripts/build_ncbi_attribute_cache.py --output-dir /tmp/schemas
+   biometaharmonizer build-ncbi-cache --output-dir /tmp/schemas
 
    # Validate an existing file without a network request:
-   python scripts/build_ncbi_attribute_cache.py --skip-fetch
+   biometaharmonizer build-ncbi-cache --skip-fetch
 
 **When to re-run:**
 
 Re-run periodically (e.g. monthly) or whenever NCBI adds or renames BioSample
 attributes. The tool functions without this file (Layer 2 disabled) but
-synonym coverage will be lower for packages that use non-standard attribute
-names that are only defined in the NCBI XML.
+synonym coverage will be lower for records that use non-standard attribute
+names defined only in the NCBI XML.
 
-generate_summary_report.py
----------------------------
+generate-report
+---------------
 
 **Purpose**
 
-``scripts/generate_summary_report.py`` generates a comprehensive visual
+``biometaharmonizer generate-report`` generates a comprehensive visual
 summary report from a BioMetaHarmonizer output file. It reads a CSV/TSV/
 Parquet file produced by :func:`~biometaharmonizer.output.write` and produces
 an interactive HTML report (and optionally JSON and CSV summaries) with
@@ -397,12 +395,12 @@ Plotly visualizations.
 
 **Input:**
 
-A harmonized DataFrame file produced by ``biometaharmonizer`` (CSV, TSV, or
-Parquet). The script loads it with ``pandas``.
+A harmonized output file produced by ``biometaharmonizer run`` (CSV, TSV, or
+Parquet).
 
 **CLI Flags:**
 
-.. list-table:: build_dictionaries.py CLI flags
+.. list-table:: ``biometaharmonizer generate-report`` flags
    :header-rows: 1
 
    * - Flag
@@ -412,7 +410,7 @@ Parquet). The script loads it with ``pandas``.
    * - ``--output, -o``
      - Output file path (for single-format output).
    * - ``--output-dir, -d``
-     - | Output directory for multi-format output.
+     - Output directory for multi-format output.
    * - ``--formats, -f``
      - One or more of: ``html``, ``json``, ``csv``. Default: inferred from ``--output`` suffix.
    * - ``--verbose, -v``
@@ -426,27 +424,22 @@ The HTML report is produced by ``generate_full_html_report()`` and includes:
    subplot: fill rates by category (bar chart), overall completeness
    distribution (histogram), category-wise average fill rate (bar), and
    top-15 most complete columns (bar).
-
 2. **Geospatial Visualizations** (``generate_geo_visualizations()``) — country
    distribution choropleth or bar chart based on ``geo_country`` and
    ``geo_iso3166`` columns.
-
 3. **Temporal Analysis** (``generate_temporal_analysis()``) — time-series
    distribution of ``collection_date`` values grouped by year or year-month.
-
 4. **One Health Chart** (``generate_one_health_chart()``) — pie or bar chart
    of ``one_health_category`` distribution.
-
 5. **Host Analysis** (``generate_host_analysis()``) — top host values from
    the ``host`` column.
-
 6. **Extra Attributes Analysis** (``generate_extra_attributes_analysis()``) —
    summary of keys present in ``_extra_attributes`` across all records,
    including antibiogram presence rate.
 
 **Metrics computed** (``compute_fill_rates()`` and ``generate_json_metrics()``):
 
-- Per-column ``non_null_count``, ``null_count``, ``fill_pct`` for all 57 schema
+- Per-column ``non_null_count``, ``null_count``, ``fill_pct`` for all 53 schema
   columns.
 - Category-level average fill rates (using ``COLUMN_CATEGORIES`` groupings).
 - Overall dataset completeness summary.
@@ -461,23 +454,22 @@ The HTML report is produced by ``generate_full_html_report()`` and includes:
 .. code-block:: bash
 
    # Generate HTML report only:
-   python scripts/generate_summary_report.py \
+   biometaharmonizer generate-report \
        --input harmonized.csv \
        --output report.html
 
    # Generate all formats:
-   python scripts/generate_summary_report.py \
+   biometaharmonizer generate-report \
        --input harmonized.csv \
        --output-dir reports/ \
        --formats html json csv
 
    # Verbose logging:
-   python scripts/generate_summary_report.py \
+   biometaharmonizer generate-report \
        -i harmonized.parquet -o report.html -v
 
 .. note::
 
-   Plotly must be installed for HTML/PDF output (``pip install plotly``).
+   Plotly must be installed for HTML output (``pip install plotly``).
    PDF export additionally requires ``kaleido`` (``pip install kaleido``).
-   The script imports Plotly conditionally and will still produce JSON and
-   CSV summaries if Plotly is absent.
+   If Plotly is absent, JSON and CSV summaries are still produced.

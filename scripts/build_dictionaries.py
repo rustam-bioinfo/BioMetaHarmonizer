@@ -12,9 +12,13 @@ always wins over ontology-derived data (merge strategy: base_wins).
 
 Usage
 -----
+  # As a standalone script:
   python scripts/build_dictionaries.py \\
       --base    src/biometaharmonizer/schemas/one_health_dictionaries.json \\
       --output  src/biometaharmonizer/schemas/one_health_dictionaries.json
+
+  # Via the CLI entry-point:
+  biometaharmonizer build-dicts [--base …] [--output …] [--skip-ncbi] …
 
   # Use a pre-downloaded taxdmp.zip to skip the ~65 MB download:
   python scripts/build_dictionaries.py --taxdmp /path/to/taxdmp.zip
@@ -204,41 +208,15 @@ _RE_SCOPE_TAG = re.compile(r'\(\s*(exact|related|broad|narrow)\s*\)\s*$', re.IGN
 _RE_GS1_GPC   = re.compile(r'^\d+\s*-\s*.+\(gs1 gpc\)\s*$', re.IGNORECASE)
 
 # Regulatory catalogue codes from FoodOn synonyms.
-# These are classification scheme artefacts, not biological terms that can
-# be matched against BioSample free-text metadata.
-#
-# Pattern families covered:
-#   EFSA FoodEx2  : "12640 - bay leaves, dry (efsa foodex2)"
-#   EC codes      : "0900000 - 9. sugar plants (ec)"
-#   EuroFIR       : "grain or grain product (eurofir)"
-#   EFG (EFSA)    : "33  products for special nutritional use (efg)"
-#   CIAA          : "CIAA fruits and vegetables"
-#   CCFAC         : "CCFAC bakery wares"
-#   Codex         : "formulation agent (codex)", "food preservative (codex)"
-#   Other (...source) catalogue synonyms caught by the generic rule below
-#
-# Rule order matters: most-specific patterns first, generic catch-all last.
 _RE_REGULATORY_CATALOGUE = re.compile(
     r"""
     (?:
-        # Numeric code + dash + description + parenthesised source tag
-        # e.g.  "12640 - bay leaves, dry (efsa foodex2)"
-        #        "0900000 - 9. sugar plants (ec)"
         ^\s*\d[\d\s]*\s*-\s*.+\(\s*(?:efsa\s+foodex2?|ec|eurofir|efg|codex|ciaa|ccfac|gs1|gpc)[^)]*\)\s*$
         |
-        # Numeric code + dash + description, no source tag but format is clearly a catalogue entry
-        # e.g.  "05110 - sunflower shoots and sprouts (efsa foodex2)"
-        # (already caught above, but guard for tag-less variants)
         ^\s*0\d{4,}\s*-\s*.+$
         |
-        # Parenthesised source tag at end, no leading code
-        # e.g.  "grain or grain product (eurofir)"
-        #        "formulation agent (codex)"
-        #        "33  products for special nutritional use (efg)"
         .+\(\s*(?:efsa\s+foodex2?|eurofir|efg|codex|ciaa|ccfac|gs1\s+gpc)[^)]*\)\s*$
         |
-        # CIAA / CCFAC bare prefix (no parentheses)
-        # e.g.  "CIAA edible ices", "CCFAC cereals and cereal products"
         ^\s*(?:CIAA|CCFAC)\s+.+$
     )
     """,
@@ -278,9 +256,6 @@ def _get(url, params=None, retries=3, backoff=2.0, as_text=False):
 # ---------------------------------------------------------------------------
 
 def _short_id_to_iri(short_id):
-    """
-    Convert 'ENVO:00000428' -> 'http://purl.obolibrary.org/obo/ENVO_00000428'
-    """
     prefix, local = short_id.split(":", 1)
     base_iri = OLS_IRI_PREFIXES.get(prefix.upper())
     if not base_iri:
@@ -289,72 +264,25 @@ def _short_id_to_iri(short_id):
 
 
 def _clean_ols_term(term):
-    """
-    Clean and validate a raw OLS term string before adding it to the dictionary.
-
-    Returns the cleaned string, or None if the term should be discarded.
-
-    Rules applied in order:
-      1. Non-ASCII characters -> discard
-      2. Language-tagged synonyms: '...(spanish, exact)' -> discard
-      3. OBO scope tag leak: '...(exact)' -> strip suffix
-      4. GS1/GPC retail catalogue codes -> discard
-      5. Regulatory catalogue codes (EFSA FoodEx2, EC, EuroFIR, EFG,
-         CIAA, CCFAC, Codex) -> discard
-      6. Too short after cleaning (<= 2 chars) -> discard
-    """
     if not term or not isinstance(term, str):
         return None
-
-    # Rule 1: non-ASCII
     try:
         term.encode("ascii")
     except UnicodeEncodeError:
         return None
-
-    # Rule 2: language-tagged synonyms
     if _RE_LANG_TAG.search(term):
         return None
-
-    # Rule 3: bare OBO scope tag leak
     term = _RE_SCOPE_TAG.sub("", term).strip()
-
-    # Rule 4: GS1/GPC retail catalogue codes (kept separate for clarity)
     if _RE_GS1_GPC.match(term):
         return None
-
-    # Rule 5: regulatory catalogue codes (EFSA, EC, EuroFIR, CIAA, CCFAC, Codex)
     if _RE_REGULATORY_CATALOGUE.match(term):
         return None
-
-    # Rule 6: too short after cleaning
     if len(term) <= 2:
         return None
-
     return term
 
 
 def ols_descendants(ontology, short_id, max_terms=15000):
-    """
-    Fetch all hierarchicalDescendant term labels + exact synonyms for a
-    given short ID from OLS4.
-
-    OLS4 endpoint:
-      GET /ontologies/{onto}/terms/{double_encoded_iri}/hierarchicalDescendants
-
-    IRI must be double URL-encoded as a path segment.
-    Response: _embedded.terms[].label  +  annotation.hasExactSynonym[]
-
-    Only hasExactSynonym / has_exact_synonym are collected. Broad, narrow,
-    related, and unscoped synonym lists are intentionally excluded to avoid
-    false-positive category assignments.
-
-    All collected strings pass through _clean_ols_term() before storage.
-
-    Warns if:
-      - zero terms are returned (likely obsolete IRI or restriction-based hierarchy)
-      - the max_terms ceiling is hit (results may be truncated)
-    """
     iri = _short_id_to_iri(short_id)
     encoded = quote(quote(iri, safe=""), safe="")
     url = f"{OLS_BASE}/ontologies/{ontology}/terms/{encoded}/hierarchicalDescendants"
@@ -433,7 +361,6 @@ def fetch_ols_terms():
                     result.setdefault(category, []).extend(terms)
                     log.info("    -> %d terms", len(terms))
 
-    # Classify anatomy terms into human / animal / ambiguous
     human_terms, animal_terms, ambiguous_terms = [], [], []
     for term in anatomy_all:
         if any(excl in term for excl in UBERON_HUMAN_EXCLUSIVE):
@@ -447,7 +374,6 @@ def fetch_ols_terms():
     result["_uberon_animal"]    = animal_terms
     result["_uberon_ambiguous"] = ambiguous_terms
 
-    # Log post-collection unique counts per category
     for cat in ("Environmental", "Food", "Plant"):
         raw = result.get(cat, [])
         unique = len(set(raw))
@@ -461,10 +387,6 @@ def fetch_ols_terms():
 # ---------------------------------------------------------------------------
 
 def _download_taxdmp(dest_dir):
-    """
-    Download taxdmp.zip from NCBI FTP into dest_dir.
-    Returns path to the downloaded zip file.
-    """
     zip_path = Path(dest_dir) / "taxdmp.zip"
     log.info("Downloading taxdmp.zip from %s ...", NCBI_TAXDMP_URL)
     with requests.get(NCBI_TAXDMP_URL, stream=True, timeout=120) as r:
@@ -472,7 +394,7 @@ def _download_taxdmp(dest_dir):
         total = int(r.headers.get("content-length", 0))
         downloaded = 0
         with open(zip_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+            for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk)
                 downloaded += len(chunk)
         log.info("Downloaded %.1f MB", downloaded / 1e6)
@@ -480,10 +402,6 @@ def _download_taxdmp(dest_dir):
 
 
 def _extract_taxdmp(zip_path, dest_dir):
-    """
-    Extract names.dmp and nodes.dmp from taxdmp.zip into dest_dir.
-    Returns (names_path, nodes_path).
-    """
     log.info("Extracting names.dmp and nodes.dmp ...")
     with zipfile.ZipFile(zip_path) as zf:
         zf.extract("names.dmp", dest_dir)
@@ -492,13 +410,6 @@ def _extract_taxdmp(zip_path, dest_dir):
 
 
 def _parse_names_dmp(names_path):
-    """
-    Parse names.dmp into a DataFrame with columns:
-        tax_id (Int64), name_txt (str), name_class (str)
-
-    Only rows whose name_class is in NAMES_DMP_KEEP_CLASSES are kept.
-    name_txt is lowercased for case-insensitive downstream matching.
-    """
     log.info("Parsing names.dmp ...")
     df = pd.read_csv(
         names_path,
@@ -518,10 +429,6 @@ def _parse_names_dmp(names_path):
 
 
 def _parse_nodes_dmp(nodes_path):
-    """
-    Parse nodes.dmp into a parent->children mapping.
-    Returns dict[int, list[int]].
-    """
     log.info("Parsing nodes.dmp ...")
     nodes = pd.read_csv(
         nodes_path,
@@ -541,16 +448,12 @@ def _parse_nodes_dmp(nodes_path):
     for row in nodes.itertuples(index=False):
         tid = int(row.tax_id)
         pid = int(row.parent_tax_id)
-        if tid != pid:  # root node points to itself
+        if tid != pid:
             children[pid].append(tid)
     return children
 
 
 def _bfs_subtree(root_id, children):
-    """
-    Iterative BFS from root_id over the children dict.
-    Returns frozenset of all descendant tax_ids (including root_id).
-    """
     visited = set()
     queue = [root_id]
     while queue:
@@ -563,16 +466,6 @@ def _bfs_subtree(root_id, children):
 
 
 def _resolve_taxdmp_path(taxdmp_arg):
-    """
-    Resolve the path to names.dmp and nodes.dmp from the --taxdmp argument.
-
-    Accepts:
-      - a .zip file path  -> extract to a temp dir
-      - a directory path  -> expect names.dmp + nodes.dmp inside
-      - None              -> download taxdmp.zip to a temp dir
-
-    Returns (names_path, nodes_path, tmp_dir_to_cleanup_or_None).
-    """
     if taxdmp_arg is None:
         tmp = tempfile.mkdtemp(prefix="taxdmp_")
         zip_path = _download_taxdmp(tmp)
@@ -598,24 +491,6 @@ def _resolve_taxdmp_path(taxdmp_arg):
 
 
 def build_host_map_from_dump(taxdmp_arg=None):
-    """
-    Build host_to_category dict from the local NCBI taxonomy dump.
-
-    Algorithm:
-      1. Resolve / download names.dmp + nodes.dmp
-      2. Parse names.dmp, keep scientific name / common name /
-         genbank common name / equivalent name rows
-      3. Parse nodes.dmp -> parent->children dict
-      4. For each root in NCBI_TAXON_ROOTS (except 9606 Human):
-         BFS to collect all descendant tax_ids
-      5. Filter names df to those tax_ids, emit name_txt -> category
-         Only names with 1-3 tokens are kept (binomials, trinomials, and
-         short common names); longer strings are strain/haplotype descriptors
-         that never appear in BioSample host fields.
-      6. Add hard-coded Human entries for tax_id 9606
-
-    Returns dict: name_lower -> category
-    """
     log.info("Building host map from local taxonomy dump...")
 
     names_path, nodes_path, tmp_dir = _resolve_taxdmp_path(taxdmp_arg)
@@ -624,7 +499,6 @@ def build_host_map_from_dump(taxdmp_arg=None):
         names_df = _parse_names_dmp(names_path)
         children = _parse_nodes_dmp(nodes_path)
 
-        # Build a set of all tax_ids present in names.dmp for fast membership checks
         all_name_ids = set(names_df["tax_id"].dropna().astype(int))
 
         host_map = {
@@ -638,7 +512,6 @@ def build_host_map_from_dump(taxdmp_arg=None):
                 continue
 
             subtree_ids = _bfs_subtree(root_id, children)
-            # Intersect with IDs that actually have names
             name_ids_in_subtree = subtree_ids & all_name_ids
 
             subset = names_df[names_df["tax_id"].isin(name_ids_in_subtree)]
@@ -744,17 +617,6 @@ def fetch_umls_synonyms(api_key):
 # ---------------------------------------------------------------------------
 
 def _apply_priority_rule(term, unique_cats, ont_map):
-    """
-    Check whether a two-category intra-ontology_map collision can be resolved
-    by a priority rule in _CATEGORY_PRIORITY.
-
-    If a matching (winner, loser) pair is found:
-      - removes term from ont_map[loser]
-      - logs at DEBUG level (visible only with --verbose-collisions)
-      - returns True (caller should skip eviction)
-
-    Returns False if no priority rule applies.
-    """
     if len(unique_cats) != 2:
         return False
     cats_set = set(unique_cats)
@@ -773,66 +635,14 @@ def _apply_priority_rule(term, unique_cats, ont_map):
 
 
 def _resolve_collisions(base):
-    """
-    Detect terms that appear in multiple One Health categories or conflict
-    with authoritative dictionary sections, and record them in
-    base["ambiguous_category_terms"] instead of silently keeping them in
-    whichever category happened to be populated first.
-
-    Two collision types are handled:
-
-    1. Intra-ontology_map: same term string present in 2+ *distinct* category
-       lists. Duplicate entries for the same category (overlapping OLS4 seed
-       subtrees) are deduplicated first and do NOT count as a collision.
-       Before eviction, priority rules in _CATEGORY_PRIORITY are checked: if
-       a (winner, loser) pair matches, the term stays in the winner category.
-
-    2. Cross-section (authoritative only): a term in ontology_map also exists
-       in unambiguous_human_terms or unambiguous_animal_terms.
-
-    NOTE: ambiguous_specimen_terms is intentionally NOT treated as an
-    authoritative conflict source. It is a tiebreaker list used during
-    classification when no domain signal is present. A term that is already
-    uniquely placed in one ontology_map category should NOT be evicted just
-    because it also appears in ambiguous_specimen_terms.
-
-    NOTE: host_to_category is intentionally NOT treated as an authoritative
-    conflict source for Food terms. host_to_category classifies the BioSample
-    `host` field; ontology_map classifies `isolation_source`. These are
-    different fields, so co-occurrence is not a real semantic collision.
-    Food item names (tomato, apple, rice, peanut, ...) appear in the NCBI
-    Viridiplantae BFS walk as organism common names - a taxonomy artefact.
-    Evicting them would cause correct Food classifications to fall through to
-    Unclassified. The Food-priority host guard below handles this case.
-    For non-Food terms, host_to_category conflicts still trigger eviction
-    because a non-Food isolation_source that matches a host organism name
-    is genuinely ambiguous (e.g. a plant anatomical term used as both
-    isolation_source and host field value).
-
-    In both remaining collision cases the term is removed from all ontology_map
-    category lists and added to ambiguous_category_terms.
-
-    Terms that were present in the hand-curated base ontology_map before this
-    build run are exempt (base_wins).
-
-    Per-term detail lines (COLLISION / PRIORITY / FOOD-HOST-PRIORITY) are
-    logged at DEBUG level and are silent by default. Pass --verbose-collisions
-    on the CLI to see them.
-
-    Returns a stats dict attached to _metadata["collision_stats"].
-    """
     ont_map   = base.get("ontology_map", {})
     ambiguous = base.setdefault("ambiguous_category_terms", {})
 
-    # Build inverted index: term -> [categories] (may contain duplicates when
-    # multiple OLS4 seeds for the same category share overlapping subtrees).
     term_to_cats = {}
     for cat, terms in ont_map.items():
         for t in terms:
             term_to_cats.setdefault(t, []).append(cat)
 
-    # Authoritative cross-section lookup sets.
-    # ambiguous_specimen_terms is deliberately excluded - see docstring.
     host_keys  = set(base.get("host_to_category", {}).keys())
     human_set  = set(t.lower() for t in base.get("unambiguous_human_terms",  []))
     animal_set = set(t.lower() for t in base.get("unambiguous_animal_terms", []))
@@ -843,17 +653,10 @@ def _resolve_collisions(base):
     food_host_saved = 0
 
     for term, cats in term_to_cats.items():
-        # Deduplicate category list while preserving order. Multiple identical
-        # categories arise when overlapping ENVO seed subtrees return the same
-        # term; this is NOT a real collision and must not trigger eviction.
         unique_cats = list(dict.fromkeys(cats))
 
         conflicts = list(unique_cats)
 
-        # host_to_category: only append as a conflict for non-Food-only terms.
-        # Food terms in host_to_category are a taxonomy artefact (plant common
-        # names in Viridiplantae BFS) and must not cause Food eviction.
-        # See docstring for full rationale.
         if term in host_keys:
             if not (len(unique_cats) == 1 and unique_cats[0] == "Food"):
                 conflicts.append("host_to_category")
@@ -876,25 +679,18 @@ def _resolve_collisions(base):
                 )
             continue
 
-        # base_wins: if term was hand-curated into exactly one ontology_map
-        # category and has no authoritative cross-section conflict, leave it alone
         if not has_cross and len(unique_cats) == 1:
             continue
 
-        # Priority rules: resolve two-category intra collisions without eviction
-        # when a clear winner is defined (e.g. Food beats Environmental).
-        # Cross-section conflicts bypass priority rules and always evict.
         if has_intra and not has_cross:
             if _apply_priority_rule(term, unique_cats, ont_map):
                 priority_count += 1
                 continue
 
-        # Record in ambiguous_category_terms (merge if already present)
         existing = ambiguous.get(term, [])
         merged   = list(dict.fromkeys(existing + conflicts))
         ambiguous[term] = merged
 
-        # Remove from all ontology_map category lists
         for cat in unique_cats:
             try:
                 ont_map[cat].remove(term)
@@ -936,7 +732,6 @@ def _resolve_collisions(base):
 def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
     log.info("Merging ontology data into base dictionary...")
 
-    # ontology_map
     ont_map = base.setdefault("ontology_map", {})
     for category in ("Environmental", "Food", "Plant"):
         existing  = set(ont_map.get(category, []))
@@ -949,7 +744,6 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
             post_dedup = len(set(ont_map[category]))
             log.info("  ontology_map[%s] +%d terms -> %d unique total", category, len(new_terms), post_dedup)
 
-    # host_to_category
     host_map   = base.setdefault("host_to_category", {})
     base_hosts = {k.lower() for k in host_map}
     added      = sum(
@@ -959,7 +753,6 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
     )
     log.info("  host_to_category +%d entries", added)
 
-    # UBERON anatomy -> unambiguous / ambiguous lists
     base_unambig_h = {t.lower() for t in base.get("unambiguous_human_terms",  [])}
     base_unambig_a = {t.lower() for t in base.get("unambiguous_animal_terms", [])}
     base_ambig     = {t.lower() for t in base.get("ambiguous_specimen_terms", [])}
@@ -976,7 +769,6 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
     log.info("  unambiguous_animal_terms +%d", len(new_a))
     log.info("  ambiguous_specimen_terms +%d", len(new_b))
 
-    # UMLS synonym_map
     if umls_synonyms:
         syn_map       = base.setdefault("synonym_map", {})
         base_syn_keys = {k.lower() for k in syn_map}
@@ -990,7 +782,6 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
                     added_syns += 1
         log.info("  synonym_map +%d entries from UMLS", added_syns)
 
-    # Resolve cross-category and cross-section collisions
     collision_stats = _resolve_collisions(base)
 
     return base, collision_stats
@@ -1001,17 +792,19 @@ def merge_into_base(base, ols_terms, ncbi_host_map, umls_synonyms):
 # ---------------------------------------------------------------------------
 
 def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
+    # args may be an argparse.Namespace or a plain object; access via getattr
+    # so this function works whether called from main() or from tests.
     data["_metadata"] = {
         "build_date":   datetime.now(timezone.utc).isoformat(),
         "build_script": "scripts/build_dictionaries.py",
         "sources": {
-            "hand_curated_base":       str(args.base),
+            "hand_curated_base":       str(getattr(args, "base", "unknown")),
             "ols4_api":                OLS_BASE,
             "ols4_ontologies":         list(OLS_ONTOLOGY_MAP.keys()),
             "ols4_term_counts":        ols_counts,
             "ncbi_taxonomy_source":    "local taxdmp.zip (ftp.ncbi.nlm.nih.gov/pub/taxonomy/)",
             "ncbi_host_entries_added": ncbi_count,
-            "umls_api":                UMLS_BASE if args.umls_key else "skipped",
+            "umls_api":                UMLS_BASE if getattr(args, "umls_key", None) else "skipped",
         },
         "merge_strategy":  "base_wins",
         "collision_stats": collision_stats,
@@ -1029,7 +822,7 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
             "or unambiguous_animal_terms are recorded in ambiguous_category_terms. "
             "ambiguous_specimen_terms is a tiebreaker and does NOT evict "
             "terms from ontology_map. "
-            "Rebuild by running scripts/build_dictionaries.py. "
+            "Rebuild by running: biometaharmonizer build-dicts  (or scripts/build_dictionaries.py). "
             "Use --verbose-collisions for per-term collision detail."
         ),
     }
@@ -1040,7 +833,16 @@ def attach_metadata(data, args, ncbi_count, ols_counts, collision_stats):
 # CLI
 # ---------------------------------------------------------------------------
 
-def parse_args():
+def parse_args(argv=None):
+    """Parse command-line arguments.
+
+    Parameters
+    ----------
+    argv:
+        Argument list to parse.  Defaults to ``sys.argv[1:]`` when *None*,
+        which is the normal standalone-script behaviour.  Pass an explicit
+        list to call this function programmatically (e.g. from cli.py).
+    """
     p = argparse.ArgumentParser(
         description="Build enriched one_health_dictionaries.json from ontology sources."
     )
@@ -1068,11 +870,20 @@ def parse_args():
             "and FOOD-HOST-PRIORITY lines. Silent by default."
         ),
     )
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
-def main():
-    args      = parse_args()
+def main(argv=None):
+    """Entry point.
+
+    Parameters
+    ----------
+    argv:
+        Forwarded to :func:`parse_args`.  ``None`` means use ``sys.argv``
+        (normal standalone-script behaviour).  Pass an explicit list when
+        calling from :mod:`biometaharmonizer.cli`.
+    """
+    args      = parse_args(argv)
     base_path = Path(args.base)
 
     if args.verbose_collisions:
