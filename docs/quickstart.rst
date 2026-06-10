@@ -8,6 +8,24 @@ All three examples below use the actual public API of BioMetaHarmonizer.
 Every parameter name matches the signature of :func:`biometaharmonizer.ingestion.ingest`
 exactly as it appears in the source code.
 
+Before Your First Run
+---------------------
+
+BioMetaHarmonizer's One Health classification relies on two schema files that
+must be built once after installation:
+
+.. code-block:: bash
+
+   # Step 1 — download and cache NCBI BioSample attribute definitions
+   biometaharmonizer build-ncbi-cache
+
+   # Step 2 — build the enriched One Health term dictionary
+   biometaharmonizer build-dicts
+
+Both commands write their output to ``src/biometaharmonizer/schemas/`` and are
+safe to re-run at any time to pick up upstream changes from NCBI or OLS.
+See :ref:`cli_reference` for the full list of options for each command.
+
 Example 1 — Minimal: Three BioSample Accessions
 -------------------------------------------------
 
@@ -124,7 +142,7 @@ exactly **57 columns** in the following order (matching ``_load_final_schema()``
        "collection_date", "collection_date_range",
        # Block 8 — One Health (derived)
        "one_health_category", "one_health_confidence",
-       "one_health_evidence_level", 
+       "one_health_evidence_level",
        # Block 9 — Epidemiology
        "outbreak",
        # Block 10 — Sequencing / assembly
