@@ -35,13 +35,20 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="biometaharmonizer",
         description=(
             "Harmonize NCBI BioSample metadata: fetch, normalize column names, "
-            "parse dates, resolve geography, classify One Health category, and export."
+            "parse dates, resolve geography, classify One Health category, and export.\n\n"
+            "Subcommands:\n"
+            "  run                 Full harmonization pipeline\n"
+            "  build-dicts         Rebuild one_health_dictionaries.json\n"
+            "  build-ncbi-cache    Fetch NCBI BioSample attribute XML\n"
+            "  generate-report     Generate interactive HTML report from output file"
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
 
+    # ── run ──────────────────────────────────────────────────────────────────
     run_p = sub.add_parser(
         "run",
         help="Full harmonization pipeline: ingest -> key-map -> date/geo/one-health -> output.",
@@ -114,6 +121,132 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── build-dicts ───────────────────────────────────────────────────────────
+    bd_p = sub.add_parser(
+        "build-dicts",
+        help="Rebuild one_health_dictionaries.json from OLS4, NCBI Taxonomy, and UMLS.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Build an enriched one_health_dictionaries.json by querying:\n"
+            "  1. OLS4 API  - ENVO, FoodOn, UBERON, Plant Ontology\n"
+            "  2. NCBI Taxonomy local dump - host_to_category entries\n"
+            "  3. UMLS API  - synonym expansion (optional, requires API key)\n\n"
+            "The hand-curated base file is loaded first; any key already present\n"
+            "in the base always wins over ontology-derived data (merge strategy: base_wins).\n\n"
+            "Examples:\n"
+            "    biometaharmonizer build-dicts\n"
+            "    biometaharmonizer build-dicts --skip-ncbi --dry-run\n"
+            "    biometaharmonizer build-dicts --taxdmp /path/to/taxdmp.zip\n"
+            "    biometaharmonizer build-dicts --umls-key YOUR_KEY --verbose-collisions"
+        ),
+    )
+    bd_p.add_argument(
+        "--base",
+        default="src/biometaharmonizer/schemas/one_health_dictionaries.json",
+        metavar="FILE",
+        help="Path to the hand-curated base JSON (default: schemas/one_health_dictionaries.json).",
+    )
+    bd_p.add_argument(
+        "--output",
+        default="src/biometaharmonizer/schemas/one_health_dictionaries.json",
+        metavar="FILE",
+        help="Destination path for the enriched JSON (default: same as --base).",
+    )
+    bd_p.add_argument(
+        "--taxdmp",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a pre-downloaded taxdmp.zip or an extracted directory "
+            "containing names.dmp and nodes.dmp. "
+            "If omitted, taxdmp.zip is downloaded automatically from NCBI FTP."
+        ),
+    )
+    bd_p.add_argument(
+        "--umls-key",
+        dest="umls_key",
+        default=None,
+        metavar="KEY",
+        help="UMLS API key for synonym expansion (optional).",
+    )
+    bd_p.add_argument("--skip-ols",  action="store_true", help="Skip OLS4 queries.")
+    bd_p.add_argument("--skip-ncbi", action="store_true", help="Skip NCBI Taxonomy dump.")
+    bd_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run all enrichment steps but do not write the output file.",
+    )
+    bd_p.add_argument(
+        "--verbose-collisions",
+        action="store_true",
+        help=(
+            "Print per-term collision detail (COLLISION, PRIORITY, "
+            "FOOD-HOST-PRIORITY lines). Silent by default."
+        ),
+    )
+
+    # ── build-ncbi-cache ──────────────────────────────────────────────────────
+    bn_p = sub.add_parser(
+        "build-ncbi-cache",
+        help="Fetch the NCBI BioSample attribute XML and save it to schemas/.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Fetches the NCBI BioSample attribute harmonization table and saves\n"
+            "ncbi_attributes.xml to src/biometaharmonizer/schemas/.\n\n"
+            "Run once after cloning, and re-run periodically to pick up new NCBI\n"
+            "attribute definitions.\n\n"
+            "Examples:\n"
+            "    biometaharmonizer build-ncbi-cache\n"
+            "    biometaharmonizer build-ncbi-cache --output-dir /tmp/schemas\n"
+            "    biometaharmonizer build-ncbi-cache --skip-fetch"
+        ),
+    )
+    bn_p.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default=None,
+        metavar="DIR",
+        help="Directory to write ncbi_attributes.xml into (default: schemas/).",
+    )
+    bn_p.add_argument(
+        "--skip-fetch",
+        action="store_true",
+        help=(
+            "Skip the network request and only validate/report an existing "
+            "ncbi_attributes.xml in the output directory."
+        ),
+    )
+
+    # ── generate-report ───────────────────────────────────────────────────────
+    gr_p = sub.add_parser(
+        "generate-report",
+        help="Generate an interactive self-contained HTML report from a harmonized output file.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Generates an interactive, self-contained HTML report from a\n"
+            "BioMetaHarmonizer output file (CSV, TSV, Excel, or Parquet).\n\n"
+            "The report includes fill-rate completeness, geographic distribution,\n"
+            "temporal trends, taxonomy, One Health breakdown, and a searchable\n"
+            "data table - all embedded in a single HTML file.\n\n"
+            "Examples:\n"
+            "    biometaharmonizer generate-report harmonized.csv\n"
+            "    biometaharmonizer generate-report harmonized.csv report.html\n"
+            "    biometaharmonizer generate-report harmonized.parquet"
+        ),
+    )
+    gr_p.add_argument(
+        "input",
+        metavar="INPUT",
+        help="Path to a BioMetaHarmonizer output file (.csv, .tsv, .xlsx, .parquet).",
+    )
+    gr_p.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        metavar="OUTPUT",
+        help="Output HTML path (default: <input_stem>_report.html next to the input file).",
+    )
+
     parser.add_argument("--version", action="version", version="%(prog)s " + _get_version())
     return parser
 
@@ -161,6 +294,81 @@ def _looks_like_filepath(s: str) -> bool:
     looks_like_accession = any(s.upper().startswith(p) for p in accession_prefixes)
     return has_extension and not looks_like_accession
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dispatcher helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _import_script(script_name: str):
+    """
+    Import a module from the scripts/ directory that sits next to src/.
+    Inserts the scripts directory into sys.path once so subsequent imports
+    are free.  Works regardless of how the package was installed.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent.parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import importlib
+    return importlib.import_module(script_name)
+
+
+def _run_build_dicts(args: argparse.Namespace) -> int:
+    """
+    Delegate to scripts/build_dictionaries.py::main() by reconstructing
+    the argv list from the already-parsed namespace.  The script's
+    parse_args(argv) signature accepts an explicit argv so sys.argv is
+    never touched.
+    """
+    argv: list[str] = []
+    argv += ["--base",   args.base]
+    argv += ["--output", args.output]
+    if args.taxdmp:
+        argv += ["--taxdmp", args.taxdmp]
+    if args.umls_key:
+        argv += ["--umls-key", args.umls_key]
+    if args.skip_ols:
+        argv.append("--skip-ols")
+    if args.skip_ncbi:
+        argv.append("--skip-ncbi")
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.verbose_collisions:
+        argv.append("--verbose-collisions")
+
+    mod = _import_script("build_dictionaries")
+    mod.main(argv)
+    return 0
+
+
+def _run_build_ncbi_cache(args: argparse.Namespace) -> int:
+    """
+    Delegate to scripts/build_ncbi_attribute_cache.py::main().
+    """
+    argv: list[str] = []
+    if args.output_dir:
+        argv += ["--output-dir", args.output_dir]
+    if args.skip_fetch:
+        argv.append("--skip-fetch")
+
+    mod = _import_script("build_ncbi_attribute_cache")
+    mod.main(argv)
+    return 0
+
+
+def _run_generate_report(args: argparse.Namespace) -> int:
+    """
+    Delegate to scripts/generate_summary_report.py::generate_report()
+    directly (no argv reconstruction needed - the function already takes
+    explicit input/output parameters).
+    """
+    mod = _import_script("generate_summary_report")
+    mod.generate_report(args.input, args.output)
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# run subcommand
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _run(args: argparse.Namespace) -> int:
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -353,11 +561,19 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if args.command == "run":
-        sys.exit(_run(args))
-    else:
+    dispatch = {
+        "run":               _run,
+        "build-dicts":       _run_build_dicts,
+        "build-ncbi-cache":  _run_build_ncbi_cache,
+        "generate-report":   _run_generate_report,
+    }
+
+    handler = dispatch.get(args.command)
+    if handler is None:
         parser.print_help()
         sys.exit(1)
+
+    sys.exit(handler(args))
 
 
 if __name__ == "__main__":

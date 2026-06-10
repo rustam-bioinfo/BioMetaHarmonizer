@@ -11,7 +11,11 @@ resolution to be active; without it the tool falls back to unified.json
 Run once after cloning, and re-run periodically to pick up new NCBI
 attribute definitions:
 
+    # As a standalone script:
     python scripts/build_ncbi_attribute_cache.py
+
+    # Via the CLI entry-point:
+    biometaharmonizer build-ncbi-cache
 
 Optional flags:
     --output-dir DIR   Write output to DIR instead of the default
@@ -77,7 +81,16 @@ def parse_and_report(xml_bytes: bytes) -> None:
     print(f"  Total Synonym entries  : {total_synonyms}")
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv=None) -> argparse.Namespace:
+    """Parse command-line arguments.
+
+    Parameters
+    ----------
+    argv:
+        Argument list to parse.  Defaults to ``sys.argv[1:]`` when *None*,
+        which is the normal standalone-script behaviour.  Pass an explicit
+        list to call this function programmatically (e.g. from cli.py).
+    """
     parser = argparse.ArgumentParser(
         description="Fetch the NCBI BioSample attribute XML for synonym resolution.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -86,6 +99,7 @@ def _parse_args() -> argparse.Namespace:
             "  python scripts/build_ncbi_attribute_cache.py\n"
             "  python scripts/build_ncbi_attribute_cache.py --output-dir /tmp/schemas\n"
             "  python scripts/build_ncbi_attribute_cache.py --skip-fetch\n"
+            "  biometaharmonizer build-ncbi-cache\n"
         ),
     )
     parser.add_argument(
@@ -105,11 +119,20 @@ def _parse_args() -> argparse.Namespace:
             "ncbi_attributes.xml in the output directory."
         ),
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = _parse_args()
+def main(argv=None) -> None:
+    """Entry point.
+
+    Parameters
+    ----------
+    argv:
+        Forwarded to :func:`_parse_args`.  ``None`` means use ``sys.argv``
+        (normal standalone-script behaviour).  Pass an explicit list when
+        calling from :mod:`biometaharmonizer.cli`.
+    """
+    args = _parse_args(argv)
 
     schemas_dir = Path(args.output_dir) if args.output_dir else _DEFAULT_SCHEMAS_DIR
     schemas_dir.mkdir(parents=True, exist_ok=True)
