@@ -222,11 +222,11 @@ last downloaded:
 The files (~100 MB each) are stored in ``CACHE_DIR``
 (``~/.biometaharmonizer/cache/`` by default).
 
-.. rubric:: 13. When and how do I re-run ``build_dictionaries.py`` to refresh the One Health term dictionary?
+.. rubric:: 13. When and how do I re-run ``build-dicts`` to refresh the One Health term dictionary?
 
-Re-run ``scripts/build_dictionaries.py`` when:
+After the initial setup, re-run ``biometaharmonizer build-dicts`` when:
 
-- NCBI taxonomy is updated and new host/organism names are needed.
+- NCBI Taxonomy is updated and new host/organism names are needed.
 - New OLS ontology versions are released.
 - You add new hand-curated entries to the base ``one_health_dictionaries.json``
   and need to propagate collision detection.
@@ -236,14 +236,20 @@ To rebuild in place (overwrites the bundled file):
 
 .. code-block:: bash
 
-   python scripts/build_dictionaries.py \
+   biometaharmonizer build-dicts
+
+To rebuild with a custom output path:
+
+.. code-block:: bash
+
+   biometaharmonizer build-dicts \
        --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
        --output src/biometaharmonizer/schemas/one_health_dictionaries.json
 
 The base dictionary is loaded first; hand-curated entries are never overwritten
 (``base_wins`` strategy).
 
-.. rubric:: 14. How do I use ``build_dictionaries.py`` with a pre-downloaded ``taxdmp.zip``?
+.. rubric:: 14. How do I use ``build-dicts`` with a pre-downloaded ``taxdmp.zip``?
 
 To avoid the ~65 MB automatic download from NCBI FTP, download
 ``taxdmp.zip`` once and pass its local path via ``--taxdmp``:
@@ -254,20 +260,61 @@ To avoid the ~65 MB automatic download from NCBI FTP, download
    wget https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdmp.zip
 
    # Use the local file on subsequent runs:
-   python scripts/build_dictionaries.py \
-       --taxdmp /path/to/taxdmp.zip \
-       --output src/biometaharmonizer/schemas/one_health_dictionaries.json
+   biometaharmonizer build-dicts \
+       --taxdmp /path/to/taxdmp.zip
 
 You may also pass the path to an already-extracted directory that contains
 ``names.dmp`` and ``nodes.dmp``:
 
 .. code-block:: bash
 
-   python scripts/build_dictionaries.py \
-       --taxdmp /path/to/extracted_taxdmp/ \
-       --output src/biometaharmonizer/schemas/one_health_dictionaries.json
+   biometaharmonizer build-dicts \
+       --taxdmp /path/to/extracted_taxdmp/
 
-.. rubric:: 15. Is BioMetaHarmonizer thread-safe?
+.. rubric:: 15. When do I need to re-run ``build-ncbi-cache``?
+
+Re-run ``biometaharmonizer build-ncbi-cache`` when:
+
+- You have just installed BioMetaHarmonizer for the first time (run it
+  before ``build-dicts``).
+- NCBI has updated their BioSample attribute definitions and you want the
+  latest attribute names reflected in the One Health dictionary.
+- You are working in an air-gapped environment and have manually placed
+  the attribute XML in the schemas directory — run with ``--skip-fetch``
+  to process the local file without network access.
+
+.. code-block:: bash
+
+   # Standard refresh
+   biometaharmonizer build-ncbi-cache
+
+   # Air-gapped: process already-downloaded file without network
+   biometaharmonizer build-ncbi-cache --skip-fetch
+
+   # Custom output directory
+   biometaharmonizer build-ncbi-cache --output-dir /data/bmh_schemas
+
+.. rubric:: 16. How do I generate an HTML summary report from a harmonized file?
+
+Use ``biometaharmonizer generate-report`` after a ``run`` to produce an
+interactive HTML report with fill-rate charts, One Health category
+distributions, and per-column statistics:
+
+.. code-block:: bash
+
+   # Output defaults to harmonized_report.html
+   biometaharmonizer generate-report harmonized.csv
+
+   # Specify output path explicitly
+   biometaharmonizer generate-report harmonized.csv my_report.html
+
+   # Generate PDF instead (requires: pip install kaleido)
+   biometaharmonizer generate-report harmonized.csv report.pdf
+
+The report is self-contained: all charts are embedded inline and the file
+can be shared or archived without any external dependencies.
+
+.. rubric:: 17. Is BioMetaHarmonizer thread-safe?
 
 **No.** ``ENTREZ_EMAIL``, ``ENTREZ_API_KEY``, and ``CACHE_DIR`` are
 module-level globals shared across all threads in the same Python process.
