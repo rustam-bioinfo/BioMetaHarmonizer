@@ -61,8 +61,33 @@ fuzzy layer; all other functionality remains available.
 
 ``openpyxl`` is required only when writing Excel output (``fmt="excel"``).
 ``pyarrow`` is required only when writing Parquet output (``fmt="parquet"``).
-``kaleido`` is an optional dependency of ``scripts/generate_summary_report.py``
+``kaleido`` is an optional dependency of ``biometaharmonizer generate-report``
 for PDF export; install it separately with ``pip install kaleido`` if needed.
+
+Post-install Setup
+------------------
+
+After installing, run these two commands once to build the schema files
+required for One Health classification:
+
+.. code-block:: bash
+
+   biometaharmonizer build-ncbi-cache
+   biometaharmonizer build-dicts
+
+``build-ncbi-cache`` downloads the NCBI BioSample attribute definitions XML
+and saves it to the ``schemas/`` directory. ``build-dicts`` uses that cache
+(along with OLS4 ontology data and NCBI Taxonomy) to build the enriched
+``one_health_dictionaries.json`` file that drives classification.
+
+Re-run these commands whenever you want to refresh the bundled dictionaries
+from upstream NCBI or OLS sources.
+
+.. note::
+
+   Both commands are safe to re-run at any time. Existing schema files are
+   overwritten in place; your harmonization results are not affected until
+   the next ``biometaharmonizer run`` call.
 
 NCBI API Key
 ------------
