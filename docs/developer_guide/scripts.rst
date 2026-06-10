@@ -1,12 +1,14 @@
-.. _scripts:
+.. _maintenance_subcommands:
 
-======================
-Developer Scripts
-======================
+========================
+Maintenance Subcommands
+========================
 
-The following maintenance subcommands are available via the
-``biometaharmonizer`` CLI. They are used by contributors and power users to
-build or refresh the data assets consumed at runtime.
+Three ``biometaharmonizer`` subcommands are provided for contributors and
+power users who need to build or refresh the bundled data assets. These
+subcommands query external databases (OLS4, NCBI, UMLS) and write their
+output into ``src/biometaharmonizer/schemas/``; they are not needed for
+normal harmonization runs.
 
 build-dicts
 -----------
@@ -310,7 +312,7 @@ Usage Examples
 When to Re-run
 ~~~~~~~~~~~~~~
 
-Re-run this subcommand when:
+Re-run when:
 
 - NCBI taxonomy is updated and new host names need to be incorporated into
   ``host_to_category``.
@@ -355,11 +357,10 @@ This is the raw XML response from:
    * - ``--skip-fetch``
      - Skip the network request. Validate and report an existing ``ncbi_attributes.xml`` only.
 
-The subcommand retries up to 3 times with exponential backoff (2 s, 4 s) on
-network failures (``MAX_ATTEMPTS = 3``, ``TIMEOUT = 30`` seconds).
-
-After saving, ``parse_and_report()`` prints the count of ``HarmonizedName``
-entries and ``Synonym`` entries found in the XML.
+Retries up to 3 times with exponential backoff (2 s, 4 s) on network
+failures (``MAX_ATTEMPTS = 3``, ``TIMEOUT = 30`` seconds). After saving,
+``parse_and_report()`` prints the count of ``HarmonizedName`` and ``Synonym``
+entries found in the XML.
 
 **Usage examples:**
 
@@ -378,8 +379,8 @@ entries and ``Synonym`` entries found in the XML.
 
 Re-run periodically (e.g. monthly) or whenever NCBI adds or renames BioSample
 attributes. The tool functions without this file (Layer 2 disabled) but
-synonym coverage will be lower for packages that use non-standard attribute
-names that are only defined in the NCBI XML.
+synonym coverage will be lower for records that use non-standard attribute
+names defined only in the NCBI XML.
 
 generate-report
 ---------------
@@ -394,8 +395,8 @@ Plotly visualizations.
 
 **Input:**
 
-A harmonized DataFrame file produced by ``biometaharmonizer`` (CSV, TSV, or
-Parquet). The subcommand loads it with ``pandas``.
+A harmonized output file produced by ``biometaharmonizer run`` (CSV, TSV, or
+Parquet).
 
 **CLI Flags:**
 
@@ -409,7 +410,7 @@ Parquet). The subcommand loads it with ``pandas``.
    * - ``--output, -o``
      - Output file path (for single-format output).
    * - ``--output-dir, -d``
-     - | Output directory for multi-format output.
+     - Output directory for multi-format output.
    * - ``--formats, -f``
      - One or more of: ``html``, ``json``, ``csv``. Default: inferred from ``--output`` suffix.
    * - ``--verbose, -v``
@@ -423,20 +424,15 @@ The HTML report is produced by ``generate_full_html_report()`` and includes:
    subplot: fill rates by category (bar chart), overall completeness
    distribution (histogram), category-wise average fill rate (bar), and
    top-15 most complete columns (bar).
-
 2. **Geospatial Visualizations** (``generate_geo_visualizations()``) — country
    distribution choropleth or bar chart based on ``geo_country`` and
    ``geo_iso3166`` columns.
-
 3. **Temporal Analysis** (``generate_temporal_analysis()``) — time-series
    distribution of ``collection_date`` values grouped by year or year-month.
-
 4. **One Health Chart** (``generate_one_health_chart()``) — pie or bar chart
    of ``one_health_category`` distribution.
-
 5. **Host Analysis** (``generate_host_analysis()``) — top host values from
    the ``host`` column.
-
 6. **Extra Attributes Analysis** (``generate_extra_attributes_analysis()``) —
    summary of keys present in ``_extra_attributes`` across all records,
    including antibiogram presence rate.
@@ -474,7 +470,6 @@ The HTML report is produced by ``generate_full_html_report()`` and includes:
 
 .. note::
 
-   Plotly must be installed for HTML/PDF output (``pip install plotly``).
+   Plotly must be installed for HTML output (``pip install plotly``).
    PDF export additionally requires ``kaleido`` (``pip install kaleido``).
-   The subcommand imports Plotly conditionally and will still produce JSON and
-   CSV summaries if Plotly is absent.
+   If Plotly is absent, JSON and CSV summaries are still produced.
