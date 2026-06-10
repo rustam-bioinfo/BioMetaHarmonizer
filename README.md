@@ -351,7 +351,7 @@ Handling notes:
 4. `env_broad_scale`: supporting signal only; contributes a corroboration bonus but does not set the primary category on its own.
 5. Pass 2 resolves the winning category from accumulated domain/specimen/supporting evidence.
 
-**Host trinomial / subspecies fallback.** When a host value like `Equus ferus caballus` is not found as an exact entry in `host_to_category`, the classifier progressively drops tokens from the right (`Equus ferus`, then `Equus`) until a match is found or all prefixes are exhausted. This fallback is active only when every token in the name is composed solely of letters or hyphens (no digits or strain identifiers), so free-text phrases are never misclassified via this path. The bundled `one_health_dictionaries.json` contains only a hand-curated seed; after running `scripts/build_dictionaries.py` the full NCBI taxonomy is present and the fallback is rarely needed.
+**Host trinomial / subspecies fallback.** When a host value like `Equus ferus caballus` is not found as an exact entry in `host_to_category`, the classifier progressively drops tokens from the right (`Equus ferus`, then `Equus`) until a match is found or all prefixes are exhausted. This fallback is active only when every token in the name is composed solely of letters or hyphens (no digits or strain identifiers), so free-text phrases are never misclassified via this path. The bundled `one_health_dictionaries.json` contains only a hand-curated seed; after running `biometaharmonizer build-dicts` the full NCBI taxonomy is present and the fallback is rarely needed.
 
 ---
 
@@ -418,16 +418,14 @@ When only a single format is given, the `--output` path is used exactly as speci
 
 The package ships with pre-built schema files. These are sufficient for basic use, but rebuilding them is strongly recommended before processing large or taxonomically diverse datasets.
 
-### `build_dictionaries.py` — One Health dictionary
+### `build-dicts` — One Health dictionary
 
 The bundled `one_health_dictionaries.json` is a minimal hand-curated seed. It covers common host names and key ontology terms, but it does **not** include the full NCBI taxonomy. Without rebuilding, trinomial host names (e.g. `Equus ferus caballus`, `Bos taurus indicus`) and many uncommon species will fall back to the progressive prefix-drop heuristic instead of resolving from an authoritative entry.
 
 To build the full dictionary, run:
 
 ```bash
-python scripts/build_dictionaries.py \
-    --base   src/biometaharmonizer/schemas/one_health_dictionaries.json \
-    --output src/biometaharmonizer/schemas/one_health_dictionaries.json
+biometaharmonizer build-dicts
 ```
 
 This queries the OLS4 API (ENVO, FoodOn, UBERON, Plant Ontology) and downloads the NCBI taxonomy dump (~65 MB) to populate `host_to_category` with scientific names, common names, and equivalent names for all vertebrates and plants. The full build takes a few minutes depending on network speed.
@@ -436,26 +434,33 @@ Options:
 
 | Flag | Description |
 |---|---|
+| `--base FILE` | Path to the hand-curated base JSON (default: bundled `schemas/one_health_dictionaries.json`) |
+| `--output FILE` | Destination path for the enriched JSON (default: same as `--base`) |
 | `--taxdmp PATH` | Path to a pre-downloaded `taxdmp.zip` or an extracted directory containing `names.dmp` and `nodes.dmp`. Skips the ~65 MB NCBI download. |
 | `--skip-ncbi` | Skip NCBI taxonomy entirely (OLS4 terms only). |
 | `--skip-ols` | Skip OLS4 queries (NCBI taxonomy only). |
 | `--umls-key KEY` | Optional UMLS API key for additional synonym expansion. |
+| `--dry-run` | Run all enrichment steps but do not write the output file. |
+| `--verbose-collisions` | Print per-term collision detail. Silent by default. |
 
 The hand-curated entries in the base file always win over ontology-derived data (`merge_strategy: base_wins`).
 
-### `build_ncbi_attribute_cache.py`
+### `build-ncbi-cache` — NCBI attribute table
 
 Downloads the official NCBI BioSample attribute harmonization table and stores it as `schemas/ncbi_attributes.xml`.
 
 ```bash
-python scripts/build_ncbi_attribute_cache.py
+biometaharmonizer build-ncbi-cache
 ```
 
----
+Options:
 
-## Scripts
+| Flag | Description |
+|---|---|
+| `--output-dir DIR` | Directory to write `ncbi_attributes.xml` into (default: bundled `schemas/`) |
+| `--skip-fetch` | Skip the network request; only validate an existing `ncbi_attributes.xml` in the output directory |
 
-### `generate_summary_report.py`
+### `generate-report` — Interactive HTML report
 
 Generates an interactive, self-contained HTML report from a BioMetaHarmonizer
 output file. The report includes metadata completeness (fill rates), geographic
@@ -464,10 +469,10 @@ paginated data table — all embedded in a single HTML file with no server requi
 
 ```bash
 # Output defaults to harmonized_report.html next to the input file
-python scripts/generate_summary_report.py harmonized.csv
+biometaharmonizer generate-report harmonized.csv
 
 # Specify a custom output path
-python scripts/generate_summary_report.py harmonized.csv report.html
+biometaharmonizer generate-report harmonized.csv report.html
 ```
 
 | Argument | Description |
@@ -498,9 +503,9 @@ BioMetaHarmonizer/
 │       ├── one_health_dictionaries.json      # One Health keyword/ontology dict
 │       └── ncbi_attributes.xml               # NCBI harmonization table (optional)
 ├── scripts/
-│   ├── generate_summary_report.py          # fill-rate + quality HTML/JSON/CSV report
-│   ├── build_dictionaries.py               # rebuild one_health_dictionaries.json
-│   └── build_ncbi_attribute_cache.py       # rebuild ncbi_attributes.xml
+│   ├── generate_summary_report.py          # backing script for generate-report
+│   ├── build_dictionaries.py               # backing script for build-dicts
+│   └── build_ncbi_attribute_cache.py       # backing script for build-ncbi-cache
 ├── tests/
 │   ├── test_ingestion.py
 │   ├── test_key_mapper.py
