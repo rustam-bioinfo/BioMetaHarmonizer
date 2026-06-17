@@ -31,3 +31,20 @@ First stable release. All known bugs and robustness issues have been resolved be
 ### Fixed
 * Reduced volume of attributes incorrectly landing in `_extra_attributes` due to
   missing synonym variants for core fields.
+
+##
+## [1.0.2] - 2026-06-15
+
+### New Features
+
+- `build-dicts`, `build-ncbi-cache`, and `generate-report` are now available as
+  `biometaharmonizer` subcommands — no longer require running standalone scripts directly
+- `biometaharmonizer --help` now lists all four subcommands:
+  `run`, `build-dicts`, `build-ncbi-cache`, `generate-report`
+
+### Changes
+
+- `scripts/build_dictionaries.py`, `scripts/build_ncbi_attribute_cache.py`,
+  `scripts/generate_summary_report.py` — `parse_args()` now accepts an optional
+  `argv` parameter; scripts remain usable standalone
+- `cli.py` — added subparsers and dispatch logic for the three new subcommands
