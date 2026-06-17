@@ -2,16 +2,14 @@
 Fetches the NCBI BioSample attribute harmonization table and saves
 ncbi_attributes.xml to src/biometaharmonizer/schemas/.
 
-This file is Layer 2 of the synonym lookup used by synonyms.py and
-consumed at runtime by both ingestion.py (Module 1) and key_mapper.py
-(Module 2) via build_synonym_lookup(). It must be present for Layer 2
-resolution to be active; without it the tool falls back to unified.json
-(Layer 1) only.
-
 Run once after cloning, and re-run periodically to pick up new NCBI
 attribute definitions:
 
+    # Via the CLI entry-point (recommended):
     biometaharmonizer build-ncbi-cache
+
+    # As a standalone script (backwards-compatible):
+    python -m biometaharmonizer.scripts.build_ncbi_attribute_cache
 
 Optional flags:
     --output-dir DIR   Write output to DIR instead of the default
@@ -37,7 +35,9 @@ NCBI_URL = "https://www.ncbi.nlm.nih.gov/biosample/docs/attributes/?format=xml"
 MAX_ATTEMPTS = 3
 TIMEOUT = 30
 
-_DEFAULT_SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+_DEFAULT_SCHEMAS_DIR = (
+    Path(__file__).resolve().parent.parent / "schemas"
+)
 
 
 def fetch_xml(url: str) -> bytes:
@@ -58,7 +58,6 @@ def fetch_xml(url: str) -> bytes:
 
 
 def parse_and_report(xml_bytes: bytes) -> None:
-    """Parse the XML and print a summary of what was found."""
     root = ET.fromstring(xml_bytes)
     harmonized_names = []
     total_synonyms = 0
@@ -89,18 +88,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
         "--output-dir",
         default=None,
         metavar="DIR",
-        help=(
-            f"Directory to write ncbi_attributes.xml into. "
-            f"Defaults to {_DEFAULT_SCHEMAS_DIR}"
-        ),
+        help=f"Directory to write ncbi_attributes.xml into. Defaults to {_DEFAULT_SCHEMAS_DIR}",
     )
     parser.add_argument(
         "--skip-fetch",
         action="store_true",
-        help=(
-            "Skip the network request and only validate/report an existing "
-            "ncbi_attributes.xml in the output directory."
-        ),
+        help="Skip the network request and only validate/report an existing ncbi_attributes.xml.",
     )
     return parser.parse_args(argv)
 
@@ -129,8 +122,7 @@ def main(argv=None) -> None:
 
     print("[INFO] Parsing XML...")
     parse_and_report(xml_bytes)
-    print("[INFO] Done. Run your pipeline -- synonyms.build_synonym_lookup() will")
-    print(f"       pick up {xml_path.name} automatically as Layer 2.")
+    print("[INFO] Done.")
 
 
 if __name__ == "__main__":
