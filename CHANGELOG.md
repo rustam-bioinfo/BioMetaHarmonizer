@@ -33,7 +33,7 @@ First stable release. All known bugs and robustness issues have been resolved be
   missing synonym variants for core fields.
 
 ##
-## [1.0.2] - 2026-06-15
+## [1.0.3] - 2026-06-15
 
 ### New Features
 
