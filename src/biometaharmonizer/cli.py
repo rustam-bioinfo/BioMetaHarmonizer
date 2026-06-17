@@ -312,26 +312,13 @@ def _looks_like_filepath(s: str) -> bool:
 # Dispatcher helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _import_script(script_name: str):
-    """
-    Import a module from the scripts/ directory that sits next to src/.
-    Inserts the scripts directory into sys.path once so subsequent imports
-    are free.  Works regardless of how the package was installed.
-    """
-    scripts_dir = str(Path(__file__).resolve().parent.parent.parent / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    import importlib
-    return importlib.import_module(script_name)
-
-
 def _run_build_dicts(args: argparse.Namespace) -> int:
     """
-    Delegate to scripts/build_dictionaries.py::main() by reconstructing
-    the argv list from the already-parsed namespace.  The script's
-    parse_args(argv) signature accepts an explicit argv so sys.argv is
-    never touched.
+    Delegate to biometaharmonizer.scripts.build_dictionaries::main() by
+    reconstructing the argv list from the already-parsed namespace.
     """
+    from biometaharmonizer.scripts import build_dictionaries
+
     argv: list[str] = []
     argv += ["--base",   args.base]
     argv += ["--output", args.output]
@@ -348,34 +335,35 @@ def _run_build_dicts(args: argparse.Namespace) -> int:
     if args.verbose_collisions:
         argv.append("--verbose-collisions")
 
-    mod = _import_script("build_dictionaries")
-    mod.main(argv)
+    build_dictionaries.main(argv)
     return 0
 
 
 def _run_build_ncbi_cache(args: argparse.Namespace) -> int:
     """
-    Delegate to scripts/build_ncbi_attribute_cache.py::main().
+    Delegate to biometaharmonizer.scripts.build_ncbi_attribute_cache::main().
     """
+    from biometaharmonizer.scripts import build_ncbi_attribute_cache
+
     argv: list[str] = []
     if args.output_dir:
         argv += ["--output-dir", args.output_dir]
     if args.skip_fetch:
         argv.append("--skip-fetch")
 
-    mod = _import_script("build_ncbi_attribute_cache")
-    mod.main(argv)
+    build_ncbi_attribute_cache.main(argv)
     return 0
 
 
 def _run_generate_report(args: argparse.Namespace) -> int:
     """
-    Delegate to scripts/generate_summary_report.py::generate_report()
-    directly (no argv reconstruction needed - the function already takes
-    explicit input/output parameters).
+    Delegate to biometaharmonizer.scripts.generate_summary_report::generate_report()
+    directly (no argv reconstruction needed — the function takes explicit
+    input/output parameters).
     """
-    mod = _import_script("generate_summary_report")
-    mod.generate_report(args.input, args.output)
+    from biometaharmonizer.scripts import generate_summary_report
+
+    generate_summary_report.generate_report(args.input, args.output)
     return 0
 
 
