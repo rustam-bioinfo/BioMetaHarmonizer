@@ -489,8 +489,8 @@ Requires `plotly` (loaded from CDN — no local install needed at runtime) and `
 ```
 BioMetaHarmonizer/
 ├── src/biometaharmonizer/
-│   ├── __init__.py             # public API, version 1.0.0
-│   ├── cli.py                  # CLI entrypoint
+│   ├── __init__.py             # public API
+│   ├── cli.py                  # CLI entrypoint (run, build-dicts, build-ncbi-cache, generate-report)
 │   ├── ingestion.py            # Entrez fetching, XML parsing, schema definition
 │   ├── synonyms.py             # two-layer synonym lookup (unified.json + NCBI XML)
 │   ├── key_mapper.py           # column rename, coalesce, reindex
@@ -498,14 +498,15 @@ BioMetaHarmonizer/
 │   ├── geo_engine.py           # geo_loc_name splitting, ISO-3166 resolution
 │   ├── one_health.py           # One Health categorization
 │   ├── output.py               # write CSV / TSV / Excel / Parquet / JSONL
-│   └── schemas/
-│       ├── unified.json                      # standard keys + synonym lists
-│       ├── one_health_dictionaries.json      # One Health keyword/ontology dict
-│       └── ncbi_attributes.xml               # NCBI harmonization table (optional)
-├── scripts/
-│   ├── generate_summary_report.py          # backing script for generate-report
-│   ├── build_dictionaries.py               # backing script for build-dicts
-│   └── build_ncbi_attribute_cache.py       # backing script for build-ncbi-cache
+│   ├── schemas/
+│   │   ├── unified.json                      # standard keys + synonym lists
+│   │   ├── one_health_dictionaries.json      # One Health keyword/ontology dict
+│   │   └── ncbi_attributes.xml               # NCBI harmonization table (optional)
+│   └── scripts/
+│       ├── __init__.py                       # exposes subcommand modules
+│       ├── generate_summary_report.py        # module for generate-report
+│       ├── build_dictionaries.py             # module for build-dicts
+│       └── build_ncbi_attribute_cache.py     # module for build-ncbi-cache
 ├── tests/
 │   ├── test_ingestion.py
 │   ├── test_key_mapper.py
