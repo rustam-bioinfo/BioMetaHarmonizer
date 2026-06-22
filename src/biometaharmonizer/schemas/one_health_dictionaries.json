@@ -47,6 +47,7 @@
     "hono sapiens": "homo sapiens",
     "omo sapiens": "homo sapiens",
     "homo sapien": "homo sapiens",
+    "humans": "homo sapiens",
     "bronchoalveolar lavage fluid": "bronchoalveolar lavage",
     "bal fluid": "bronchoalveolar lavage",
     "broncho alveolar lavage": "bronchoalveolar lavage",
@@ -464,6 +465,7 @@
     "homo sapiens": "Human",
     "homo": "Human",
     "human": "Human",
+    "humans": "Human",
     "man": "Human",
     "patient": "Human",
     "person": "Human",
@@ -1249,7 +1251,14 @@
     "fermented": "food product",
     "cured": "food product",
     "rte": "ready-to-eat food",
-    "ready-to-eat": "ready-to-eat food"
+    "ready-to-eat": "ready-to-eat food",
+    "cell culture":   "Unclassified", #TMP
+    "cell line":      "Unclassified",
+    "tissue culture": "Unclassified",
+    "organ culture":  "Unclassified",
+    "primary culture":"Unclassified",
+    "axenic culture": "Unclassified",
+    "in vitro":       "Unclassified" #TMP
   },
   "setting_patterns": [
     "hospital",
