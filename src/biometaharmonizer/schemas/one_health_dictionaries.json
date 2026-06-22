@@ -39,6 +39,7 @@
     "rte": "ready-to-eat food"
   },
   "synonym_map": {
+    "homo": "homo sapiens",
     "homo-sapien": "homo sapiens",
     "homo-sapiens": "homo sapiens",
     "homos sapiens": "homo sapiens",
@@ -461,6 +462,7 @@
   },
   "host_to_category": {
     "homo sapiens": "Human",
+    "homo": "Human",
     "human": "Human",
     "man": "Human",
     "patient": "Human",
