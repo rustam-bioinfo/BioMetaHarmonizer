@@ -1252,13 +1252,13 @@
     "cured": "food product",
     "rte": "ready-to-eat food",
     "ready-to-eat": "ready-to-eat food",
-    "cell culture":   "Unclassified", #TMP
+    "cell culture":   "Unclassified",
     "cell line":      "Unclassified",
     "tissue culture": "Unclassified",
     "organ culture":  "Unclassified",
     "primary culture":"Unclassified",
     "axenic culture": "Unclassified",
-    "in vitro":       "Unclassified" #TMP
+    "in vitro":       "Unclassified"
   },
   "setting_patterns": [
     "hospital",
