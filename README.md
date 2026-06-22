@@ -1,6 +1,6 @@
 # BioMetaHarmonizer
 
-[![version](https://img.shields.io/badge/version-1.0.3-blue)](#)
+[![version](https://img.shields.io/badge/version-1.0.5-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
 [![status](https://img.shields.io/badge/status-stable-brightgreen)](#)
