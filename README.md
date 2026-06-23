@@ -60,7 +60,7 @@ biometaharmonizer run \
     --output harmonized.csv \
     --fetch-batch-size 500 \
     --esearch-batch-size 500
-    ----api-key KEY
+    --api-key KEY
 
 # Save to multiple formats in one run
 biometaharmonizer run \
