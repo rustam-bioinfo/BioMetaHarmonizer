@@ -464,13 +464,11 @@
     "terrestrial gastropod": "snail",
     "environment": "environmental",
     "envirnomental": "environmental",
-    "enviromental": "environmental",
     "enviroment": "environmental",
     "environments": "environmental",
     "insect": "insect sample",
     "plant": "plant material",
     "soil": "soil sample",
-    "water": "water sample",
     "food": "food sample",
     "plant-based product": "food"
   },
