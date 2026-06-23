@@ -459,7 +459,15 @@
     "crispr/cas9 system": "laboratory strain",
     "pxo1 plasmid-cured derivative of pno2 using crispr/cas9 system": "laboratory strain",
     "guppya snail": "terrestrial gastropod",
-    "terrestrial gastropod": "snail"
+    "terrestrial gastropod": "snail",
+    "environment": "environmental",
+    "enviroment": "environmental"
+    "environments": "environmental",
+    "insect": "insect sample",
+    "plant": "plant material",
+    "soil": "soil sample",
+    "water": "water sample",
+    "food": "food sample"
   },
   "host_to_category": {
     "homo sapiens": "Human",
