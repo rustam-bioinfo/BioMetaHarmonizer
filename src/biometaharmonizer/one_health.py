@@ -1556,9 +1556,46 @@ class OneHealthClassifier:
             return result
 
         # ------------------------------------------------------------------
+        # Text normalization
+        # ------------------------------------------------------------------
+        
+        # Step 1: Lowercase
+        working = raw.lower()
+        
+        # Step 2: Unicode → ASCII
+        import unicodedata
+        working = unicodedata.normalize("NFKD", working)
+        working = working.encode("ascii", "ignore").decode("ascii")
+        
+        # Step 3: Underscore → space
+        working = working.replace("_", " ")
+        
+        # Step 4: Non-breaking space and typographic dashes → space
+        working = (
+            working
+            .replace("\u00a0", " ")   # non-breaking space
+            .replace("\u2013", " ")   # en-dash
+            .replace("\u2014", " ")   # em-dash
+        )
+        
+        # Step 5: Slash and backslash → space
+        working = working.replace("/", " ").replace("\\", " ")
+        
+        # Step 6: Strip wrapping punctuation characters
+        working = re.sub(r"[\"'`\[\](){}]", " ", working)
+        
+        # Step 7: Strip leading/trailing junk punctuation
+        working = working.strip(":;*.,!?")
+        
+        # Step 8: Remove digits
+        working = re.sub(r"\d+", " ", working)
+        
+        # Step 9: Collapse whitespace
+        working = re.sub(r"\s+", " ", working).strip()
+
+        # ------------------------------------------------------------------
         # Abbreviation expansion
         # ------------------------------------------------------------------
-        working = raw.lower()
         expanded = self._abbrev_map.get(working)
         if expanded:
             working = expanded
@@ -1570,7 +1607,7 @@ class OneHealthClassifier:
             working = pattern.sub(canonical, working)
 
         # ------------------------------------------------------------------
-        # Improvement #2: negation suppression
+        # Negation suppression
         # ------------------------------------------------------------------
         working = _NEGATION_PREFIX_RE.sub("__NEGATED__ ", working)
 
