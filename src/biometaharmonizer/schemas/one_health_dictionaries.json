@@ -467,7 +467,8 @@
     "plant": "plant material",
     "soil": "soil sample",
     "water": "water sample",
-    "food": "food sample"
+    "food": "food sample",
+    "Plant-based product": "food"
   },
   "host_to_category": {
     "homo sapiens": "Human",
