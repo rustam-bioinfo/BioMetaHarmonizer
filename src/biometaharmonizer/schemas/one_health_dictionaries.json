@@ -1400,6 +1400,9 @@
     "sea": "Environmental",
     "estuary": "Environmental",
     "soil field": "Environmental",
+    "soil": "Environmental",
+    "soils": "Environmental",
+    "sediment": "Environmental",
     "wetland": "Environmental",
     "forest": "Environmental",
     "grassland": "Environmental"
@@ -2296,6 +2299,7 @@
       "slag",
       "sludge",
       "soil",
+      "soils",
       "stream",
       "stormwater",
       "subtropical",
