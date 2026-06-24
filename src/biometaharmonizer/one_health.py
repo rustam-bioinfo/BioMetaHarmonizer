@@ -1445,7 +1445,8 @@ class OneHealthClassifier:
         # ------------------------------------------------------------------
         if (
             out["one_health_confidence"] < 0.80
-            and out["one_health_category"] in ("Unclassified", "Environmental")
+            # and out["one_health_category"] in ("Unclassified", "Environmental")
+            and out["one_health_category"] == "Unclassified"
             and len(field_values_for_composite) > 1
         ):
             composite = " ".join(field_values_for_composite)
