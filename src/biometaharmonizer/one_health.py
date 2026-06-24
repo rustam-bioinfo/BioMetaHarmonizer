@@ -1445,7 +1445,8 @@ class OneHealthClassifier:
         # ------------------------------------------------------------------
         if (
             out["one_health_confidence"] < 0.80
-            and out["one_health_category"] in ("Unclassified", "Environmental")
+            # and out["one_health_category"] in ("Unclassified", "Environmental")
+            and out["one_health_category"] == "Unclassified"
             and len(field_values_for_composite) > 1
         ):
             composite = " ".join(field_values_for_composite)
@@ -1513,7 +1514,17 @@ class OneHealthClassifier:
                     and state.get("specimen_specificity", 0.0) >= 1.0
                 )
             )
-            if not organism_present:
+            # Fix C2: do NOT override when a strong specimen field
+            # (isolation_source, env_medium — weight >= 0.80) already
+            # resolved to a real classifiable category. A lab/processing
+            # flag from a weak field (sample_type, weight < 0.80) must
+            # not suppress a high-confidence Environmental/Human/etc. hit.
+            strong_specimen_resolved = (
+                specimen_category is not None
+                and specimen_category not in ("Unclassified", "")
+                and specimen_field_weight >= _BAYES_HARD_EVIDENCE_FW_THRESHOLD
+            )
+            if not organism_present and not strong_specimen_resolved:
                 out["one_health_category"]     = "Unclassified"
                 out["one_health_term"]         = lab_hit
                 out["one_health_confidence"]   = 0.0
