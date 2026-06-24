@@ -288,8 +288,8 @@ _FIELD_WEIGHTS = {
     "host":              1.00,
     "env_medium":        0.85,
     "env_local_scale":   0.80,
-    "sample_type":       0.70,
-    "env_broad_scale":   0.50,
+    "env_broad_scale":   0.70,
+    "sample_type":       0.30,
     "setting_inference": None,
 }
 
