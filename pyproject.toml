@@ -59,6 +59,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [project.optional-dependencies]
+geo = ["shapely>=2.0,<3.0"]
 docs = [
     "sphinx>=7.0",
     "sphinx-rtd-theme>=2.0",

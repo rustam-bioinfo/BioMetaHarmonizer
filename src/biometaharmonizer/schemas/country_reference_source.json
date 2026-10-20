@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "dataset": "Natural Earth 1:10 million admin-0 map units",
+  "source_repository": "https://github.com/nvkelso/natural-earth-vector",
+  "source_commit": "117488dc884bad03366ff727eca013e434615127",
+  "source_path": "geojson/ne_10m_admin_0_map_units.geojson",
+  "source_url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/117488dc884bad03366ff727eca013e434615127/geojson/ne_10m_admin_0_map_units.geojson",
+  "expected_git_blob_sha1": "003025bf947f0c083318dfdb86a69b8dd0678947",
+  "expected_byte_size": 13526439,
+  "upstream_commit_message": "v5.1.0 packaging",
+  "license": "public domain",
+  "boundary_policy": "Natural Earth default de facto boundaries; not legal adjudication",
+  "country_code_field": null,
+  "crs_verified": false,
+  "crosswalk_audited": false,
+  "status": "source_pinned_not_downloaded_or_audited",
+  "notes": "Source identifier only. No polygon dataset is bundled. Audit fields, CRS, ISO crosswalk and geometry before integration. Never infer open ocean from a failed country lookup."
+}
