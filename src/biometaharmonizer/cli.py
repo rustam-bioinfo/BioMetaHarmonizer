@@ -97,6 +97,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Omit to infer the format from the --output file extension."
         ),
     )
+    run_p.add_argument(
+        "--postprocess", action="store_true", default=False,
+        help=(
+            "Append decimalLatitude, decimalLongitude, and host_health_state before export. "
+            "Preserves native metadata and One Health predictions; no geocoding."
+        ),
+    )
+    run_p.add_argument(
+        "--postprocess-report", metavar="FILE", default=None,
+        help="Write a row-level diagnostic CSV; requires --postprocess.",
+    )
     run_p.add_argument("--summary", metavar="FILE", default=None)
     run_p.add_argument("--verbose", "-v", action="store_true", default=False)
     run_p.add_argument(
@@ -380,6 +391,10 @@ def _run(args: argparse.Namespace) -> int:
     )
     logger = logging.getLogger("biometaharmonizer.cli")
 
+    if getattr(args, "postprocess_report", None) and not getattr(args, "postprocess", False):
+        print("ERROR: --postprocess-report requires --postprocess.", file=sys.stderr)
+        return 1
+
     input_arg = args.input.strip()
     input_path = Path(input_arg)
 
@@ -405,6 +420,20 @@ def _run(args: argparse.Namespace) -> int:
     else:
         fmt = _infer_format(output_path)
         targets = [(fmt, output_path)]
+
+    report_path = getattr(args, "postprocess_report", None)
+    if report_path:
+        protected = {path.resolve() for _, path in targets}
+        if args.summary:
+            protected.add(Path(args.summary).resolve())
+        if input_path.exists():
+            protected.add(input_path.resolve())
+        if Path(report_path).resolve() in protected:
+            print(
+                "ERROR: Post-processing report must not overwrite input, output, or summary.",
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         from biometaharmonizer.ingestion import set_email, ingest
@@ -517,6 +546,24 @@ def _run(args: argparse.Namespace) -> int:
             "         %d / %d records classified (%d unclassified).",
             classified, len(df), unclassified,
         )
+
+    if getattr(args, "postprocess", False):
+        logger.info("Optional post-processing")
+        t0 = time.perf_counter()
+        try:
+            from biometaharmonizer.postprocess import postprocess
+            df, diagnostics = postprocess(df)
+            logger.info(
+                "         Coordinate status counts: %s; done in %.1fs.",
+                diagnostics["coordinate_status"].value_counts().to_dict(),
+                time.perf_counter() - t0,
+            )
+            if report_path:
+                write(diagnostics, report_path, fmt="csv")
+        except Exception as exc:
+            print(f"ERROR during post-processing: {exc}", file=sys.stderr)
+            logger.debug("", exc_info=True)
+            return 2
 
     logger.info("Step 5/5  Output")
     written_paths = []
