@@ -1,53 +1,70 @@
-# Coordinate-derived country lookup: foundation only
+# Coordinate-derived country lookup: packaging stage
 
-This component is not connected to the postprocess flag yet. Normal pipeline
-behavior and existing extended outputs are unchanged by this preparatory commit.
+The country lookup is not connected to post-processing yet. The existing
+postprocess flag still performs coordinate parsing, health-state extraction,
+and standards aliases, but not coordinate-derived country assignment.
 
-## Implemented
+## Compressed reference
 
-* Offline point-in-polygon lookup with Shapely 2 and a reusable STRtree index.
-* Canonical country names supplied through an explicit ISO-code/name dictionary.
-* An explicit property-name mapping rather than guessed country-code attributes.
-* Abstention for boundary points, conflicting overlaps, unmapped codes, and points
-  outside all polygons. Unmapped polygons are retained, not silently discarded.
-* Polygon validity, ring closure, geographic extent, and antimeridian checks.
-* A file loader that requires an expected Git blob checksum and explicit EPSG:4326.
-* Per-instance caching for repeated coordinate pairs.
+The prepared binary resource belongs at this repository path:
 
-Install the optional dependency in an editable checkout with:
+```
+src/biometaharmonizer/data/country_polygons.geojson.gz
+```
+
+It is 4,784,521 bytes. Upload the prepared gzip file without decompressing or
+recompressing it. Its SHA-256 must be:
+
+```
+c9409375f93f613d3b616d3d3a5395225995884ed483d4ab6e4e7143edb6f69a
+```
+
+The GitHub connector exposes text-content writes, not a binary-file upload.
+Therefore this binary is provided separately for a one-time upload to the
+reviewer-revisions branch. The accompanying text commit does not add it.
+Package-data configuration includes data/*.geojson.gz once the file is present.
+
+## Preparation and audit
+
+The manifest in schemas/country_reference_source.json records the pinned source,
+compressed and uncompressed checksums, preparation software, and corrections.
+The original uploaded Natural Earth file is not modified.
+
+* The polygon layer declares OGC CRS84: WGS84 longitude/latitude.
+* ISO_A2_EH is the base crosswalk; BMH_ISO_A2 contains the audited assignments.
+* Nine US minor outlying island units use UM; Jan Mayen uses SJ.
+* Egypt's invalid geometry was repaired using Shapely make_valid.
+* All 298 polygons are retained: 280 mapped features and 18 unmapped features.
+* The mapping represents 249 distinct ISO alpha-2 codes, not 249 sovereign states.
+* The audit used system tzdata iso3166.tab. Runtime canonical names and accepted
+  codes come from pycountry.
+* Seventeen of eighteen illustrative spatial checks matched expected outcomes.
+  The Longyearbyen example returned no polygon match. These are not accuracy
+  estimates; coastlines and small features remain a limitation.
+
+The loader verifies compressed size and SHA-256, bounded decompression,
+uncompressed size and SHA-256, feature count, CRS metadata, and audit flags.
+It then constructs the existing Shapely country lookup and caches it per process.
+It does not download files or repair geometry during a user run.
+
+## Python interface after uploading the resource
+
+```python
+from biometaharmonizer.country_reference import load_bundled_country_lookup
+
+lookup = load_bundled_country_lookup()
+result = lookup.lookup(48.8566, 2.3522)
+```
+
+Install geometry support in an editable checkout with:
 
 ```bash
 python -m pip install -e ".[geo]"
 ```
 
-A failed country lookup does not establish that a point is offshore or in open
-ocean. The reference is a cartographic dataset, not a legal boundary authority.
-The reference-layer CRS does not establish the datum of submitted sample points.
-Any sample-datum assumption must be documented when this component is integrated.
+Missing resource files raise a clear error. Boundaries, ambiguous overlaps,
+unmapped units, and points outside all polygons remain unresolved. A failed
+lookup does not establish that a point is offshore or in open ocean.
 
-## Pinned source and outstanding work
-
-schemas/country_reference_source.json identifies the upstream map-unit GeoJSON
-by immutable commit, Git blob SHA-1, and byte size. Its commit message is v5.1.0
-packaging. No actual boundary dataset is bundled in this commit.
-
-The upstream file is approximately 13.5 MB and could not be retrieved in full
-through the available connector. Therefore its country-code property, full ISO
-crosswalk, CRS metadata, real-world assignments, and geometry validity have not
-been audited. The null country_code_field and false audit flags are intentional.
-
-Before integration:
-
-1. Obtain the exact file at the manifest source_url and verify its Git blob hash.
-2. Inspect actual attributes and CRS; audit missing, special and conflicting codes.
-3. Resolve any invalid or antimeridian-crossing geometries explicitly, recording
-   the changes and the checksum of the resulting resource.
-4. Validate real-world mainland, island, territory, border and offshore examples.
-5. Connect only missing standard-oriented country fields to lookup results;
-   retain native geography, historical annotations, and classifier predictions.
-
-A Git blob SHA-1 hashes the bytes prefixed by "blob ", the decimal byte count,
-and a NUL byte. It is not the same as the ordinary SHA-1 of the file.
-
-Synthetic geometry tests exercise the engine but do not validate Natural Earth
-coverage or the correctness of assignments on the evaluated BioSample datasets.
+Next integration must retain native geography and classifier results, document
+sample-datum assumptions, and record provenance for any filled standard fields.

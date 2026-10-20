@@ -52,7 +52,7 @@ version = {attr = "biometaharmonizer.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-biometaharmonizer = ["schemas/*.json", "schemas/*.xml"]
+biometaharmonizer = ["schemas/*.json", "schemas/*.xml", "data/*.geojson.gz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
