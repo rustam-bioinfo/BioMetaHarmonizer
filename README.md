@@ -215,7 +215,7 @@ The synonym table is built from two layers in `synonyms.py` and cached for the l
 - **Layer 1 — `schemas/unified.json`** — manually curated synonym lists for all standard keys.
 - **Layer 2 — `schemas/ncbi_attributes.xml`** — the official NCBI BioSample harmonization table. Optional; loaded only if present.
 
-Both `ingestion.py` and `key_mapper.py` use the same `build_synonym_lookup()` function.
+Attribute-name resolution is performed during BioSample XML ingestion using build_synonym_lookup() from synonyms.py. The returned DataFrame already conforms to the canonical output schema; no separate column-mapping step is required.
 
 ---
 
@@ -491,9 +491,8 @@ BioMetaHarmonizer/
 ├── src/biometaharmonizer/
 │   ├── __init__.py             # public API
 │   ├── cli.py                  # CLI entrypoint (run, build-dicts, build-ncbi-cache, generate-report)
-│   ├── ingestion.py            # Entrez fetching, XML parsing, schema definition
+│   ├── ingestion.py            # retrieval, XML parsing, attribute harmonization, fixed-schema output
 │   ├── synonyms.py             # two-layer synonym lookup (unified.json + NCBI XML)
-│   ├── key_mapper.py           # column rename, coalesce, reindex
 │   ├── date_engine.py          # date parsing, ISO 8601 output
 │   ├── geo_engine.py           # geo_loc_name splitting, ISO-3166 resolution
 │   ├── one_health.py           # One Health categorization
@@ -535,21 +534,18 @@ All tests use synthetic data — no live NCBI calls are made.
 
 ```python
 from biometaharmonizer.ingestion import set_email, ingest
-from biometaharmonizer import KeyMapper, DateEngine, GeoEngine, OneHealthClassifier
+from biometaharmonizer DateEngine, GeoEngine, OneHealthClassifier
 from biometaharmonizer import write, write_summary
 
 # Ingest: accepts a file path, a Python list, or a mix of both accession types
+# Attribute names and missing-value placeholders are normalized during ingestion.
+# The returned DataFrame already uses the canonical output columns.
 set_email("your@email.com")
 df = ingest("accessions.txt")
 # or: df = ingest(["SAMN12345678", "GCF_000001405.39"])
 
 # Force re-download of assembly summary flat files (bypasses 7-day TTL):
 # df = ingest("accessions.txt", refresh_cache=True)
-
-# Key harmonization — renames raw columns to standard keys, coalesces duplicates
-# Needed only if you bring your own DataFrame; ingest() already applies the schema
-mapper = KeyMapper()
-df = mapper.map_columns(df)
 
 # Date parsing: 40+ input formats -> ISO 8601 (YYYY / YYYY-MM / YYYY-MM-DD)
 de = DateEngine()
