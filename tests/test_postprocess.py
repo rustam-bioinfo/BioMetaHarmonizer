@@ -7,7 +7,10 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from biometaharmonizer.postprocess import postprocess
+from biometaharmonizer.postprocess import postprocess as _postprocess
+
+def postprocess(df):
+    return _postprocess(df, infer_country=False)
 
 
 def frame(lat_lon=None, extras=None):

@@ -2,8 +2,9 @@
 
 postprocess(df) returns (extended_df, diagnostics). Decimal coordinate pairs are
 accepted in latitude/longitude order, either signed or with N/S and E/W suffixes.
-Separate ENA coordinate attributes are also supported. No datum, location, or
-jurisdiction is inferred. Conflicting complete sources remain unresolved.
+Separate ENA coordinate attributes are also supported. Country fallback uses
+the bundled reference, assuming WGS84 when no datum is declared and recording
+that assumption. No marine jurisdiction is inferred. Conflicts are retained.
 Standard-named aliases are appended without replacing native fields.
 """
 
@@ -171,8 +172,8 @@ def _health(extras):
     return values[0], None
 
 
-def postprocess(df):
-    """Append coordinate, health-state, and standard-named fields without I/O.
+def postprocess(df, *, infer_country=True, country_lookup=None):
+    """Append fields and optionally infer missing country from offline polygons.
 
     Original cells, row order, index, and columns remain unchanged. Existing
     derived output columns are rejected rather than overwritten. Coordinates
@@ -187,6 +188,13 @@ def postprocess(df):
     Non-ISO markers such as HISTORICAL and XK remain in the native column only.
     No stateProvince or verbatimLocality is inferred. Naming alignment does not
     validate source semantics, controlled vocabularies, or full standard compliance.
+
+    infer_country=True enables conservative country fallback and expands the
+    diagnostics. The CLI's existing postprocess flag uses this default. Set
+    infer_country=False for coordinate parsing and aliases alone. country_lookup
+    may supply an already loaded lookup; otherwise package data is loaded lazily.
+    Only the derived country/countryCode pair may be filled, when both are absent.
+    Native geography, historical annotations, and One Health results are untouched.
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError("postprocess expects a pandas DataFrame")
@@ -257,4 +265,7 @@ def postprocess(df):
         else:
             out[target] = df[source].copy()
     diagnostics = pd.DataFrame(reports, columns=_DIAGNOSTIC_COLUMNS)
+    if infer_country:
+        from biometaharmonizer.country_fallback import apply_country_fallback
+        return apply_country_fallback(out, diagnostics, lookup=country_lookup)
     return out, diagnostics
