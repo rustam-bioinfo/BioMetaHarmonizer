@@ -4,6 +4,7 @@ postprocess(df) returns (extended_df, diagnostics). Decimal coordinate pairs are
 accepted in latitude/longitude order, either signed or with N/S and E/W suffixes.
 Separate ENA coordinate attributes are also supported. No datum, location, or
 jurisdiction is inferred. Conflicting complete sources remain unresolved.
+Standard-named aliases are appended without replacing native fields.
 """
 
 import json
@@ -11,10 +12,23 @@ import math
 import re
 
 import pandas as pd
+import pycountry
 
 __all__ = ["postprocess"]
 
-_OUTPUT_COLUMNS = ("decimalLatitude", "decimalLongitude", "host_health_state")
+_STANDARD_ALIASES = {
+    "seq_meth": "sequencing_method",
+    "assembly_software": "assembly_method",
+    "host_disease_stat": "host_disease",
+    "country": "geo_country",
+    "countryCode": "geo_iso3166",
+    "waterBody": "geo_sea_ocean",
+    "locality": "geo_loc_name",
+}
+_OUTPUT_COLUMNS = (
+    "decimalLatitude", "decimalLongitude", "host_health_state",
+) + tuple(_STANDARD_ALIASES)
+_ISO_ALPHA2 = frozenset(country.alpha_2 for country in pycountry.countries)
 _DIAGNOSTIC_COLUMNS = (
     "row_position", "biosample_accession", "coordinate_source",
     "coordinate_status", "issue",
@@ -158,7 +172,7 @@ def _health(extras):
 
 
 def postprocess(df):
-    """Append three fields and return row-level diagnostics, without I/O.
+    """Append coordinate, health-state, and standard-named fields without I/O.
 
     Original cells, row order, index, and columns remain unchanged. Existing
     derived output columns are rejected rather than overwritten. Coordinates
@@ -166,6 +180,13 @@ def postprocess(df):
     1e-8 degrees per component with no relative tolerance; this is a numeric
     comparison, not a spatial verification. Unsupported formats, malformed
     overflow JSON, and conflicting sources are recorded in diagnostics.
+
+    locality copies geo_loc_name directly, without reconstruction. Other aliases
+    copy source values, except countryCode: only ISO alpha-2 codes in the installed
+    pycountry database are exported, with whitespace trimmed and case normalized.
+    Non-ISO markers such as HISTORICAL and XK remain in the native column only.
+    No stateProvince or verbatimLocality is inferred. Naming alignment does not
+    validate source semantics, controlled vocabularies, or full standard compliance.
     """
     if not isinstance(df, pd.DataFrame):
         raise TypeError("postprocess expects a pandas DataFrame")
@@ -223,5 +244,17 @@ def postprocess(df):
     out["decimalLatitude"] = pd.array(latitudes, dtype="float64")
     out["decimalLongitude"] = pd.array(longitudes, dtype="float64")
     out["host_health_state"] = pd.array(health_states, dtype="object")
+    for target, source in _STANDARD_ALIASES.items():
+        if source not in df.columns:
+            out[target] = pd.array([None] * len(df), dtype="object")
+        elif target == "countryCode":
+            out[target] = pd.array([
+                value.strip().upper()
+                if isinstance(value, str) and value.strip().upper() in _ISO_ALPHA2
+                else None
+                for value in df[source]
+            ], dtype="object")
+        else:
+            out[target] = df[source].copy()
     diagnostics = pd.DataFrame(reports, columns=_DIAGNOSTIC_COLUMNS)
     return out, diagnostics

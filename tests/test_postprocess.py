@@ -128,7 +128,11 @@ def test_preserve_original_and_duplicate_index():
 
 def test_empty_and_missing_columns():
     empty, report = postprocess(pd.DataFrame())
-    assert list(empty.columns) == ["decimalLatitude", "decimalLongitude", "host_health_state"]
+    assert list(empty.columns) == [
+        "decimalLatitude", "decimalLongitude", "host_health_state",
+        "seq_meth", "assembly_software", "host_disease_stat", "country",
+        "countryCode", "waterBody", "locality",
+    ]
     assert list(report.columns) == ["row_position", "biosample_accession", "coordinate_source", "coordinate_status", "issue"]
     result, report = postprocess(pd.DataFrame({"other": [1]}))
     assert len(result) == 1
@@ -147,3 +151,56 @@ def test_bad_input_rejected():
     with pytest.raises(ValueError, match="unique"):
         postprocess(pd.DataFrame([[1, 2]], columns=["lat_lon", "lat_lon"]))
 
+
+@pytest.mark.parametrize("source,target", [
+    ("sequencing_method", "seq_meth"),
+    ("assembly_method", "assembly_software"),
+    ("host_disease", "host_disease_stat"),
+    ("geo_country", "country"),
+    ("geo_sea_ocean", "waterBody"),
+    ("geo_loc_name", "locality"),
+])
+def test_standard_alias_copies_source(source, target):
+    original = pd.DataFrame({source: ["original text", None, "other text"]}, index=[8, 8, 2])
+    before = original.copy(deep=True)
+    result, _ = postprocess(original)
+    assert result[target].tolist() == original[source].tolist()
+    assert_frame_equal(result[original.columns], original)
+    assert_frame_equal(original, before)
+    assert result.index.tolist() == [8, 8, 2]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("US", "US"), (" gb ", "GB"), ("NA", "NA"),
+    ("HISTORICAL", None), ("XK", None), ("ZZ", None),
+    ("USA", None), (None, None), (pd.NA, None), (123, None),
+])
+def test_country_code_policy(raw, expected):
+    original = pd.DataFrame({"geo_iso3166": [raw]})
+    result, _ = postprocess(original)
+    assert result.iloc[0]["countryCode"] == expected
+    assert_frame_equal(result[original.columns], original)
+
+
+def test_locality_uses_original_without_parser_success():
+    text = "unresolved location (original qualifier): sampling site 7"
+    original = pd.DataFrame({"geo_loc_name": [text], "geo_region": [None], "geo_locality": [None]})
+    result, _ = postprocess(original)
+    assert result.iloc[0]["locality"] == text
+    assert "stateProvince" not in result.columns
+    assert "verbatimLocality" not in result.columns
+
+
+def test_health_state_does_not_fill_host_disease_stat():
+    result, _ = postprocess(frame(extras={"host_health_state": "disease"}))
+    assert result.iloc[0]["host_health_state"] == "disease"
+    assert pd.isna(result.iloc[0]["host_disease_stat"])
+
+
+@pytest.mark.parametrize("target", [
+    "seq_meth", "assembly_software", "host_disease_stat", "country",
+    "countryCode", "waterBody", "locality",
+])
+def test_standard_alias_collision_rejected(target):
+    with pytest.raises(ValueError, match="already exist"):
+        postprocess(pd.DataFrame({target: ["existing"]}))
