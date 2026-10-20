@@ -1,9 +1,12 @@
 import logging
 import re
+import warnings
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 from dateutil import parser as dateutil_parser
+from dateutil.parser import UnknownTimezoneWarning
 
 
 logger = logging.getLogger(__name__)
@@ -11,36 +14,26 @@ logger = logging.getLogger(__name__)
 
 class DateEngine:
     """
-    Module 3: Temporal Parsing Engine.
-    Converts any date format to ISO 8601 truncated representation:
-      - Year-only: "YYYY"
-      - Year-month: "YYYY-MM"
-      - Full date: "YYYY-MM-DD"
+    Module 2: Temporal Parsing Engine.
+    Normalize collection dates and supported timestamps to ISO 8601:
+      - Year-only: YYYY
+      - Year-month: YYYY-MM
+      - Full date: YYYY-MM-DD
+      - Explicit clock time: preserve supplied hour/minute/second precision
+      - Fractional seconds and resolved timezone offsets: preserve when supplied
 
-    Range contract
-    --------------
-    collection_date is a POINT-DATE field and is ALWAYS NaN for any range
-    or approximate input, without exception.  collection_date_range receives
-    the verbatim original string for all range inputs.
+    collection_date contains a point date or timestamp. Ranges and approximate
+    inputs receive NaN there, with their original stripped string retained in
+    collection_date_range. Supported ISO-style timestamp intervals use a slash
+    or a spaced dash/to separator. Existing date-range patterns are retained.
 
-    Supported range formats detected before dateutil:
-      - Numeric INSDC slash:       2004-07/2004-12, 2021-01-15/2021-03-20
-      - Year-only range:           2018-2020, 2015/2017
-      - Numeric dash/word range:   2021-01-15 - 2021-03-20, 2020-06 to 2020-09
-      - Named-month same year:     July-December 2004, Jan-Mar 2019
-      - Named-month cross-year:    Oct 2020-Feb 2021, Dec 2018-Jan 2019
-      - Season strings:            Spring 2019, Winter 2020-2021
-      - Approximate/uncertain:     ~2015, circa 2010, early March 2020, late 2019
-
-    Same-year degenerate range
-    --------------------------
-    "YYYY-YYYY" where both years are identical is treated as the point year
-    "YYYY", not as a range.  collection_date_range is left NaN.
+    Timestamps require an explicit complete calendar date. Missing times and
+    timezones are not inferred. Unknown timezone abbreviations are rejected
+    with a warning rather than silently dropping timezone information.
+    Same-year degenerate ranges such as YYYY-YYYY collapse to one point year.
     """
 
-    # Canonical null pattern set -- kept in sync with ingestion._NULL_PATTERNS
-    # so that DateEngine used directly on raw (un-ingested) data handles the
-    # same null variants.  (MED-3 / issue #54)
+    # Keep null handling consistent with ingestion._NULL_PATTERNS.
     NULL_PATTERNS = re.compile(
         r"^(?:-+|\.+|n/?a|na|nd|nr|ns|nt|none|null|nil|"
         r"missing|misssing|missng|mising|"
@@ -55,45 +48,59 @@ class DateEngine:
         r"missing\s*:.*|not\s+applicable\s*:.*|data\s+agreement\s+established\s+pre-?2023)$",
         re.IGNORECASE,
     )
-    YEAR_ONLY  = re.compile(r"^(\d{4})$")
+    YEAR_ONLY = re.compile(r"^(\d{4})$")
     YEAR_MONTH = re.compile(r"^(\d{4})[-/](\d{1,2})$|^([A-Za-z]{3,9})[-/\s](\d{4})$")
     TWO_DIGIT_YEAR = re.compile(r"^\d{2}$")
+
+    _CLOCK_TIME = re.compile(
+        r"(?<!\d)(?P<hour>\d{1,2}):(?P<minute>\d{2})"
+        r"(?::(?P<second>\d{2})(?P<fraction>[.,]\d+)?)?"
+        r"(?:\s*(?:a\.?m\.?|p\.?m\.?))?(?![\d:.])",
+        re.IGNORECASE,
+    )
+    _AMPM_TIME = re.compile(
+        r"(?<!\d)(?P<hour>\d{1,2})\s*(?:a\.?m\.?|p\.?m\.?)(?!\w)",
+        re.IGNORECASE,
+    )
+    _ISO_TIME_HINT = re.compile(r"[Tt]\d{2}")
+    _TRAILING_ZONE = re.compile(r"(?P<zone>[Zz]|[+-]\d{2}:?\d{2})\s*$")
+
+    _ISO_ENDPOINT = (
+        r"\d{4}(?:-\d{2}(?:-\d{2}"
+        r"(?:[Tt ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?"
+        r"(?:[Zz]|[+-]\d{2}:?\d{2})?)?)?)?"
+    )
+    _ISO_TIMESTAMP_RANGE = re.compile(
+        rf"^{_ISO_ENDPOINT}(?:\s*/\s*|\s+(?:to|[-\u2013\u2014])\s+){_ISO_ENDPOINT}$",
+        re.IGNORECASE,
+    )
 
     _INSDC_SLASH_RANGE = re.compile(
         r"^\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?\s*/\s*\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?$"
     )
-
     _YEAR_ONLY_RANGE = re.compile(
         r"^(?P<start>\d{4})\s*[-/]\s*(?P<end>\d{4})$"
     )
-
     _NUMERIC_DASH_RANGE = re.compile(
         r"^\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?"
         r"(?:\s*[\-\u2013\u2014]\s*|\s+to\s+)"
         r"\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?$",
         re.IGNORECASE,
     )
-
     _NAMED_MONTH_SAME_YEAR = re.compile(
         r"^[A-Za-z]{3,9}\s*[-/]\s*[A-Za-z]{3,9}\s+\d{4}$"
     )
-
     _NAMED_MONTH_CROSS_YEAR = re.compile(
         r"^[A-Za-z]{3,9}\s+\d{4}\s*[-/]\s*[A-Za-z]{3,9}\s+\d{4}$"
     )
-
     _SEASON_RANGE = re.compile(
         r"^(?:spring|summer|autumn|fall|winter)\s+\d{4}(?:\s*[-/]\s*\d{4})?$",
         re.IGNORECASE,
     )
-
     _APPROX_DATE = re.compile(
         r"^(?:~|circa\s|ca\.?\s|approx\.?\s|late\s|early\s|mid[-\s])\S",
         re.IGNORECASE,
     )
-
-    # Sentinel returned by _detect_range when the input is a degenerate
-    # same-year string like "2020-2020" that should be collapsed to "2020".
     _SAME_YEAR = object()
 
     @staticmethod
@@ -102,11 +109,7 @@ class DateEngine:
 
     @staticmethod
     def _detect_range(value):
-        """
-        Return True             -- value is a genuine range
-               False            -- value is not a range
-               DateEngine._SAME_YEAR -- degenerate YYYY-YYYY (treat as point)
-        """
+        """Return True for ranges, False for points, or _SAME_YEAR."""
         v = value.strip()
         if DateEngine._INSDC_SLASH_RANGE.match(v):
             return True
@@ -122,6 +125,8 @@ class DateEngine:
                     v, start, end,
                 )
             return True
+        if DateEngine._ISO_TIMESTAMP_RANGE.match(v):
+            return True
         if DateEngine._NUMERIC_DASH_RANGE.match(v):
             return True
         if DateEngine._NAMED_MONTH_SAME_YEAR.match(v):
@@ -135,10 +140,7 @@ class DateEngine:
         return False
 
     def parse(self, series):
-        """
-        Parse a Series of date strings to ISO 8601 truncated point dates.
-        Deduplicates unique values before parsing for performance.
-        """
+        """Normalize point dates/timestamps, parsing unique values once."""
         if isinstance(series, pd.DataFrame):
             series = series.iloc[:, 0]
         unique_vals = series.dropna().unique()
@@ -146,13 +148,7 @@ class DateEngine:
         return series.map(lambda v: cache.get(v, np.nan))
 
     def parse_with_range(self, series):
-        """
-        Parse dates and return a DataFrame with columns:
-          - collection_date:       ISO 8601 point date, or NaN for any range input
-          - collection_date_range: verbatim original string for range inputs, else NaN
-
-        Deduplicates unique values before parsing for performance.
-        """
+        """Return point dates/timestamps and separate verbatim range strings."""
         if isinstance(series, pd.DataFrame):
             series = series.iloc[:, 0]
         unique_vals = series.dropna().unique()
@@ -166,26 +162,16 @@ class DateEngine:
     def _parse_single_with_range(self, value):
         if pd.isna(value):
             return self._empty_row()
-
         value = str(value).strip()
-        if not value:
-            return self._empty_row()
-        if self.NULL_PATTERNS.match(value):
+        if not value or self.NULL_PATTERNS.match(value):
             return self._empty_row()
 
         range_result = self._detect_range(value)
-
         if range_result is self._SAME_YEAR:
-            # "2020-2020" -> collapse to the point year
             year = value.strip().split("-")[0].strip()
             return {"collection_date": year, "collection_date_range": np.nan}
-
         if range_result:
-            return {
-                "collection_date": np.nan,
-                "collection_date_range": value,
-            }
-
+            return {"collection_date": np.nan, "collection_date_range": value}
         if self.TWO_DIGIT_YEAR.match(value):
             logger.warning("Rejecting two-digit year string: '%s'", value)
             return self._empty_row()
@@ -199,11 +185,55 @@ class DateEngine:
         if self.YEAR_MONTH.match(value):
             return self._resolve_year_month(value)
         try:
-            parsed = dateutil_parser.parse(value, dayfirst=False)
+            time_match = self._CLOCK_TIME.search(value) or self._AMPM_TIME.search(value)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UnknownTimezoneWarning)
+                if time_match:
+                    parsed = dateutil_parser.parse(
+                        value, dayfirst=False, default=datetime(2000, 1, 1)
+                    )
+                    alternate = dateutil_parser.parse(
+                        value, dayfirst=False, default=datetime(2004, 2, 2)
+                    )
+                    if parsed.date() != alternate.date():
+                        raise ValueError("Timestamp requires an explicit complete calendar date")
+                    return self._format_timestamp(parsed, time_match, value)
+                if self._ISO_TIME_HINT.search(value):
+                    raise ValueError("Unsupported timestamp clock format")
+                parsed = dateutil_parser.parse(value, dayfirst=False)
             return parsed.strftime("%Y-%m-%d")
-        except (ValueError, OverflowError):
-            logger.warning("Could not parse date string: '%s'", value)
+        except (ValueError, OverflowError, UnknownTimezoneWarning) as exc:
+            logger.warning("Could not parse date string %r: %s", value, exc)
             return np.nan
+
+    @staticmethod
+    def _format_timestamp(parsed, time_match, original):
+        components = time_match.groupdict()
+        result = f"{parsed.date().isoformat()}T{parsed.hour:02d}"
+        if components.get("minute") is not None:
+            result += f":{parsed.minute:02d}"
+        if components.get("second") is not None:
+            result += f":{parsed.second:02d}"
+            fraction = components.get("fraction")
+            if fraction:
+                result += "." + fraction[1:]
+
+        offset = parsed.utcoffset()
+        if offset is not None:
+            offset_seconds = int(offset.total_seconds())
+            if offset_seconds % 60:
+                raise ValueError("Timezone offsets with seconds are unsupported")
+            zone_match = DateEngine._TRAILING_ZONE.search(original)
+            zone = zone_match.group("zone") if zone_match else None
+            if offset_seconds == 0 and zone and zone.upper() == "Z":
+                result += "Z"
+            elif offset_seconds == 0 and zone in ("-0000", "-00:00"):
+                result += "-00:00"
+            else:
+                sign = "+" if offset_seconds >= 0 else "-"
+                hours, minutes = divmod(abs(offset_seconds) // 60, 60)
+                result += f"{sign}{hours:02d}:{minutes:02d}"
+        return result
 
     def _resolve_year_month(self, value):
         try:
