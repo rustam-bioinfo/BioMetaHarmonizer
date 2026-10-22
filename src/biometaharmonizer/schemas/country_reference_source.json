@@ -107,5 +107,5 @@
     "interpretation": "Illustrative checks, not an accuracy estimate"
   },
   "status": "audited_resource_prepared_pending_binary_upload",
-  "notes": "Prepared resource must be uploaded to package data before loading. Country fallback remains unconnected to post-processing. Unmapped polygons are retained. No nearest-country fallback or datum inference."
+  "notes": "No nearest-country fallback or datum inference."
 }
