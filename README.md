@@ -241,19 +241,37 @@ antibiogram_df = extract_antibiogram(df)
 
 ## Attribute resolution order
 
-For each `<Attribute>` element in BioSample XML, the column mapping is resolved in this order:
+For each `<Attribute>` element in BioSample XML, the output field is resolved in the following order:
 
-1. **`harmonized_name` direct match** — if the NCBI-assigned `harmonized_name` matches a schema column exactly, it is used without any synonym lookup.
-2. **Synonym lookup on `harmonized_name`** — if not a direct match, the `harmonized_name` is looked up in the synonym table. If the resolved key is in the schema, it is used; otherwise the resolved key is stored in `_extra_attributes`.
-3. **Synonym lookup on `attribute_name`** — if `harmonized_name` is absent or unresolvable, the raw `attribute_name` is tried.
-4. **`_extra_attributes`** — any attribute that could not be resolved by any of the above is written to `_extra_attributes` as a JSON key-value pair.
+1. `harmonized_name` direct match: after stripping surrounding whitespace, an exact, case-sensitive match to a schema column is used without synonym lookup.
 
-The synonym table is built from two layers in `synonyms.py` and cached for the lifetime of the process:
+2. Synonym lookup on `harmonized_name`: otherwise, the harmonized name is looked up case-insensitively in the synonym table. If the mapped target is a schema column, that column is used. If the target is outside the schema, the non-null value is retained in `_extra_attributes` under the mapped target name. In this case, `attribute_name` is not tried afterward.
 
-- **Layer 1 — `schemas/unified.json`** — manually curated synonym lists for all standard keys.
-- **Layer 2 — `schemas/ncbi_attributes.xml`** — the official NCBI BioSample harmonization table. Optional; loaded only if present.
+3. Synonym lookup on `attribute_name`: if neither preceding condition matches, the stripped raw attribute name is looked up case-insensitively in the synonym table. A schema target is used as the output column; a non-schema target is used as the key in `_extra_attributes`.
 
-Attribute-name resolution is performed during BioSample XML ingestion using build_synonym_lookup() from synonyms.py. The returned DataFrame already conforms to the canonical output schema; no separate column-mapping step is required.
+4. Unresolved attributes: if no mapping is found, non-null values are retained in `_extra_attributes` under the stripped `harmonized_name`, falling back to `attribute_name`, then `"unknown"` if neither name is available.
+
+Missing-value placeholders are normalized before values are assigned to output columns or retained in `_extra_attributes`.
+
+### Synonym sources and precedence
+
+The synonym table is built by `build_synonym_lookup()` in `synonyms.py` and cached for the lifetime of the process:
+
+- `schemas/unified.json` supplies project-defined standard keys and curated synonyms.
+- `schemas/ncbi_attributes.xml`, supplies mappings from the official NCBI BioSample attribute harmonization table.
+- Project-defined mappings take precedence over NCBI mappings for the same lookup key.
+
+### Attribute collisions
+
+When multiple non-null attributes resolve to the same output column, the priority table derived from `unified.json` determines which value is retained:
+
+- The standard key itself has rank `0`, the highest priority.
+- Synonyms have ranks `1` onward, following their order in the field's synonym list.
+- Source keys without an explicit priority entry default to rank `999`.
+- A lower numerical rank takes precedence. If ranks are equal, the existing value is retained.
+- Displaced or lower-priority non-null values are preserved in `_extra_attributes` under `_dup_<column>`. Multiple values under the same extra key are joined with `|`.
+
+Attribute-name resolution occurs during BioSample XML ingestion, and the returned DataFrame already conforms to the canonical output schema. No separate column-mapping step is required.
 
 ---
 
