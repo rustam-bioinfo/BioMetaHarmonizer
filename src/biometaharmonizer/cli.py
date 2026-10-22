@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-# Absolute path to the bundled schemas directory — works regardless of cwd.
+# Absolute path to the bundled schemas directory, independent of cwd.
 _SCHEMAS_DIR = Path(__file__).resolve().parent / "schemas"
 
 _VALID_FORMATS = ["csv", "tsv", "excel", "parquet", "jsonl"]
@@ -36,7 +36,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="biometaharmonizer",
         description=(
-            "Harmonize NCBI BioSample metadata: fetch, normalize column names, "
+            "Harmonize NCBI BioSample metadata: ingest and resolve attribute names, "
             "parse dates, resolve geography, classify One Health category, and export.\n\n"
             "Subcommands:\n"
             "  run                 Full harmonization pipeline\n"
@@ -53,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── run ──────────────────────────────────────────────────────────────────
     run_p = sub.add_parser(
         "run",
-        help="Full harmonization pipeline: ingest -> key-map -> date/geo/one-health -> output.",
+        help="Full harmonization pipeline: ingest/harmonize -> date -> geo -> one-health -> output.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Run the full BioMetaHarmonizer pipeline on a list of BioSample or "
@@ -96,6 +96,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "out.csv, out.tsv, out.xlsx). "
             "Omit to infer the format from the --output file extension."
         ),
+    )
+    run_p.add_argument(
+        "--postprocess", action="store_true", default=False,
+        help=(
+            "Append decimalLatitude, decimalLongitude, and host_health_state before export. "
+            "Preserves native metadata and One Health predictions; no geocoding."
+        ),
+    )
+    run_p.add_argument(
+        "--postprocess-report", metavar="FILE", default=None,
+        help="Write a row-level diagnostic CSV; requires --postprocess.",
     )
     run_p.add_argument("--summary", metavar="FILE", default=None)
     run_p.add_argument("--verbose", "-v", action="store_true", default=False)
@@ -358,7 +369,7 @@ def _run_build_ncbi_cache(args: argparse.Namespace) -> int:
 def _run_generate_report(args: argparse.Namespace) -> int:
     """
     Delegate to biometaharmonizer.scripts.generate_summary_report::generate_report()
-    directly (no argv reconstruction needed — the function takes explicit
+    directly (no argv reconstruction needed; the function takes explicit
     input/output parameters).
     """
     from biometaharmonizer.scripts import generate_summary_report
@@ -379,6 +390,10 @@ def _run(args: argparse.Namespace) -> int:
         datefmt="%H:%M:%S",
     )
     logger = logging.getLogger("biometaharmonizer.cli")
+
+    if getattr(args, "postprocess_report", None) and not getattr(args, "postprocess", False):
+        print("ERROR: --postprocess-report requires --postprocess.", file=sys.stderr)
+        return 1
 
     input_arg = args.input.strip()
     input_path = Path(input_arg)
@@ -406,9 +421,22 @@ def _run(args: argparse.Namespace) -> int:
         fmt = _infer_format(output_path)
         targets = [(fmt, output_path)]
 
+    report_path = getattr(args, "postprocess_report", None)
+    if report_path:
+        protected = {path.resolve() for _, path in targets}
+        if args.summary:
+            protected.add(Path(args.summary).resolve())
+        if input_path.exists():
+            protected.add(input_path.resolve())
+        if Path(report_path).resolve() in protected:
+            print(
+                "ERROR: Post-processing report must not overwrite input, output, or summary.",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         from biometaharmonizer.ingestion import set_email, ingest
-        from biometaharmonizer.key_mapper import KeyMapper
         from biometaharmonizer.date_engine import DateEngine
         from biometaharmonizer.geo_engine import GeoEngine
         from biometaharmonizer.one_health import OneHealthClassifier
@@ -429,7 +457,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.cache_dir:
         kwargs["cache_dir"] = args.cache_dir
 
-    logger.info("Step 1/5  Ingestion")
+    logger.info("Step 1/5  Ingestion and attribute harmonization")
     logger.info(
         "         fetch_batch_size=%d  esearch_batch_size=%d  refresh_cache=%s",
         args.fetch_batch_size, args.esearch_batch_size, args.refresh_cache,
@@ -454,19 +482,8 @@ def _run(args: argparse.Namespace) -> int:
 
     logger.info("         %d records ingested in %.1fs.", len(df), time.perf_counter() - t0)
 
-    logger.info("Step 2/5  Key harmonization")
-    t0 = time.perf_counter()
-    try:
-        mapper = KeyMapper()
-        df = mapper.map_columns(df)
-    except Exception as exc:
-        print(f"ERROR during key harmonization: {exc}", file=sys.stderr)
-        logger.debug("", exc_info=True)
-        return 2
-    logger.info("         Done in %.1fs.", time.perf_counter() - t0)
-
     if "collection_date" in df.columns:
-        logger.info("Step 3/5  Date parsing")
+        logger.info("Step 2/5  Date parsing")
         t0 = time.perf_counter()
         de = DateEngine()
         date_df = de.parse_with_range(df["collection_date"])
@@ -479,10 +496,10 @@ def _run(args: argparse.Namespace) -> int:
             parsed, len(df), time.perf_counter() - t0,
         )
     else:
-        logger.info("Step 3/5  Date parsing skipped (no collection_date column).")
+        logger.info("Step 2/5  Date parsing skipped (no collection_date column).")
 
     if "geo_loc_name" in df.columns:
-        logger.info("Step 4/5  Geospatial parsing")
+        logger.info("Step 3/5  Geospatial parsing")
         t0 = time.perf_counter()
         ge = GeoEngine()
         geo_df = ge.parse(df["geo_loc_name"])
@@ -494,9 +511,9 @@ def _run(args: argparse.Namespace) -> int:
             resolved, len(df), time.perf_counter() - t0,
         )
     else:
-        logger.info("Step 4/5  Geospatial parsing skipped (no geo_loc_name column).")
+        logger.info("Step 3/5  Geospatial parsing skipped (no geo_loc_name column).")
 
-    logger.info("Step 5/5  One Health classification")
+    logger.info("Step 4/5  One Health classification")
     t0 = time.perf_counter()
     classifier = OneHealthClassifier()
     src_cols = ["isolation_source", "env_broad_scale", "env_local_scale", "env_medium", "sample_type", "host"]
@@ -530,6 +547,25 @@ def _run(args: argparse.Namespace) -> int:
             classified, len(df), unclassified,
         )
 
+    if getattr(args, "postprocess", False):
+        logger.info("Optional post-processing")
+        t0 = time.perf_counter()
+        try:
+            from biometaharmonizer.postprocess import postprocess
+            df, diagnostics = postprocess(df)
+            logger.info(
+                "         Coordinate status counts: %s; done in %.1fs.",
+                diagnostics["coordinate_status"].value_counts().to_dict(),
+                time.perf_counter() - t0,
+            )
+            if report_path:
+                write(diagnostics, report_path, fmt="csv")
+        except Exception as exc:
+            print(f"ERROR during post-processing: {exc}", file=sys.stderr)
+            logger.debug("", exc_info=True)
+            return 2
+
+    logger.info("Step 5/5  Output")
     written_paths = []
     for fmt, out_path in targets:
         logger.info("Writing output to %s (format=%s)", out_path, fmt)
