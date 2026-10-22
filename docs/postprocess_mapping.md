@@ -29,9 +29,6 @@ Missing source columns produce empty alias columns. Existing target columns are
 rejected rather than overwritten. Full controlled-vocabulary, structured-value,
 and submission-checklist validation is outside this transformation.
 
-The existing diagnostic report continues to describe coordinate parsing and
-health-state issues. This change adds no geographic reconciliation, reverse
-geocoding, administrative-region inference, or marine-jurisdiction assignment.
 
 ## Term references
 
