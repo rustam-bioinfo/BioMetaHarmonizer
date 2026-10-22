@@ -1,6 +1,6 @@
 # BioMetaHarmonizer
 
-[![version](https://img.shields.io/badge/version-1.0.8-blue)](#)
+[![version](https://img.shields.io/badge/version-1.0.9-blue)](#)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 [![license](https://img.shields.io/badge/license-MIT-green)](#)
 [![status](https://img.shields.io/badge/status-stable-brightgreen)](#)
@@ -18,6 +18,8 @@ NCBI BioSample metadata is free-text, crowd-sourced, and inconsistent across sub
 
 Input can be BioSample accessions (`SAMN`, `SAME`, `SAMD`), assembly accessions (`GCF_`, `GCA_`), or a mix of both. Assembly accessions are resolved to BioSample IDs through locally cached NCBI assembly summary flat files.
 
+Optional post-processing extends the harmonized output with decimal coordinates, submitted host health-state metadata, and standards-oriented field aliases. It can also fill missing derived country fields using a bundled offline polygon reference. Native metadata and One Health predictions are preserved, and a separate diagnostic report records parsing issues, conflicting sources, country-assignment provenance, and coordinate-datum assumptions.
+
 ---
 
 ## Installation
@@ -27,7 +29,11 @@ Install from PyPI:
 ```bash
 pip install biometaharmonizer
 ```
+To use coordinate-derived country inference during post-processing, install the geographic extra:
 
+```bash
+pip install "biometaharmonizer[geo]"
+```
 Requires Python 3.9+. Dependencies are declared in `pyproject.toml` and installed automatically.
 
 **Development install** (editable, from source):
@@ -59,7 +65,7 @@ biometaharmonizer run \
     --email  your@email.com \
     --output harmonized.csv \
     --fetch-batch-size 500 \
-    --esearch-batch-size 500
+    --esearch-batch-size 500 \
     --api-key KEY
 
 # Save to multiple formats in one run
@@ -70,7 +76,17 @@ biometaharmonizer run \
     --format csv tsv excel
 # Produces: harmonized.csv, harmonized.tsv, harmonized.xlsx
 
-# 
+# Run with optional metadata enrichment
+biometaharmonizer run \
+    --input accessions.txt \
+    --email your@email.com \
+    --output harmonized_extended.csv \
+    --postprocess \
+    --postprocess-report postprocess_diagnostics.csv
+# Produces: harmonized_extended.csv: the extended metadata output;
+#           postprocess_diagnostics.csv: a separate report containing coordinate-parsing statuses, country-lookup results, conflicts, and assignment provenance.
+
+ 
 ```
 
 | Flag | Default | Description |
@@ -86,12 +102,17 @@ biometaharmonizer run \
 | `--esearch-batch-size N` | `200` | Number of accessions per esearch term |
 | `--refresh-cache` | off | Force re-download of assembly summary flat files regardless of age |
 | `--verbose` | off | Enable DEBUG-level logging |
+| `--postprocess` | off | Append coordinate, health-state, and standards-oriented fields before export. Includes conservative offline inference of missing derived country fields; requires the geographic extra when lookup is needed |
+| `--postprocess-report FILE` | — | Write row-level post-processing diagnostics to CSV. Requires post-processing to be enabled |
 
 ---
+Post-processing runs once before export, so all output formats receive the same extended DataFrame. The diagnostic report is separate from the harmonized output and must not overwrite the input, output, or summary file.
+
 ## Output columns
 
 The output DataFrame contains **53 columns**. Columns with no data for a given dataset are present and filled with `NaN`. Attributes that do not map to any column are preserved as a JSON string in `_extra_attributes`.
 
+Optional post-processing appends ten columns, producing 63 columns for a canonical 53-column input. Native columns remain unchanged.
 
 | # | Column | Source | Description |
 |---|--------|--------|-------------|
@@ -129,7 +150,7 @@ The output DataFrame contains **53 columns**. Columns with no data for a given d
 | 32 | `geo_locality` | GeoEngine | Locality after the region in colon format, or the part after the first comma in comma-only inputs |
 | 33 | `geo_iso3166` | GeoEngine | ISO 3166-1 alpha-2 country code; historical names tagged `HISTORICAL` |
 | 34 | `geo_sea_ocean` | GeoEngine | Named aquatic feature from `geo_loc_name` — covers oceans, seas, gulfs, bays, straits, fjords, lakes, reservoirs, and other water bodies |
-| 35 | `collection_date` | BioSample attribute → DateEngine | Collection date normalized to ISO 8601 |
+| 35 | `collection_date` | BioSample attribute → DateEngine | Collection date or supported timestamp normalized to ISO 8601 while preserving supplied precision |
 | 36 | `collection_date_range` | DateEngine | Verbatim original string for range/approximate date inputs; NaN for point dates |
 | 37 | `one_health_category` | OneHealthClassifier | One of: `Human`, `Animal`, `Plant`, `Food`, `Environmental`, `Unclassified` |
 | 38 | `one_health_confidence` | OneHealthClassifier | Float in [0, 1] — see [One Health classification](#one-health-classification) |
@@ -149,6 +170,25 @@ The output DataFrame contains **53 columns**. Columns with no data for a given d
 | 52 | `description_comment` | BioSample XML | Free-text description or comment block |
 | 53 | `_extra_attributes` | JSON | All attributes that could not be mapped to a schema column, serialized as a JSON dict. Also contains `submission_owner` and `submission_contact` when `<Owner>` provenance is present alongside an explicit collector. For records submitted under pathogen packages, contains an `antibiogram` key (see [Antibiogram data](#antibiogram-data)). |
 ---
+
+## Optional post-processing columns
+
+| # | Additional column | Source or rule |
+|---|-------------------|----------------|
+| 1 | `decimalLatitude` | Parsed latitude from `lat_lon` or separate coordinate attributes in `_extra_attributes` |
+| 2 | `decimalLongitude` | Parsed longitude from the same validated coordinate pair |
+| 3 | `host_health_state` | Submitted health-state metadata recovered from `_extra_attributes`; not an inferred diagnosis |
+| 4 | `seq_meth` | Copy of `sequencing_method` |
+| 5 | `assembly_software` | Copy of `assembly_method` |
+| 6 | `host_disease_stat` | Copy of `host_disease`, independently of `host_health_state` |
+| 7 | `country` | Copy of `geo_country`, with coordinate-derived fallback only when both derived country fields are absent |
+| 8 | `countryCode` | Normalized ISO alpha-2 code from `geo_iso3166`, subject to the same fallback policy |
+| 9 | `waterBody` | Copy of `geo_sea_ocean` |
+| 10 | `locality` | Direct copy of `geo_loc_name`, without reconstructing it from parsed region or locality fields |
+---
+These aliases provide naming correspondences to MIxS and Darwin Core terms. They do not certify full standards compliance or validate source semantics, controlled vocabularies, software versions, or submission checklists.
+
+Non-ISO markers such as `HISTORICAL` and `XK` remain in the native geographic fields but are not exported as `countryCode`.
 
 ## Antibiogram data
 
@@ -318,6 +358,16 @@ Handling notes:
 - Historical country names (`USSR`, `Yugoslavia`, `Zaire`, `East Germany`, etc.) → preserved in `geo_country`, `geo_iso3166 = HISTORICAL`
 - `Turkey` / `Türkiye`, `Namibia`, `Burma`, `DR Congo`, `Russia`, `Czech Republic`, `Svalbard`, `Kosovo`, and several other names are resolved via a hardcoded alias table before pycountry fuzzy lookup. `Kosovo` uses code `XK` — a user-assigned code per CLDR and EU conventions, not part of the official ISO 3166-1 standard.
 - All unique `geo_loc_name` values are resolved once and cached; pycountry fuzzy lookup runs at most once per unique country string regardless of row count
+
+---
+
+## Date and timestamp parsing
+
+`DateEngine` preserves the supplied precision of supported collection dates and timestamps. Outputs may contain a year, year and month, full calendar date, or timestamp with explicit clock time. Supplied fractional seconds and resolved timezone offsets are preserved rather than reducing timestamps to calendar dates.
+
+Timestamps require an explicit complete calendar date. Missing times and timezones are not inferred. Unknown timezone abbreviations are rejected with a warning rather than silently discarded.
+
+Ranges and approximate dates remain separate from point dates: `collection_date` is missing, and `collection_date_range` retains the original stripped input. Supported timestamp intervals follow the same policy.
 
 ---
 
@@ -507,28 +557,11 @@ BioMetaHarmonizer/
 │       ├── build_dictionaries.py             # module for build-dicts
 │       └── build_ncbi_attribute_cache.py     # module for build-ncbi-cache
 ├── tests/
-│   ├── test_ingestion.py
-│   ├── test_key_mapper.py
-│   ├── test_date_engine.py
-│   ├── test_geo_engine.py
-│   ├── test_one_health.py
-│   ├── test_output.py
-│   └── test_pipeline.py
 └── pyproject.toml
 ```
 
 ---
 
-## Running tests
-
-```bash
-pip install pytest
-pytest tests/ -v --tb=short
-```
-
-All tests use synthetic data — no live NCBI calls are made.
-
----
 
 ### Python API
 
