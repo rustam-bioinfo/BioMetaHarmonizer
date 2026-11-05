@@ -41,6 +41,7 @@ Homepage = "https://github.com/rustam-bioinfo/BioMetaHarmonizer"
 Documentation = "https://biometaharmonizer.readthedocs.io"
 "Bug Tracker" = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/issues"
 Changelog = "https://github.com/rustam-bioinfo/BioMetaHarmonizer/CHANGELOG.md"
+Publication = "https://doi.org/10.3390/informatics13110184"
 
 [project.scripts]
 biometaharmonizer = "biometaharmonizer.cli:main"
