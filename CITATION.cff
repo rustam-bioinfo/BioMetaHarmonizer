@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: >-
+  If you use BioMetaHarmonizer in your research, please cite the
+  accompanying article listed in preferred-citation.
+type: software
+title: "BioMetaHarmonizer"
+authors:
+  - family-names: "Heydarov"
+    given-names: "Rustam N."
+repository-code: "https://github.com/rustam-bioinfo/BioMetaHarmonizer"
+url: "https://github.com/rustam-bioinfo/BioMetaHarmonizer"
+license: MIT
+
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Heydarov"
+      given-names: "Rustam N."
+    - family-names: "Romanova"
+      given-names: "Ksenia A."
+    - family-names: "Mikhailovich"
+      given-names: "Vladimir M."
+  title: >-
+    BioMetaHarmonizer: An Integrated Pipeline for Retrieval,
+    Harmonization and Standardization of NCBI BioSample Metadata
+    for Large-Scale Bacterial Genomic Epidemiological Analysis
+  journal: "Informatics"
+  year: 2026
+  volume: "13"
+  issue: "11"
+  article-number: "184"
+  doi: "10.3390/informatics13110184"
+  url: "https://www.mdpi.com/2227-9709/13/11/184"
