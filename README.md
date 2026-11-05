@@ -9,6 +9,35 @@
 A Python package for fetching, parsing, and standardizing NCBI BioSample metadata for large-scale genomic epidemiology.
 
 ---
+## Citation
+
+If you use BioMetaHarmonizer in your research, please cite the accompanying article:
+
+Heydarov, R. N., Romanova, K. A., and Mikhailovich, V. M. (2026).
+BioMetaHarmonizer: An Integrated Pipeline for Retrieval, Harmonization and
+Standardization of NCBI BioSample Metadata for Large-Scale Bacterial Genomic
+Epidemiological Analysis. *Informatics*, 13(11), 184.
+https://doi.org/10.3390/informatics13110184
+
+For reproducibility, please also report the BioMetaHarmonizer version used
+in your analysis.
+
+### BibTeX
+
+```bibtex
+@article{Heydarov2026BioMetaHarmonizer,
+  author  = {Heydarov, Rustam N. and Romanova, Ksenia A. and Mikhailovich, Vladimir M.},
+  title   = {{BioMetaHarmonizer}: An Integrated Pipeline for Retrieval, Harmonization and Standardization of {NCBI} {BioSample} Metadata for Large-Scale Bacterial Genomic Epidemiological Analysis},
+  journal = {Informatics},
+  year    = {2026},
+  volume  = {13},
+  number  = {11},
+  pages   = {184},
+  doi     = {10.3390/informatics13110184},
+  url     = {[https://www.mdpi.com/2227-9709/13/11/184](https://www.mdpi.com/2227-9709/13/11/184)}
+}
+```
+---
 
 ## What it does
 
