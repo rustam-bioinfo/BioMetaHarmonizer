@@ -612,7 +612,7 @@ BioMetaHarmonizer/
 
 ```python
 from biometaharmonizer.ingestion import set_email, ingest
-from biometaharmonizer DateEngine, GeoEngine, OneHealthClassifier
+from biometaharmonizer import DateEngine, GeoEngine, OneHealthClassifier
 from biometaharmonizer import write, write_summary
 
 # Ingest: accepts a file path, a Python list, or a mix of both accession types
